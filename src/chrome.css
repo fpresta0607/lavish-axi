@@ -1909,3 +1909,32 @@ body.layout-gate-active iframe#artifact {
 .whiteboard-error[hidden] {
   display: none;
 }
+
+/* Code Goblins: this fork's review page wears the Code Goblins board's
+   colors. Only the chrome's tokens and its brand mark change; the artifact
+   is never styled. */
+:root {
+  --ink-900: #05080d;
+  --ink-800: #0b141b;
+  --ink-700: #0f1820;
+  --ink-600: #152230;
+  --steel-700: #1b2a38;
+  --steel-600: #22333f;
+  --steel-500: #34495a;
+  --steel-400: #8fa2b3;
+  --steel-300: #a3b3c2;
+  --steel-200: #c4d4df;
+  --steel-100: #dfe9ef;
+  --cream-100: #eef3f1;
+  --brass-500: #00e59b;
+  --brass-400: #6ee7b7;
+  --brass-ink: #04110c;
+  --rust-500: #ef8e83;
+}
+.brand-mark {
+  font-family: var(--font-sans);
+  font-style: normal;
+  font-weight: 800;
+  font-size: 19px;
+  color: var(--brass-400);
+}

@@ -4,13 +4,16 @@
 // Lavish name.
 export const DEFAULT_BRAND = "Lavish Editor";
 const MAX_BRAND_LENGTH = 48;
+// This fork runs inside Code Goblins, so its review page carries that name
+// unless LAVISH_AXI_BRAND names another.
+const FORK_BRAND = "Code Goblins";
 
 /**
  * @param {Record<string, string | undefined>} [env]
  * @returns {string}
  */
 export function brandName(env = process.env) {
-  const brand = (env.LAVISH_AXI_BRAND || "").replace(/\s+/g, " ").trim();
+  const brand = (env.LAVISH_AXI_BRAND || FORK_BRAND).replace(/\s+/g, " ").trim();
   return brand && brand.length <= MAX_BRAND_LENGTH ? brand : DEFAULT_BRAND;
 }
 

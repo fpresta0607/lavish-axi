@@ -6154,7 +6154,7 @@ test("/health and the landing page stay responsive after opening two back-to-bac
       new Promise((_, reject) => setTimeout(() => reject(new Error("/ timed out")), 1000)),
     ]);
     assert.equal(rootRes.status, 200);
-    assert.match(await rootRes.text(), /Lavish Editor/);
+    assert.match(await rootRes.text(), /Code Goblins is running/);
 
     assert.ok(Date.now() - start < 1000, "both probes should return well under one second");
   } finally {

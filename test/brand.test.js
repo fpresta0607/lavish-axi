@@ -3,9 +3,9 @@ import test from "node:test";
 
 import { brandName, brandTitleSuffix, DEFAULT_BRAND } from "../src/brand.js";
 
-test("brandName defaults to Lavish Editor and honors LAVISH_AXI_BRAND", () => {
-  assert.equal(brandName({}), DEFAULT_BRAND);
-  assert.equal(brandName({ LAVISH_AXI_BRAND: "" }), DEFAULT_BRAND);
+test("brandName defaults to Code Goblins in this fork and honors LAVISH_AXI_BRAND", () => {
+  assert.equal(brandName({}), "Code Goblins");
+  assert.equal(brandName({ LAVISH_AXI_BRAND: "" }), "Code Goblins");
   assert.equal(brandName({ LAVISH_AXI_BRAND: "   " }), DEFAULT_BRAND);
   assert.equal(brandName({ LAVISH_AXI_BRAND: "Acme Review" }), "Acme Review");
   assert.equal(brandName({ LAVISH_AXI_BRAND: "  Acme \n Review  " }), "Acme Review");
