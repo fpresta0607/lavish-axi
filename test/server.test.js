@@ -144,7 +144,10 @@ test("the chrome's top bar names Lavish Editor, or the brand that replaces it", 
     lavish,
     /<div class="brand"><span class="brand-mark">Lavish<\/span><span class="brand-support">Editor<\/span><\/div>/,
   );
-  assert.match(branded, /<div class="brand"><span class="brand-mark">Acme &lt;Review&gt;<\/span><\/div>/);
+  assert.match(
+    branded,
+    /<div class="brand brand-custom"><span class="brand-mark" title="Acme &lt;Review&gt;">Acme &lt;Review&gt;<\/span><\/div>/,
+  );
   assert.doesNotMatch(branded, /brand-support/);
 });
 

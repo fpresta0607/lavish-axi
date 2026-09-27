@@ -156,6 +156,15 @@ body.lavish {
   line-height: 1;
   color: var(--fg);
 }
+.brand-custom {
+  flex-shrink: 1;
+  min-width: 0;
+}
+.brand-custom .brand-mark {
+  min-width: 0;
+  overflow-x: clip;
+  text-overflow: ellipsis;
+}
 .brand-support {
   font-family: var(--font-sans);
   font-size: 10px;
