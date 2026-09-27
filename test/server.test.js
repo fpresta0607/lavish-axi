@@ -136,6 +136,18 @@ test("server delegates artifact SDK generation to a dedicated source module", as
   assert.match(source, /from "\.\/artifact-sdk\.js"/);
 });
 
+test("the chrome's top bar names Lavish Editor, or the brand that replaces it", () => {
+  const lavish = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
+  const branded = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" }, { brand: "Acme <Review>" });
+
+  assert.match(
+    lavish,
+    /<div class="brand"><span class="brand-mark">Lavish<\/span><span class="brand-support">Editor<\/span><\/div>/,
+  );
+  assert.match(branded, /<div class="brand"><span class="brand-mark">Acme &lt;Review&gt;<\/span><\/div>/);
+  assert.doesNotMatch(branded, /brand-support/);
+});
+
 test("server serves chrome browser behavior from a dedicated source file", async () => {
   const source = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
