@@ -1503,6 +1503,79 @@ body.lavish {
   font-size: 11px;
   line-height: 1.35;
 }
+/* Voice input. The microphone stays still while idle; listening swaps it for a recording dot and
+   bars that move only with the microphone's level. */
+.chat-voice {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-width: 30px;
+  height: 30px;
+  padding: 0 6px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-pill);
+  background: var(--bg-elevated);
+  color: var(--fg-dim);
+  cursor: pointer;
+}
+.chat-voice:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  color: var(--fg);
+}
+.chat-voice:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+.chat-voice[aria-pressed="true"] {
+  padding: 0 10px;
+  border-color: var(--accent);
+}
+.chat-voice[aria-pressed="true"] svg,
+.chat-voice:not([aria-pressed="true"]) .chat-voice-dot,
+.chat-voice:not([aria-pressed="true"]) .chat-voice-bars {
+  display: none;
+}
+.chat-voice-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--danger);
+}
+.chat-voice-bars {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 18px;
+}
+.chat-voice-bars span {
+  width: 3px;
+  height: 18px;
+  border-radius: 1px;
+  background: var(--accent);
+  transform: scaleY(0.2);
+  transition: transform 70ms linear;
+}
+.composer.is-dictating textarea {
+  border-color: var(--accent);
+}
+.chat-voice-note {
+  color: var(--fg-faint);
+  font-size: 11px;
+  line-height: 1.35;
+}
+.chat-voice-note:empty {
+  display: none;
+}
+.chat-voice-note.is-problem {
+  color: var(--danger);
+}
+@media (prefers-reduced-motion: reduce) {
+  .chat-voice-bars span {
+    transition: none;
+  }
+}
 .actions {
   display: flex;
   align-items: center;
