@@ -114,6 +114,9 @@ const chatAttachments = /** @type {HTMLDivElement} */ (document.getElementById("
 const chatAttachButton = /** @type {HTMLButtonElement} */ (document.getElementById("chatAttach"));
 const chatAttachInput = /** @type {HTMLInputElement} */ (document.getElementById("chatAttachInput"));
 const chatAttachmentNotice = /** @type {HTMLSpanElement} */ (document.getElementById("chatAttachmentNotice"));
+const chatVoiceButton = /** @type {HTMLButtonElement} */ (document.getElementById("chatVoice"));
+const chatVoiceBars = /** @type {HTMLSpanElement} */ (document.getElementById("chatVoiceBars"));
+const chatVoiceNote = /** @type {HTMLDivElement} */ (document.getElementById("chatVoiceNote"));
 const panel = /** @type {HTMLElement} */ (document.getElementById("panel"));
 const panelHead = /** @type {HTMLDivElement} */ (document.getElementById("panelHead"));
 const panelSummary = /** @type {HTMLSpanElement} */ (document.getElementById("panelSummary"));
@@ -648,6 +651,8 @@ function updateSendState() {
   annotationSwitch.disabled = ended || terminalReserved;
   chatInput.disabled = ended || terminalReserved;
   chatAttachButton.disabled = ended || terminalReserved;
+  if (chatInput.disabled) voiceDictation.dispose();
+  renderVoice();
   endButton.disabled = ended || terminalReserved;
   if (warningsQueueButton) updateWarningSelectionState();
 }
@@ -1652,6 +1657,329 @@ function createChatAttachmentsController() {
 }
 
 const chatAttachmentController = createChatAttachmentsController();
+
+// Voice input: the browser's own speech recognition dictates into the message box. Holding
+// Ctrl+Shift+Space listens until one of those keys is released, and the microphone button toggles
+// listening. What was heard lands at the caret for the reviewer to read and send; it is never sent
+// by itself. Nothing is installed and the chrome makes no request of its own.
+const VOICE_UNSUPPORTED_COPY = "Voice input needs Chrome or Edge";
+const VOICE_IDLE_HINT = "Hold Ctrl+Shift+Space or click to dictate";
+const VOICE_HELD_HINT = "Listening · release Ctrl+Shift+Space to type";
+const VOICE_CLICKED_HINT = "Listening · click the microphone to type";
+// A voice problem stays under the composer this long.
+const VOICE_NOTE_MS = 6000;
+// While listening, the waveform takes the microphone's level this often.
+const VOICE_SAMPLE_MS = 70;
+
+function speechRecognitionClass() {
+  const scope = /** @type {any} */ (window);
+  return scope.SpeechRecognition || scope.webkitSpeechRecognition || null;
+}
+
+// What a key event means for dictation: whether it starts or stops listening, and whether the page
+// must not see it. Releasing Ctrl or Shift first also stops, and that release still reaches the page.
+function dictationKey(event) {
+  if (event.code === "Space" && event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey) {
+    if (event.type === "keyup") return { action: "stop", swallow: true };
+    return { action: event.repeat ? null : "start", swallow: true };
+  }
+  if (event.type === "keyup" && (event.code === "Space" || event.key === "Control" || event.key === "Shift")) {
+    return { action: "stop", swallow: false };
+  }
+  return null;
+}
+
+// The phrases heard, as one line of plain words.
+function spokenText(phrases) {
+  return phrases.join(" ").replace(/\s+/g, " ").trim();
+}
+
+// Dictated text replaces the selection in the message box, a space apart from the words beside it,
+// and the caret lands right after it.
+function insertDictation(value, start, end, text) {
+  const before = value.slice(0, start);
+  const after = value.slice(end);
+  const inserted = before + (/\S$/.test(before) ? " " : "") + text;
+  return { value: inserted + (/^[\p{L}\p{N}]/u.test(after) ? " " : "") + after, caret: inserted.length };
+}
+
+// How loud a frame of microphone samples is, from 0 for silence to 1: the root mean square of the
+// time-domain bytes around their midpoint 128, scaled so ordinary speech fills a good part of the bars.
+function voiceLevel(samples) {
+  if (!samples.length) return 0;
+  let sum = 0;
+  for (const sample of samples) {
+    const offset = (sample - 128) / 128;
+    sum += offset * offset;
+  }
+  return Math.min(1, Math.sqrt(sum / samples.length) * 4);
+}
+
+// A waveform bar's height for a level: a fifth of full height in silence, so it stays visible, up to
+// full height at the loudest.
+function voiceBarScale(level) {
+  return (1 + 4 * level) / 5;
+}
+
+function dictationProblem(error) {
+  switch (error) {
+    case "aborted":
+      return "";
+    case "not-allowed":
+    case "service-not-allowed":
+      return "The microphone is blocked for this page. Allow it in the browser's site settings, then try again.";
+    case "audio-capture":
+      return "No microphone was found.";
+    case "network":
+      return "Speech recognition in this browser needs a network connection.";
+    case "no-speech":
+      return "Nothing was heard.";
+    default:
+      return "Voice input stopped: " + error + ".";
+  }
+}
+
+function microphoneProblem(error) {
+  const name = String(error?.name || "");
+  if (name === "NotAllowedError" || name === "SecurityError") return dictationProblem("not-allowed");
+  if (name === "NotFoundError" || name === "NotReadableError") return dictationProblem("audio-capture");
+  return "Voice input stopped: the microphone could not be opened.";
+}
+
+// One open microphone: its track, which the recognizer listens to, and how loud it is right now,
+// which the waveform shows. Nothing else reads, keeps, or sends its audio.
+async function openMicrophone() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const audio = new window.AudioContext();
+  const analyser = audio.createAnalyser();
+  analyser.fftSize = 512;
+  audio.createMediaStreamSource(stream).connect(analyser);
+  void audio.resume();
+  const samples = new Uint8Array(analyser.fftSize);
+  return {
+    track: stream.getAudioTracks()[0],
+    level() {
+      analyser.getByteTimeDomainData(samples);
+      return voiceLevel(samples);
+    },
+    close() {
+      for (const track of stream.getTracks()) track.stop();
+      void audio.close();
+    },
+  };
+}
+
+// One dictation at a time. With a microphone, the recognizer listens to the track it opens, so the
+// waveform and the words come from one capture. What was heard is reported once listening ends.
+function createDictation(events, recognition, lang, microphone) {
+  let recognizer = null;
+  let started = false;
+  let capture = null;
+  let phrases = [];
+
+  function release() {
+    capture?.close();
+    capture = null;
+  }
+
+  function begin(current, track) {
+    started = true;
+    if (!track) {
+      current.start();
+      return;
+    }
+    try {
+      current.start(track);
+    } catch (error) {
+      // A recognizer that cannot take a track opens its own microphone, so this one closes rather
+      // than capture twice, and shows no level.
+      if (error?.name !== "TypeError") throw error;
+      release();
+      current.start();
+    }
+  }
+
+  function start() {
+    if (recognizer) return;
+    const Recognition = recognition();
+    if (!Recognition) {
+      events.problem(VOICE_UNSUPPORTED_COPY + ".");
+      return;
+    }
+    const current = new Recognition();
+    current.continuous = true;
+    current.interimResults = false;
+    current.lang = lang;
+    phrases = [];
+    // Without interim results every result the browser sends is final.
+    current.onresult = (event) => {
+      for (let index = event.resultIndex; index < event.results.length; index++) {
+        phrases.push(event.results[index][0].transcript);
+      }
+    };
+    current.onerror = (event) => {
+      const note = dictationProblem(event.error);
+      if (note) events.problem(note);
+    };
+    current.onend = () => {
+      recognizer = null;
+      release();
+      events.listening(false);
+      const text = spokenText(phrases);
+      phrases = [];
+      if (text) events.heard(text);
+    };
+    recognizer = current;
+    started = false;
+    events.problem("");
+    events.listening(true);
+    if (!microphone) {
+      begin(current);
+      return;
+    }
+    microphone().then(
+      (opened) => {
+        // Stopped while the microphone opened: keep nothing open.
+        if (recognizer !== current) {
+          opened.close();
+          return;
+        }
+        capture = opened;
+        begin(current, opened.track);
+      },
+      (error) => {
+        if (recognizer !== current) return;
+        recognizer = null;
+        events.listening(false);
+        events.problem(microphoneProblem(error));
+      },
+    );
+  }
+
+  function stop() {
+    const current = recognizer;
+    if (!current) return;
+    if (started) {
+      current.stop();
+      return;
+    }
+    // Stopped before the microphone opened: nothing was heard.
+    recognizer = null;
+    events.listening(false);
+  }
+
+  // Stops listening and reports nothing heard, for a composer that can no longer take text.
+  function dispose() {
+    const current = recognizer;
+    if (!current) return;
+    recognizer = null;
+    phrases = [];
+    release();
+    if (started) {
+      current.onresult = null;
+      current.onerror = null;
+      current.onend = null;
+      current.abort();
+    }
+    events.listening(false);
+  }
+
+  return { start, stop, dispose, level: () => (capture ? capture.level() : 0) };
+}
+
+let voiceListening = false;
+// Whether Ctrl+Shift+Space started this dictation, so releasing it stops listening; a click-started
+// dictation runs until the next click.
+let voiceHeld = false;
+let voiceProblem = "";
+let voiceProblemTimer;
+let voiceFrame = 0;
+let voiceSampledAt = 0;
+const voiceBars = /** @type {HTMLElement[]} */ (Array.from(chatVoiceBars.children));
+// One recent level per bar, newest on the right.
+const voiceLevels = voiceBars.map(() => 0);
+const voiceDictation = createDictation(
+  {
+    heard: insertDictatedText,
+    listening(on) {
+      voiceListening = on;
+      if (!on) voiceHeld = false;
+      renderVoice();
+    },
+    problem: showVoiceProblem,
+  },
+  speechRecognitionClass,
+  navigator.language || "en-US",
+  navigator.mediaDevices?.getUserMedia ? openMicrophone : null,
+);
+
+function insertDictatedText(text) {
+  const next = insertDictation(chatInput.value, chatInput.selectionStart, chatInput.selectionEnd, text);
+  chatInput.value = next.value;
+  chatInput.focus();
+  chatInput.setSelectionRange(next.caret, next.caret);
+  hideSendHint();
+}
+
+function showVoiceProblem(note) {
+  voiceProblem = note;
+  clearTimeout(voiceProblemTimer);
+  if (note) {
+    voiceProblemTimer = setTimeout(() => {
+      voiceProblem = "";
+      renderVoice();
+    }, VOICE_NOTE_MS);
+  }
+  renderVoice();
+}
+
+function drawVoiceLevel(now) {
+  if (now - voiceSampledAt >= VOICE_SAMPLE_MS) {
+    voiceSampledAt = now;
+    voiceLevels.shift();
+    voiceLevels.push(voiceDictation.level());
+    voiceBars.forEach((bar, index) => {
+      bar.style.transform = "scaleY(" + voiceBarScale(voiceLevels[index]) + ")";
+    });
+  }
+  voiceFrame = window.requestAnimationFrame(drawVoiceLevel);
+}
+
+// The button, the composer, and the note under it are derived from the dictation's state on every
+// render; the waveform runs only while listening.
+function renderVoice() {
+  const supported = Boolean(speechRecognitionClass());
+  const hint = voiceHeld ? VOICE_HELD_HINT : VOICE_CLICKED_HINT;
+  chatVoiceButton.disabled = !supported || chatInput.disabled;
+  chatVoiceButton.title = supported ? (voiceListening ? hint : VOICE_IDLE_HINT) : VOICE_UNSUPPORTED_COPY;
+  chatVoiceButton.setAttribute("aria-pressed", String(voiceListening));
+  chatComposer.classList.toggle("is-dictating", voiceListening);
+  chatVoiceNote.textContent = voiceProblem || (voiceListening ? hint : "");
+  chatVoiceNote.classList.toggle("is-problem", Boolean(voiceProblem));
+  if (voiceListening && !voiceFrame) {
+    voiceLevels.fill(0);
+    voiceFrame = window.requestAnimationFrame(drawVoiceLevel);
+  }
+  if (!voiceListening && voiceFrame) {
+    window.cancelAnimationFrame(voiceFrame);
+    voiceFrame = 0;
+  }
+}
+
+function startVoice(held) {
+  if (chatInput.disabled) return;
+  voiceHeld = held;
+  voiceDictation.start();
+  renderVoice();
+}
+
+function handleVoiceKey(event) {
+  const meaning = dictationKey(event);
+  if (!meaning) return;
+  if (meaning.swallow) event.preventDefault();
+  if (meaning.action === "start") startVoice(true);
+  if (meaning.action === "stop" && voiceHeld) voiceDictation.stop();
+}
 
 function sendQueued(endAfter) {
   if (ended) return;
@@ -4206,6 +4534,19 @@ chatInput.addEventListener("keydown", (event) => {
   }
 });
 chatInput.addEventListener("input", () => hideSendHint());
+if (!speechRecognitionClass()) chatVoiceButton.setAttribute("aria-label", VOICE_UNSUPPORTED_COPY);
+chatVoiceButton.onclick = () => (voiceListening ? voiceDictation.stop() : startVoice(false));
+// Capture phase, like the mode hotkey, so the voice shortcut works wherever focus is in the chrome
+// and the held space never reaches the message box or a focused button.
+document.addEventListener("keydown", handleVoiceKey, true);
+document.addEventListener("keyup", handleVoiceKey, true);
+// The page may never see a held shortcut's release once it loses focus, so that stops listening.
+window.addEventListener("blur", () => {
+  if (voiceHeld) voiceDictation.stop();
+});
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) voiceDictation.stop();
+});
 copyPathButton.onclick = copyFilePath;
 reloadArtifactButton.onclick = reloadArtifact;
 copySnapshotButton.onclick = copyDomSnapshot;
