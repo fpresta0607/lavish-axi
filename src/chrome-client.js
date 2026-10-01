@@ -724,6 +724,7 @@ function replaceExpiredThumbnail(event) {
 chatLog.addEventListener("error", replaceExpiredThumbnail, true);
 
 const DEFAULT_SEND_HINT = "Write a message or annotate an element first.";
+const APPROVED_AS_SHOWN = "Approved as shown.";
 
 function showSendHint(message = DEFAULT_SEND_HINT, holdMs = 2600, focusInput = true) {
   sendHint.textContent = message;
@@ -2012,6 +2013,14 @@ function sendQueued(endAfter) {
       render();
       chatInput.value = "";
       chatAttachmentController.reset();
+    } else if (endAfter && !queued.length && feedbackPreparations.size === 0) {
+      // Send & End with nothing written approves the page as shown, and is delivered as that,
+      // never as nothing (the Overlord, 2026-10-01).
+      const prompt = { uid: "", prompt: APPROVED_AS_SHOWN, selector: "", tag: "message", text: "Freeform message" };
+      assignPromptIdentity(prompt, false);
+      queued.push(prompt);
+      persistQueuedPrompts();
+      render();
     }
   }
   const shouldEnd = Boolean(endAfter && !chipsBlocked);
@@ -2153,6 +2162,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
         });
         throw error;
       }
+      closeReviewTab();
     }
     settleAcknowledgementGuidance(submission, preserveFailureState);
     return;
@@ -2259,8 +2269,16 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
   settleAcknowledgementGuidance(submission, preserveFailureState);
   if (shouldEndSession) {
     markSessionEnded();
+    closeReviewTab();
     return;
   }
+}
+
+// A Send & End from this tab ends the review here: once it lands, the tab closes itself and the
+// browser shows the tab that opened it, such as the board's Command Center. A browser that will
+// not let a script close this tab leaves it showing the ended review.
+function closeReviewTab() {
+  window.close();
 }
 
 function submissionResolvesSendFailure(submission) {

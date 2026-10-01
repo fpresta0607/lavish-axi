@@ -106,6 +106,7 @@ async function createChromeHarness({
   let activeElement = null;
   let nextTimerId = 1;
   let reloadCount = 0;
+  let closeCount = 0;
   let artifactRevision = 0;
 
   function fakeSetTimeout(fn, ms) {
@@ -438,6 +439,9 @@ async function createChromeHarness({
     window: {
       clearTimeout: fakeClearTimeout,
       setTimeout: fakeSetTimeout,
+      close() {
+        closeCount += 1;
+      },
       addEventListener(type, handler) {
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(handler);
@@ -588,6 +592,9 @@ async function createChromeHarness({
     },
     queued() {
       return JSON.parse(storage.get("lavish-axi:queued:abc") || "[]");
+    },
+    closeCount() {
+      return closeCount;
     },
     reloadCount() {
       return reloadCount;
@@ -1250,6 +1257,44 @@ test("Send & End falls back without a snapshot and preserves the atomic end inte
   assert.equal(posts[0].body.domSnapshot, "");
   assert.equal(posts[0].body.endSession, true);
   assert.equal(chrome.element("sendAndEnd").disabled, true);
+});
+
+// The Overlord, 2026-10-01: Send & End with nothing written is an approval of the page as shown,
+// delivered as that, never as nothing; and once it lands, the review tab closes itself so the tab
+// that opened it shows again.
+test("an empty Send & End approves the page as shown and closes the tab once it lands", async () => {
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init = {}) => {
+      posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.element("sendAndEnd").click();
+  chrome.runTimers(5000);
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, "/api/abc/prompts");
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => [prompt.tag, prompt.prompt]),
+    [["message", "Approved as shown."]],
+  );
+  assert.equal(chrome.element("sendHint").hidden, true);
+  assert.equal(chrome.closeCount(), 1);
+});
+
+test("a review ended by its agent leaves the tab open", async () => {
+  const chrome = await createChromeHarness();
+
+  chrome.eventSource().listeners.get("ended")({ data: JSON.stringify({ ended_by: "agent" }) });
+  await flushPromises();
+
+  assert.equal(chrome.element("chatInput").disabled, true);
+  assert.equal(chrome.closeCount(), 0);
 });
 
 test("Send & End reserves its terminal batch and only retries that batch after failure", async () => {
@@ -5690,7 +5735,9 @@ test("chrome send and end carries the end intent with queued prompts", async () 
   assert.equal(chrome.element("chatInput").disabled, true);
 });
 
-test("chrome send and end with an empty composer nudges instead of ending", async () => {
+// Send & End with nothing written approves the page instead (see "an empty Send & End approves
+// the page as shown"); Send to Agent with nothing written still nudges.
+test("chrome send with an empty composer nudges instead of sending", async () => {
   const posts = [];
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init = {}) => {
@@ -5700,7 +5747,7 @@ test("chrome send and end with an empty composer nudges instead of ending", asyn
   });
   chrome.element("sendHint").hidden = true;
 
-  chrome.element("sendAndEnd").onclick();
+  chrome.element("send").onclick();
   await flushPromises();
 
   assert.equal(posts.length, 0);
