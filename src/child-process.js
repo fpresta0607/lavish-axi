@@ -5,7 +5,11 @@ import { promisify } from "node:util";
 const crossSpawn = createRequire(import.meta.url)("cross-spawn");
 const nodeExecFileAsync = promisify(nodeExecFile);
 
-// Every process Lavish starts goes through this module.
+// Every process Lavish starts goes through this module, so a new call site cannot forget to hide
+// its window. On Windows a console program started by a process with no console of its own, as
+// the detached server is, gets a new console, and Windows shows that console as a window unless
+// the start asks to hide it, which every function here does with windowsHide.
+
 /**
  * @param {string} command
  * @param {readonly string[]} args
@@ -13,7 +17,7 @@ const nodeExecFileAsync = promisify(nodeExecFile);
  * @returns {import("node:child_process").ChildProcess}
  */
 export function spawn(command, args, options = {}) {
-  return nodeSpawn(command, args, options);
+  return nodeSpawn(command, args, { ...options, windowsHide: true });
 }
 
 /**
@@ -23,7 +27,7 @@ export function spawn(command, args, options = {}) {
  * @returns {import("node:child_process").SpawnSyncReturns<string>}
  */
 export function spawnSync(command, args, options) {
-  return nodeSpawnSync(command, args, options);
+  return nodeSpawnSync(command, args, { ...options, windowsHide: true });
 }
 
 /**
@@ -33,7 +37,7 @@ export function spawnSync(command, args, options) {
  * @returns {Promise<{ stdout: string, stderr: string }>}
  */
 export function execFileAsync(command, args, options) {
-  return nodeExecFileAsync(command, args, options);
+  return nodeExecFileAsync(command, args, { ...options, windowsHide: true });
 }
 
 /**
@@ -45,5 +49,5 @@ export function execFileAsync(command, args, options) {
  * @returns {import("node:child_process").SpawnSyncReturns<string>}
  */
 export function crossSpawnSync(command, args, options) {
-  return crossSpawn.sync(command, args, options);
+  return crossSpawn.sync(command, args, { ...options, windowsHide: true });
 }

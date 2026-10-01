@@ -1521,7 +1521,7 @@ export function createCopilotCliAmbientContextScript(command = "lavish-axi") {
   return [
     'const { spawnSync } = require("node:child_process");',
     `const command = ${JSON.stringify(command)};`,
-    'const result = spawnSync(command, [], { encoding: "utf8", shell: true });',
+    'const result = spawnSync(command, [], { encoding: "utf8", shell: true, windowsHide: true });',
     'const detail = result.error ? result.error.message : (result.stderr || result.stdout || "exit " + (result.status ?? "unknown"));',
     "const text = String(result.status === 0 ? result.stdout : detail).trim();",
     'if (!text) { console.log("{}"); process.exit(0); }',
