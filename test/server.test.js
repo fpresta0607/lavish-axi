@@ -148,6 +148,21 @@ test("the chrome's top bar names Lavish Editor, or the brand that replaces it", 
   assert.doesNotMatch(branded, /brand-support/);
 });
 
+test("everything the chrome says about itself uses the brand's name", () => {
+  const lavish = bootChromeFailsafe();
+  const branded = bootChromeFailsafe({ brand: "Scrawl", title: "Plan · Scrawl" });
+  assert.match(lavish.html, /"product":"Lavish"/);
+  assert.match(branded.html, /"product":"Scrawl"/);
+  assert.doesNotMatch(branded.html, /Lavish/);
+
+  lavish.runTimers();
+  branded.runTimers();
+
+  assert.equal(lavish.element("layoutGateTitle").textContent, "Lavish could not finish loading.");
+  assert.equal(branded.element("layoutGateTitle").textContent, "Scrawl could not finish loading.");
+  assert.match(branded.element("layoutGateCopy").textContent, /^The Scrawl page script did not load\./);
+});
+
 test("server serves chrome browser behavior from a dedicated source file", async () => {
   const source = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
@@ -1573,7 +1588,7 @@ test("Tailscale mode binds concrete listeners, serves the MagicDNS link, and tea
       headers: { accept: "text/html" },
     });
     assert.equal(landing.status, 200);
-    assert.match(landing.body, /Lavish Editor is running/);
+    assert.match(landing.body, /Scrawl is running/);
 
     const shutdown = await rawRequest(server.port, "/shutdown", {
       method: "POST",
@@ -6154,7 +6169,7 @@ test("/health and the landing page stay responsive after opening two back-to-bac
       new Promise((_, reject) => setTimeout(() => reject(new Error("/ timed out")), 1000)),
     ]);
     assert.equal(rootRes.status, 200);
-    assert.match(await rootRes.text(), /Code Goblins is running/);
+    assert.match(await rootRes.text(), /Scrawl is running/);
 
     assert.ok(Date.now() - start < 1000, "both probes should return well under one second");
   } finally {

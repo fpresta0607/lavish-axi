@@ -17,7 +17,7 @@ const servedChromeIds = new Set(
   ),
 );
 
-/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
+/** @typedef {{ key: string, file: string, product?: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
 /** @type {HarnessSessionData} */
 const defaultSessionData = {
   key: "abc",
@@ -4657,6 +4657,22 @@ test("the outdated banner says what actually happened to the server", async () =
     assert.match(copy, /no longer running/);
     assert.doesNotMatch(copy, /updated/);
     assert.doesNotMatch(copy, /stopped/);
+  }
+});
+
+// A team that renames the review page sees its own name in every sentence the page says about
+// its server, never Lavish's.
+test("the chrome speaks of its server by the product name the server gave it", async () => {
+  const chrome = await createChromeHarness({
+    artifactSrc: "/artifact/abc/index.html",
+    sessionData: { ...defaultSessionData, product: "Scrawl" },
+  });
+
+  for (const reason of ["upgrade", "stop", "local-build", undefined]) {
+    sendChromeOutdated(chrome, reason);
+    const copy = chrome.element("outdatedText").textContent;
+    assert.match(copy, /Scrawl/);
+    assert.doesNotMatch(copy, /Lavish/);
   }
 });
 
