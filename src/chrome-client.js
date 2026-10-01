@@ -2,6 +2,8 @@
 
 const sessionDataElement = document.getElementById("lavish-session");
 const sessionData = JSON.parse(sessionDataElement?.textContent || "{}");
+// What the page calls itself and its server in everything it says: the brand's short name.
+const PRODUCT = typeof sessionData.product === "string" && sessionData.product ? sessionData.product : "Lavish";
 const key = String(sessionData.key || "");
 const filePath = String(sessionData.file || "");
 const queueStorageKey = "lavish-axi:queued:" + key;
@@ -299,15 +301,11 @@ const TERMINAL_PREPARATION_TIMEOUT_MS = 5000;
 // If the artifact frame navigated away from the injected SDK (or otherwise stopped
 // answering), deliver those words without a snapshot instead of waiting forever.
 const SNAPSHOT_REQUEST_TIMEOUT_MS = 5000;
-const SEND_STALLED_COPY =
-  "Still trying to send. Your feedback is saved in this tab. Keep this tab open while Lavish catches up, and check that the server is running.";
-const SEND_FAILED_COPY =
-  "Could not send. Your feedback is still queued in this tab. Check that Lavish is running, then click Send to Agent to retry.";
-const TERMINAL_SEND_FAILED_COPY =
-  "Could not send. Your terminal feedback is still queued in this tab. Check that Lavish is running, then click Send & End to retry the same batch.";
-const HEALTH_NO_ANSWER_TITLE = "Lavish did not answer.";
-const HEALTH_NO_ANSWER_COPY =
-  "Lavish did not answer the check, so this page cannot tell whether it is running. Try again in a moment.";
+const SEND_STALLED_COPY = `Still trying to send. Your feedback is saved in this tab. Keep this tab open while ${PRODUCT} catches up, and check that the server is running.`;
+const SEND_FAILED_COPY = `Could not send. Your feedback is still queued in this tab. Check that ${PRODUCT} is running, then click Send to Agent to retry.`;
+const TERMINAL_SEND_FAILED_COPY = `Could not send. Your terminal feedback is still queued in this tab. Check that ${PRODUCT} is running, then click Send & End to retry the same batch.`;
+const HEALTH_NO_ANSWER_TITLE = `${PRODUCT} did not answer.`;
+const HEALTH_NO_ANSWER_COPY = `${PRODUCT} did not answer the check, so this page cannot tell whether it is running. Try again in a moment.`;
 let artifactLoadToken = "";
 let artifactLoadRevision = Number(sessionData.initialArtifactRevision) || 0;
 let artifactLoadRequestSequence = Number(sessionData.initialArtifactLoadSequence) || 0;
@@ -1031,12 +1029,12 @@ function setHandoffSuperseded(visible) {
 // after a deliberate stop is being told something false. An unnamed reason (SIGTERM, or any
 // caller that names none) claims neither.
 function chromeOutdatedCopy(reason) {
-  if (reason === "upgrade") return "Lavish was updated. This page is running the previous version.";
+  if (reason === "upgrade") return `${PRODUCT} was updated. This page is running the previous version.`;
   if (reason === "local-build") {
-    return "Lavish was restarted to pick up a local build. This page is running the copy the previous server sent.";
+    return `${PRODUCT} was restarted to pick up a local build. This page is running the copy the previous server sent.`;
   }
-  if (reason === "stop") return "Lavish was stopped. Reload after you start it again.";
-  return "The Lavish server this page was connected to is no longer running. Reloading will work once it is running again.";
+  if (reason === "stop") return `${PRODUCT} was stopped. Reload after you start it again.`;
+  return `The ${PRODUCT} server this page was connected to is no longer running. Reloading will work once it is running again.`;
 }
 
 // Say so where the user can dismiss it, and never reload on their behalf - a forced reload
@@ -1114,7 +1112,7 @@ function renderRetiredDraft(text, stored = true) {
   const el = document.createElement("div");
   el.className = "bubble note";
   el.innerHTML =
-    "<small>Unsent annotation</small><div>The element this note was attached to is no longer in the artifact, so Lavish could not reopen the card. Your text is kept here:</div>" +
+    `<small>Unsent annotation</small><div>The element this note was attached to is no longer in the artifact, so ${escapeHtml(PRODUCT)} could not reopen the card. Your text is kept here:</div>` +
     '<div class="note-draft">' +
     escapeHtml(text) +
     "</div>" +
@@ -2329,7 +2327,7 @@ function setLayoutGateCard(state) {
   }
 
   layoutGateTitle.innerHTML = "Checking layout.<br>One moment.";
-  layoutGateCopy.textContent = "Lavish is waiting for fonts and final geometry before revealing this artifact.";
+  layoutGateCopy.textContent = `${PRODUCT} is waiting for fonts and final geometry before revealing this artifact.`;
 }
 
 function setLayoutGateActive(active) {
@@ -3262,8 +3260,7 @@ function renderShareResult({ url = "", siteId = "", password = "", updateKey = "
 
 // Wording shared with the CLI's next_step for the same condition, so the two surfaces cannot
 // drift into describing the same dead end differently.
-const NO_SITE_ID_WARNING =
-  " The host did not return a site id Lavish can use, and --site is half the republish credential, so this page can NEVER be republished or unpublished even though its update key is in hand.";
+const NO_SITE_ID_WARNING = ` The host did not return a site id ${PRODUCT} can use, and --site is half the republish credential, so this page can NEVER be republished or unpublished even though its update key is in hand.`;
 
 // What the page is gated behind, said only in terms of what the panel can show. A password the
 // user typed is never echoed by the server, so pointing at a row that was not rendered is the
@@ -3291,7 +3288,7 @@ function syncSharePasswordInput() {
   const generating = shareGenerateInput.checked;
   sharePasswordInput.disabled = generating;
   sharePasswordInput.placeholder = generating
-    ? "Lavish will generate one when you publish"
+    ? `${PRODUCT} will generate one when you publish`
     : "Leave blank for a public page";
   if (generating) sharePasswordInput.value = "";
 }
@@ -3318,7 +3315,7 @@ function reportIndeterminatePublish(data) {
     "ht-ml.app may or may not have published this page, so treat the outcome as unknown. If it did publish, the page is live " +
     visibility +
     ", and its URL and update key were lost with the failed response, so it can never be republished or unpublished. Publishing again creates a SECOND page rather than replacing it." +
-    (rendered.password ? " Copy the password now - it is shown once here and Lavish does not store it." : "");
+    (rendered.password ? ` Copy the password now - it is shown once here and ${PRODUCT} does not store it.` : "");
 }
 
 // An incomplete 200 is NOT an unknown outcome: the host answered, so the page landed. Whatever
@@ -3342,11 +3339,11 @@ function reportIncompletePublish(data) {
   shareStatus.textContent =
     "ht-ml.app accepted this publish, so the page IS live and " +
     visibility +
-    ", but its response was malformed and Lavish could not read the whole result back. " +
-    (rendered.url ? "Its address is below. " : "The response carried no URL, so Lavish cannot show the address. ") +
+    `, but its response was malformed and ${PRODUCT} could not read the whole result back. ` +
+    (rendered.url ? "Its address is below. " : `The response carried no URL, so ${PRODUCT} cannot show the address. `) +
     updateKeyNote +
     "Publishing again creates a SECOND page rather than replacing it." +
-    (rendered.password ? " Copy the password now - it is shown once here and Lavish does not store it." : "");
+    (rendered.password ? ` Copy the password now - it is shown once here and ${PRODUCT} does not store it.` : "");
 }
 
 async function publishShare(event) {
@@ -3400,7 +3397,7 @@ async function publishShare(event) {
             : "Published. Anyone with the link can view this page.";
     if (rendered.updateKey && !rendered.siteId) shareStatus.textContent += NO_SITE_ID_WARNING;
     if (rendered.password) {
-      shareStatus.textContent += " Copy the password now - it is shown once here and Lavish does not store it.";
+      shareStatus.textContent += ` Copy the password now - it is shown once here and ${PRODUCT} does not store it.`;
     }
     shareUrlInput.focus();
     shareUrlInput.select();
@@ -3486,12 +3483,12 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
     // already shows an artifact keeps showing it rather than losing a usable review.
     if (!artifactLoadToken) {
       setLayoutGateFailure(
-        "Lavish could not load this artifact.",
-        "The Lavish server did not answer this review's load request. It usually restarted while this page was opening. Check and reload to reconnect.",
+        `${PRODUCT} could not load this artifact.`,
+        `The ${PRODUCT} server did not answer this review's load request. It usually restarted while this page was opening. Check and reload to reconnect.`,
         "Check and reload",
         checkServerThenReload(
-          "Lavish could not load this artifact.",
-          "Lavish is still not answering. Start it again with your agent, then use Check and reload.",
+          `${PRODUCT} could not load this artifact.`,
+          `${PRODUCT} is still not answering. Start it again with your agent, then use Check and reload.`,
         ),
       );
     }
@@ -3538,7 +3535,7 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
           if (!artifactLoadToken) {
             setLayoutGateFailure(
               "This review is already open in another tab.",
-              "Lavish loads an artifact in one tab at a time. Take over here to move the review into this tab, or switch back to the tab that already has it.",
+              `${PRODUCT} loads an artifact in one tab at a time. Take over here to move the review into this tab, or switch back to the tab that already has it.`,
               "Take over here",
             );
           }
@@ -4173,12 +4170,12 @@ async function reloadChromeAfterServerRestart(reason = "") {
   if (!healthy) {
     chromeRestartReloadPromise = null;
     setLayoutGateFailure(
-      "Lavish is not running.",
-      "The Lavish server restarted and did not come back. Start it again with your agent, then check and reload this page.",
+      `${PRODUCT} is not running.`,
+      `The ${PRODUCT} server restarted and did not come back. Start it again with your agent, then check and reload this page.`,
       "Check and reload",
       checkServerThenReload(
-        "Lavish is not running.",
-        "Lavish is still not running. Start it again with your agent, then use Check and reload.",
+        `${PRODUCT} is not running.`,
+        `${PRODUCT} is still not running. Start it again with your agent, then use Check and reload.`,
       ),
       { sticky: true },
     );
@@ -4226,7 +4223,7 @@ async function reloadChromeForOutdatedBanner() {
         outdatedText.textContent =
           outcome === "no-answer"
             ? HEALTH_NO_ANSWER_COPY
-            : "Lavish is still not running. Start it again, then use Check and reload.";
+            : `${PRODUCT} is still not running. Start it again, then use Check and reload.`;
       }
     }
   }

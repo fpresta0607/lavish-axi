@@ -61,6 +61,15 @@ function createElement(tag) {
       element.children.push(child);
       return child;
     },
+    get firstChild() {
+      return element.children[0] ?? null;
+    },
+    insertBefore(child, before) {
+      const index = before ? element.children.indexOf(before) : -1;
+      child.parentElement = element;
+      element.children.splice(index < 0 ? element.children.length : index, 0, child);
+      return child;
+    },
     remove() {
       const index = element.parentElement?.children.indexOf(element) ?? -1;
       if (index >= 0) element.parentElement.children.splice(index, 1);
@@ -104,7 +113,12 @@ function cell(tag, text) {
   return element;
 }
 
-function bootSdk({ runAnimationFrames = false, revisionsScript = null, revisionMarkElements = [] } = {}) {
+function bootSdk({
+  runAnimationFrames = false,
+  revisionsScript = null,
+  revisionMarkElements = [],
+  pageHeadTags = [],
+} = {}) {
   const posted = [];
   const documentListeners = [];
   // Deferred work the SDK schedules, run only when a test asks for it: the draft-anchor settle
@@ -118,6 +132,7 @@ function bootSdk({ runAnimationFrames = false, revisionsScript = null, revisionM
   let documentQuery = () => null;
   const documentElement = createElement("html");
   const head = createElement("head");
+  for (const tag of pageHeadTags) head.appendChild(createElement(tag));
   const body = createElement("body");
   appendTo(documentElement, head);
   appendTo(documentElement, body);
@@ -183,6 +198,7 @@ function bootSdk({ runAnimationFrames = false, revisionsScript = null, revisionM
 
   return {
     posted,
+    head,
     body,
     api: sandbox.window.lavish,
     click(target) {
@@ -269,6 +285,17 @@ test("a requested layout diagnostic publishes even when the result is unchanged"
   assert.equal(diagnostics.length, 2);
   assert.equal(diagnostics[1].artifact_pass_sequence, diagnostics[0].artifact_pass_sequence + 1);
   assert.deepEqual(diagnostics[1].findings, diagnostics[0].findings);
+});
+
+// The page frame's scrollbars wear the dark theme through a rule with no specificity that comes
+// before the page's own styles, so a page that styles its scrollbars keeps them.
+test("the served SDK puts its scrollbar style ahead of the page's own styles", () => {
+  const sdk = bootSdk({ pageHeadTags: ["style"] });
+
+  const [first, second] = sdk.head.children;
+  assert.equal(first.id, "lavish-scrollbar-style");
+  assert.match(first.textContent, /scrollbar-color/);
+  assert.equal(second.tagName, "STYLE");
 });
 
 test("the served SDK echoes the snapshot request id", () => {
