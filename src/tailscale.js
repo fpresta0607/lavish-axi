@@ -1,8 +1,6 @@
-import { execFile } from "node:child_process";
 import { isIP } from "node:net";
-import { promisify } from "node:util";
 
-const execFileAsync = promisify(execFile);
+import { execFileAsync } from "./child-process.js";
 
 export function tailscaleCommandCandidates(platform = process.platform, env = process.env) {
   const candidates = ["tailscale"];

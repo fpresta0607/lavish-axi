@@ -1,4 +1,3 @@
-import { spawn, spawnSync } from "node:child_process";
 import {
   closeSync,
   createReadStream,
@@ -18,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { AxiError, installSessionStartHooks, RESERVED_COMMANDS, runAxiCli } from "axi-sdk-js";
 
+import { spawn, spawnSync } from "./child-process.js";
 import { createDesignOutput, DESIGN_PRIORITY_RULE, DESIGN_SYSTEM_HINT } from "./design-reference.js";
 import {
   buildSelfContainedHtml,
@@ -1521,7 +1521,7 @@ export function createCopilotCliAmbientContextScript(command = "lavish-axi") {
   return [
     'const { spawnSync } = require("node:child_process");',
     `const command = ${JSON.stringify(command)};`,
-    'const result = spawnSync(command, [], { encoding: "utf8", shell: true });',
+    'const result = spawnSync(command, [], { encoding: "utf8", shell: true, windowsHide: true });',
     'const detail = result.error ? result.error.message : (result.stderr || result.stdout || "exit " + (result.status ?? "unknown"));',
     "const text = String(result.status === 0 ? result.stdout : detail).trim();",
     'if (!text) { console.log("{}"); process.exit(0); }',
