@@ -126,6 +126,29 @@ body {
 }
 body.lavish {
   color-scheme: dark;
+  /* Every scrollbar in the editor wears its dark theme, never the platform's white (the Overlord,
+     2026-10-01); scrollbar-color is inherited, and the ::-webkit-scrollbar rules serve engines
+     that do not take it. */
+  scrollbar-color: var(--steel-500) var(--ink-800);
+}
+body.lavish ::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+  background: var(--ink-800);
+}
+body.lavish ::-webkit-scrollbar-track {
+  background: var(--ink-800);
+}
+body.lavish ::-webkit-scrollbar-thumb {
+  background: var(--steel-500);
+  border: 2px solid var(--ink-800);
+  border-radius: 999px;
+}
+body.lavish ::-webkit-scrollbar-thumb:hover {
+  background: var(--steel-400);
+}
+body.lavish ::-webkit-scrollbar-corner {
+  background: var(--ink-800);
 }
 :focus-visible {
   outline: var(--annotate-outline);
@@ -1985,7 +2008,8 @@ body.layout-gate-active iframe#artifact {
 
 /* Code Goblins: this fork's review page wears the Code Goblins board's
    colors. Only the chrome's tokens and its brand mark change; the artifact
-   is never styled. */
+   is never styled, except that the SDK gives its scrollbars these colors
+   (--steel-500 on --ink-800). */
 :root {
   --ink-900: #05080d;
   --ink-800: #0b141b;
