@@ -1,4 +1,3 @@
-import { spawn, spawnSync } from "node:child_process";
 import {
   closeSync,
   createReadStream,
@@ -18,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 import { AxiError, installSessionStartHooks, RESERVED_COMMANDS, runAxiCli } from "axi-sdk-js";
 
+import { spawn, spawnSync } from "./child-process.js";
 import { createDesignOutput, DESIGN_PRIORITY_RULE, DESIGN_SYSTEM_HINT } from "./design-reference.js";
 import {
   buildSelfContainedHtml,
