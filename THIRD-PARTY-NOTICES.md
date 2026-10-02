@@ -57,6 +57,20 @@ The Xiaolai family (CJK glyphs) is intentionally not vendored; Excalidraw falls 
 | `daisyui.css`, `daisyui-themes.css` (daisyUI)     | MIT     |
 | `tailwindcss-browser.js` (`@tailwindcss/browser`) | MIT     |
 
+## Copied into `dist/fonts/` and `dist/assets/` (the Code Goblins board's look)
+
+These files are copied unchanged from the Code Goblins board (`fpresta0607/code-goblins`, `frontend/public/assets`), which self-hosts them; `test/board-tokens.test.js` checks the fonts against the board's own files.
+
+| File                   | License                   | Copyright                                             |
+| ---------------------- | ------------------------- | ----------------------------------------------------- |
+| `pixelify-sans.woff2`  | SIL Open Font License 1.1 | Copyright 2021 The Pixelify Sans Project Authors      |
+| `nunito.woff2`         | SIL Open Font License 1.1 | Copyright 2014 The Nunito Project Authors             |
+| `jetbrains-mono.woff2` | SIL Open Font License 1.1 | Copyright 2020 The JetBrains Mono Project Authors     |
+| `goblin-app.png`       | Code Goblins project art  | Generated for the Code Goblins board, scaled to 128px |
+
+Each font's full license text ships beside it (`pixelify-sans-OFL.txt`, `nunito-OFL.txt`, `jetbrains-mono-OFL.txt`).
+The fonts are unmodified latin subsets.
+
 ## Pre-publication audit note
 
 Font license attributions above were compiled from each family's upstream project.

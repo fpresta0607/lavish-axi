@@ -189,6 +189,40 @@ The build also inlines `package.json`'s version as `process.env.LAVISH_AXI_BUILD
 Users opt out with `LAVISH_AXI_TELEMETRY=0`.
 The client is best-effort and must never affect CLI behavior - all errors are swallowed.
 
+<a id="board-look"></a>
+
+### Board look (Code Goblins)
+
+In this fork the review page is called Scrawl and wears the Code Goblins board's look by value.
+
+- **Two copies, one test.**
+  `src/board-tokens.css` is the board's token block: its three font faces, its `:root` rule, and every later rule that declares only custom properties (the goblin palette the dialogue boxes share).
+  `src/board-components.css` holds rules copied from the board's stylesheet word for word.
+  `test/board-tokens.test.js` reads the board's current `frontend/src/styles.css` from the code-goblins checkout beside this repository's main checkout (or `CODE_GOBLINS_DIR`), at `origin/main` as last fetched, and fails while the token file differs or any copied line is no longer in the board.
+  The failure mode it closes: a hand-edited value, or a second palette growing beside the first, makes Scrawl drift from the board with nothing to notice it.
+  Never edit either file by hand; `node scripts/sync-board-tokens.js` copies the token block and the fonts again, and a changed copied rule is replaced by the board's current one.
+  Both files are in `.prettierignore`, because a reformatted copy is a different copy.
+- **One stylesheet response.**
+  `/chrome.css` is the token block, the copied rules, then `src/chrome.css`, in that order.
+  `src/chrome.css` only lays those out for a review page; a colour written out there is one the board's stylesheet writes out for the same kind of element.
+- **Fonts and the goblin are local.**
+  `/assets/fonts/<name>` serves exactly the board's three `woff2` files, at the address the board's own font faces name, with `Access-Control-Allow-Origin: *` because the artifact frame's opaque origin makes font fetches CORS-gated; nothing else under `/assets/fonts` is served.
+  No font service and no bundler step is involved; `scripts/build.js` copies the files into `dist`.
+- **The SDK takes the look from the server.**
+  `createSdkJs` hands the SDK `options.board`: the shadow-root stylesheet (the tokens on `:host`, plus the copied rules whose selectors start with a prefix in `BOARD_SDK_RULE_PREFIXES`), the font faces, the accent, and the scrollbar colours.
+  A shadow root cannot declare a font face, so the SDK puts the three in the page itself, and only once Scrawl draws something there.
+  The SDK holds no colour of the old palette; a test fails on one.
+- **A note's delivery is reported to the page, never the reverse.**
+  The annotation card gives a note an id (`_lavishNoteId`) so its chip can follow that note; the chrome, which owns the queue, posts `lavish:noteStatus` (`queued`, `sending`, `delivered`, `removed`) for it and strips the id before anything goes to the server.
+  The page is never asked what happened to a note, and an id it supplies is bounded and treated as opaque.
+- **Declared choices send the option exactly.**
+  A page's `<script type="application/json" data-lavish-choices>` is parsed by `src/page-choices.js` and drawn by the SDK, where the declaration sits, as the board's question card.
+  The pick is queued with no `data`, so nothing is appended and the prompt text is the option word for word; the asker reads that text from the poll's `prompt` column.
+  The card's state lives in the SDK and rides in the review state (`choices`), so a reload restores a pick, and an answer already sent is restored as sent and never queued again.
+- **Pages in the board's look link served stylesheets.**
+  `/design/board-tokens.css` is the same token file; `/design/board-page.css` is `src/board-page.css`.
+  `resolveDesignAssetPath` maps both, and the fonts and goblin they name, to files on disk so an export or share inlines them.
+
 ## Things to know when editing
 
 - `run()` short-circuits `--version`/`-v`/`-V` (`isVersionOnlyArgv`) before `ensureStateDir` and `initDefaultTelemetry`, because agent harnesses probe every tool's version at session start and the telemetry drain in the `finally` block costs up to a full second. Any new startup work must go after that short-circuit; `test/cli-version.test.js` guards both the latency budget and the "no telemetry request, no state dir" property.
