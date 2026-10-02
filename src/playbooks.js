@@ -189,6 +189,7 @@ export const PLAYBOOKS = [
       "Must be used when the agent needs to collect user input on decisions, choices, preferences, triage, scope, or other structured feedback from within the artifact",
     choose: [
       "Use this when the user needs to select, tune, triage, annotate, or edit a structured choice.",
+      'For one pick among a few options, build no form at all: declare the question in a `<script type="application/json" data-lavish-choices>` and the review page draws it as a plain radio list with the recommended option first, Other for a written answer, and Send decision. The pick comes back as a prompt whose text is the option exactly as declared. `lavish-axi design` has the snippet under board_look.choices.',
       "Use controls for decisions the user can make faster visually than by writing a prompt.",
       "Use an opt-in tracked batch when the agent must preserve completeness across a multi-item decision, such as findings to fixes, constraints to implementation, or recommendations to follow-up work.",
       "Use plain annotations when the artifact only needs open-ended feedback.",

@@ -1,0 +1,370 @@
+/* A page in the Code Goblins board's look. A page links /design/board-tokens.css (the board's
+   own token block, by value) and then this file, which lays plain HTML and a small set of page
+   patterns out in those tokens: a report, a comparison, a before and after, a table of
+   evidence, a decision. A colour written out here is one the board's stylesheet writes out for
+   the same kind of element, never a new one. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+body {
+  margin: 0;
+  padding: 32px 24px 56px;
+}
+h1,
+h2,
+h3 {
+  margin: 0;
+  font-family: var(--font-display);
+  font-weight: 400;
+  letter-spacing: 0.01em;
+  overflow-wrap: anywhere;
+}
+h1 {
+  font-size: clamp(1.75rem, 3vw, 2.25rem);
+  line-height: 1.2;
+}
+h2 {
+  font-size: 1.5rem;
+  line-height: 1.3;
+}
+h3 {
+  font-size: 1.1875rem;
+  line-height: 1.35;
+}
+p,
+ul,
+ol {
+  margin: 0;
+}
+ul,
+ol {
+  padding-left: 22px;
+}
+li + li {
+  margin-top: 4px;
+}
+p,
+li,
+dd,
+td,
+th,
+figcaption {
+  overflow-wrap: anywhere;
+}
+a {
+  color: var(--mint);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+a:focus-visible {
+  outline: var(--focus-ring);
+  outline-offset: 3px;
+}
+strong {
+  color: #fff;
+  font-weight: 800;
+}
+code,
+pre,
+kbd {
+  font-family: var(--font-mono);
+  font-size: 0.9375rem;
+}
+code,
+kbd {
+  padding: 1px 6px;
+  border: 1px solid var(--glass-border);
+  border-radius: 6px;
+  background: var(--field-bg);
+}
+pre {
+  margin: 0;
+  padding: 14px 16px;
+  overflow-x: auto;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: #090f16;
+  line-height: 1.6;
+}
+pre code {
+  padding: 0;
+  border: 0;
+  background: none;
+}
+img,
+svg,
+video {
+  max-width: 100%;
+  height: auto;
+}
+hr {
+  width: 100%;
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--border);
+}
+::selection {
+  background: rgba(16, 185, 129, 0.3);
+}
+.muted {
+  color: var(--muted);
+}
+
+/* The page: one readable column of sections. */
+.page {
+  display: grid;
+  gap: 24px;
+  max-width: 1040px;
+  margin: 0 auto;
+}
+.page > section {
+  display: grid;
+  gap: 14px;
+  min-width: 0;
+}
+.page-head {
+  display: grid;
+  gap: 10px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid var(--glass-border);
+}
+.page-head h1 {
+  background: var(--brand-gradient);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+@media (forced-colors: active) {
+  .page-head h1 {
+    background: none;
+    color: CanvasText;
+  }
+}
+.eyebrow {
+  color: var(--mint);
+  font-family: var(--font-mono);
+  font-size: 0.9375rem;
+}
+.lead {
+  max-width: 72ch;
+  color: #e3ecef;
+  font-size: 1.1875rem;
+  line-height: 1.6;
+}
+
+/* A card, a pill, a status. */
+.card {
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 22px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--glass-bg);
+  box-shadow: var(--glass-shadow);
+}
+.card p {
+  color: #c4d4df;
+}
+.chip {
+  display: inline-block;
+  padding: 0 10px;
+  border: 1px solid var(--glass-border);
+  border-radius: 999px;
+  color: var(--muted);
+  font-family: var(--font-body);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.recommendation {
+  padding: 2px 9px;
+  border-radius: 7px;
+  background: var(--recommend-fill);
+  color: var(--recommend-ink);
+  font-family: var(--font-body);
+  font-size: 0.9375rem;
+  font-weight: 600;
+  white-space: nowrap;
+}
+.status {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.status::before {
+  content: "";
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #a6beda;
+}
+.status.ok {
+  color: var(--mint);
+}
+.status.ok::before {
+  background: var(--accent-green);
+}
+.status.warn {
+  color: #f6d79e;
+}
+.status.warn::before {
+  background: var(--amber);
+}
+.status.bad {
+  color: #f5b1a8;
+}
+.status.bad::before {
+  background: var(--red);
+}
+.callout {
+  padding: 14px;
+  border: 1px solid #735338;
+  border-radius: var(--radius);
+  background: #292116;
+  color: #f1c598;
+}
+
+/* A report: the numbers that matter, then the findings. */
+.stats {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 14px;
+}
+.stat {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding: 18px 20px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--glass-bg);
+}
+/* Figures are read, not decorated: the body face, as the board sets its numbers. */
+.stat strong {
+  color: #edf4f3;
+  font-size: 2rem;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.stat span {
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+/* A comparison: the options side by side, the recommended one lit. */
+.compare {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.option h3 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 12px;
+}
+.option.recommended {
+  border-color: var(--accent-green);
+  background: var(--glass-bg-hover);
+  box-shadow: var(--glass-shadow-hover);
+}
+.pros,
+.cons {
+  display: grid;
+  gap: 6px;
+  padding: 0;
+  list-style: none;
+  color: #c4d4df;
+}
+.pros li,
+.cons li {
+  margin: 0;
+  padding-left: 22px;
+  background: no-repeat 0 0.55em / 9px 9px;
+}
+.pros li {
+  background-image: radial-gradient(circle, var(--accent-green) 60%, transparent 62%);
+}
+.cons li {
+  background-image: radial-gradient(circle, var(--red) 60%, transparent 62%);
+}
+
+/* A before and after: the same view twice, each named. */
+.before-after {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+  gap: 14px;
+  align-items: start;
+}
+.before-after figure {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+  margin: 0;
+}
+.before-after figcaption {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px 10px;
+  color: #c4d4df;
+}
+.before-after img {
+  display: block;
+  width: 100%;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--body-bg);
+}
+.chip.after {
+  border-color: var(--accent-green);
+  color: var(--mint);
+}
+
+/* A table of evidence: what was checked, what it showed, where to look. */
+.table-wrap {
+  overflow-x: auto;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--field-bg);
+}
+.evidence {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 1rem;
+}
+.evidence th,
+.evidence td {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  text-align: left;
+  vertical-align: top;
+}
+.evidence th {
+  color: var(--muted);
+  font-size: 0.9375rem;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.evidence tbody tr:last-child td {
+  border-bottom: 0;
+}
+.evidence td {
+  color: #c4d4df;
+}
+
+@media (max-width: 40rem) {
+  body {
+    padding: 20px 14px 40px;
+  }
+  .card {
+    padding: 16px;
+  }
+}

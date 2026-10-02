@@ -176,6 +176,50 @@ test("the design-priority rule is single-sourced and keeps its three-step semant
   assert.match(DESIGN_SYSTEM_HINT, /state which of the three design sources/);
 });
 
+// In this fork a page with no design direction of its own starts in the Code Goblins board's
+// look, and still takes whatever style its content calls for when steps (1) or (2) say so.
+test("the design-priority rule's last step is the board look, with the CDN kit behind it", () => {
+  const lastStep = DESIGN_PRIORITY_RULE.slice(DESIGN_PRIORITY_RULE.indexOf("(3)"));
+
+  assert.match(lastStep, /Code Goblins board look/);
+  assert.match(lastStep, /page patterns/);
+  assert.ok(lastStep.indexOf("board look") < lastStep.indexOf("DaisyUI"), "the board look comes before the CDN kit");
+  assert.match(DESIGN_SYSTEM_HINT, /the board look's stylesheets and page patterns/);
+});
+
+test("design output gives the board look: two stylesheets, five page patterns and declared choices", async () => {
+  const { board_look: boardLook } = createDesignOutput();
+
+  assert.equal(
+    boardLook.stylesheet_snippet,
+    '<link rel="stylesheet" href="/design/board-tokens.css">\n<link rel="stylesheet" href="/design/board-page.css">',
+  );
+  assert.match(boardLook.use_when, /default/i);
+  assert.match(boardLook.how, /export/);
+  assert.match(boardLook.how, /never a new one/);
+  assert.deepEqual(
+    boardLook.patterns.map((pattern) => pattern.id),
+    ["report", "comparison", "before_after", "evidence", "decision"],
+  );
+  // Every class a pattern's markup uses is one the page stylesheet styles.
+  const pageCss = await readFile(new URL("../src/board-page.css", import.meta.url), "utf8");
+  for (const pattern of boardLook.patterns) {
+    assert.ok(pattern.use_when && pattern.markup, pattern.id);
+    for (const [, classes] of pattern.markup.matchAll(/class="([^"]+)"/g)) {
+      for (const name of classes.split(" ")) {
+        assert.ok(pageCss.includes("." + name), `${pattern.id} uses .${name}, which src/board-page.css styles`);
+      }
+    }
+  }
+  assert.match(boardLook.choices.snippet, /<script type="application\/json" data-lavish-choices>/);
+  assert.match(boardLook.choices.how, /exactly as declared/);
+  assert.match(boardLook.choices.use_when, /never build an answer form/i);
+  // The snippet is itself a declaration Scrawl would draw.
+  const { parsePageChoices } = await import("../src/page-choices.js");
+  const declared = boardLook.choices.snippet.replace(/<\/?script[^>]*>/g, "");
+  assert.equal(parsePageChoices(declared).length, 1);
+});
+
 test("design output is the sole emitted concise explicit-background guidance", () => {
   const output = createDesignOutput();
   const instruction = "Paint an explicit page background and readable text.";

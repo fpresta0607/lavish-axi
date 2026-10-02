@@ -145,7 +145,12 @@ const SDK_BOARD = {
   scrollbarThumb: boardScrollbarThumb(boardComponentsCss),
   scrollbarTrack: boardTokenValue(boardTokensCss, "--body-bg"),
 };
+// What a page links to wear the board's look: the board's token block, the same file the review
+// page is drawn from, and the page patterns laid out in it (src/board-page.css).
+const boardPageUrl = new URL("./board-page.css", import.meta.url);
 const designAssetUrls = {
+  "board-tokens.css": { packaged: boardTokensUrl, source: boardTokensUrl, type: "text/css" },
+  "board-page.css": { packaged: boardPageUrl, source: boardPageUrl, type: "text/css" },
   "daisyui.css": {
     packaged: new URL("./design/daisyui.css", import.meta.url),
     source: new URL("../node_modules/daisyui/daisyui.css", import.meta.url),
@@ -2504,8 +2509,12 @@ async function readDesignAsset(asset) {
 
 // Map a legacy root-absolute `/design/<asset>` reference to the packaged design file on disk
 // (falling back to the node_modules source for source runs) so an export can inline it instead
-// of pointing back at this server's `/design` route.
+// of pointing back at this server's `/design` route. The board's fonts and goblin, which its
+// token block and page patterns name by their served address, map the same way.
 export function resolveDesignAssetPath(refPath) {
+  const font = /^\/assets\/fonts\/([^/?#]+)(?:[?#].*)?$/.exec(refPath);
+  if (font) return BOARD_FONT_FILES.has(font[1]) ? fileURLToPath(new URL(font[1], boardFontsUrl)) : null;
+  if (/^\/assets\/goblin-app\.png(?:[?#].*)?$/.test(refPath)) return fileURLToPath(boardGoblinUrl);
   const match = /^\/design\/([^/?#]+)(?:[?#].*)?$/.exec(refPath);
   if (!match) return null;
   const asset = designAssetUrls[match[1]];

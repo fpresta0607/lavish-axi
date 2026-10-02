@@ -34,6 +34,7 @@ import {
   resolveWatchTarget,
   serve,
 } from "../src/server.js";
+import { buildSelfContainedHtml } from "../src/export-bundle.js";
 import { canonicalFile, sessionKey, SessionStore } from "../src/session-store.js";
 
 async function chromeClientSource() {
@@ -3589,6 +3590,64 @@ test("/design serves local Tailwind and DaisyUI artifact assets", async () => {
 test("design asset resolver only trusts exact packaged design asset paths", () => {
   assert.equal(resolveDesignAssetPath("/design/daisyui.css/extra"), null);
   assert.equal(resolveDesignAssetPath("/design/tailwindcss-browser.js/extra"), null);
+  assert.equal(resolveDesignAssetPath("/design/board-page.css/extra"), null);
+  assert.equal(resolveDesignAssetPath("/assets/fonts/nunito-OFL.txt"), null);
+  assert.equal(resolveDesignAssetPath("/assets/fonts/../board-tokens.css"), null);
+});
+
+// A page in the board's look links two stylesheets the server serves: the board's token block,
+// the same file the review page itself is drawn from, and the page patterns laid out in it.
+test("/design serves the board look a page links: its tokens, then the page patterns", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const tokens = await fetch(`${base}/design/board-tokens.css`);
+    const page = await fetch(`${base}/design/board-page.css`);
+
+    assert.equal(tokens.status, 200);
+    assert.match(tokens.headers.get("content-type") || "", /text\/css/);
+    assert.equal(
+      await tokens.text(),
+      await readFile(new URL("../src/board-tokens.css", import.meta.url), "utf8"),
+      "a page wears the very token file the shell does",
+    );
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type") || "", /text\/css/);
+    const pageCss = normalizeCssForAssertions(await page.text());
+    for (const pattern of [".page{", ".stats{", ".compare{", ".before-after{", ".evidence{", ".recommendation{"]) {
+      assert.ok(pageCss.includes(pattern), `the page stylesheet has ${pattern}`);
+    }
+    // Every colour comes from the board: its tokens, or a value its stylesheet writes out.
+    assert.doesNotMatch(pageCss, /#f4c95d|--brass|--ink-|daisyui/i);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an export of a page in the board's look carries its stylesheets and fonts inline", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-export-"));
+  try {
+    const html =
+      '<!doctype html><html><head><link rel="stylesheet" href="/design/board-tokens.css">' +
+      '<link rel="stylesheet" href="/design/board-page.css"></head><body><main class="page"></main></body></html>';
+    const { html: out, warnings } = await buildSelfContainedHtml(html, {
+      baseDir: dir,
+      confineDir: dir,
+      resolveAbsolute: resolveDesignAssetPath,
+    });
+
+    assert.deepEqual(warnings, []);
+    assert.doesNotMatch(out, /<link rel="stylesheet"/);
+    assert.match(out, /--accent-green: #00e59b;/);
+    assert.match(out, /\.before-after \{/);
+    // The three font faces no longer point at the server: each carries its font.
+    assert.doesNotMatch(out, /url\("?\/assets\/fonts\//);
+    assert.equal(out.split("data:font/woff2;base64,").length - 1, 3);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("GET /api/:key/export inlines local assets and leaves remote references intact", async () => {

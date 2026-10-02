@@ -50,6 +50,7 @@ await copyFile("src/chrome.css", "dist/chrome.css");
 // The Code Goblins board's look, served beside the review page's own stylesheet.
 await copyFile("src/board-tokens.css", "dist/board-tokens.css");
 await copyFile("src/board-components.css", "dist/board-components.css");
+await copyFile("src/board-page.css", "dist/board-page.css");
 await cp("src/fonts", "dist/fonts", { recursive: true });
 await cp("src/assets", "dist/assets", { recursive: true });
 await mkdir("dist/design", { recursive: true });
