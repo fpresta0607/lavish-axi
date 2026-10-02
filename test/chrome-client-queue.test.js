@@ -5308,6 +5308,26 @@ test("a queued or cancelled card leaves no draft behind for the next page load",
   );
 });
 
+// A page's declared question keeps its state in the SDK, not in page controls, so the chrome has
+// to hold a report that carries nothing but that.
+test("a pick on a page's declared question survives a full page reload", async () => {
+  const storage = new Map();
+  const first = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html", storage });
+  const choices = [{ id: "plan", selection: "option:Keep 300 s", written: "", answered: "Keep 300 s" }];
+
+  first.sendFrameMessage({
+    artifact_load_token: first.artifactLoadToken(),
+    type: "lavish:reviewState",
+    state: { card: null, fields: [], choices },
+  });
+  await flushPromises();
+
+  const second = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html", storage });
+  const restored = second.postedToFrame.filter((message) => message.type === "lavish:restoreReviewState");
+  assert.equal(restored.length, 1);
+  assert.equal(JSON.stringify(restored[0].state.choices), JSON.stringify(choices));
+});
+
 test("a draft never leaks from one artifact into another", async () => {
   const storage = new Map();
   const first = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html", storage });

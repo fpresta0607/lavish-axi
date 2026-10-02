@@ -1092,7 +1092,8 @@ function setReviewState(state) {
   lastReviewState = state;
   // The artifact reported a card, so its anchor exists: whatever miss was recorded is answered.
   if (state?.card) unrestorableDraftMiss = null;
-  if (!state || (!state.card && !(Array.isArray(state.fields) && state.fields.length))) {
+  const holds = (list) => Array.isArray(list) && list.length > 0;
+  if (!state || (!state.card && !holds(state.fields) && !holds(state.choices))) {
     try {
       sessionStorage.removeItem(reviewStateStorageKey);
     } catch {

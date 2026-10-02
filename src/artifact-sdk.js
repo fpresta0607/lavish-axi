@@ -2,6 +2,7 @@
 
 import { readArtifactRevisions } from "./artifact-revisions.js";
 import * as mermaidHelpers from "./mermaid-node.js";
+import { choiceAnswer, orderedChoices, parsePageChoices } from "./page-choices.js";
 import { tableCellTarget } from "./table-cell.js";
 
 export const LAVISH_INTERNAL_QUEUE_KEY = "_lavishQueueKey";
@@ -501,6 +502,9 @@ export function createArtifactSdk(
   // Words typed into a card that was cancelled, kept for that element's next card as the board
   // keeps a cancelled diff comment.
   const cancelledDrafts = new Map();
+  // The question cards drawn for the choices this page declares, and what was picked on each.
+  /** @type {Array<{ question: { id: string, question: string, detail: string, asker: string, options: string[], recommended: string }, form: HTMLElement, selection: string, written: string, answered: string, noteId: string, status: string, sawSending: boolean, render: () => void }>} */
+  const choiceCards = [];
   const NOTE_ID_PREFIX = Date.now().toString(36) + "-";
   let noteCounter = 0;
   let counter = 0;
@@ -2188,6 +2192,12 @@ export function createArtifactSdk(
         activeCardContext && activeCardContext.tag !== "text" && text.trim()
           ? { selector: String(activeCardContext.selector || ""), text: text.slice(0, 4000) }
           : null,
+      choices: choiceCards.map((card) => ({
+        id: card.question.id,
+        selection: card.selection,
+        written: card.written.slice(0, 4000),
+        answered: card.answered,
+      })),
       fields: lavishQuestionControls().map((entry) => ({
         key: entry.key,
         index: entry.index,
@@ -2209,6 +2219,18 @@ export function createArtifactSdk(
 
   function restoreReviewState(state) {
     if (!state || typeof state !== "object") return;
+    for (const saved of Array.isArray(state.choices) ? state.choices : []) {
+      const card = choiceCards.find((candidate) => candidate.question.id === String(saved?.id || ""));
+      if (!card || card.answered) continue;
+      card.selection = typeof saved.selection === "string" ? saved.selection.slice(0, 400) : "";
+      card.written = typeof saved.written === "string" ? saved.written.slice(0, 4000) : "";
+      // An answer already sent stays sent: restoring never sends it again.
+      if (typeof saved.answered === "string" && saved.answered) {
+        card.answered = saved.answered.slice(0, 4000);
+        card.status = "restored";
+      }
+      card.render();
+    }
     const fields = Array.isArray(state.fields) ? state.fields : [];
     if (fields.length) {
       const entries = lavishQuestionControls();
@@ -2261,6 +2283,16 @@ export function createArtifactSdk(
     if (el instanceof Element && el.closest("[data-lavish-question]")) scheduleReviewStateReport();
   });
 
+  // A shadow root cannot declare a font face, so the board's three go in the page itself; the
+  // fonts are fetched only once something Scrawl draws is set in them.
+  function ensureBoardFonts() {
+    if (document.getElementById("lavish-font-style")) return;
+    const fonts = document.createElement("style");
+    fonts.id = "lavish-font-style";
+    fonts.textContent = board.fontFaces;
+    (document.head || document.documentElement).appendChild(fonts);
+  }
+
   function ensureShadow() {
     if (shadow) return shadow;
 
@@ -2270,14 +2302,7 @@ export function createArtifactSdk(
     document.documentElement.appendChild(host);
 
     shadow = host.attachShadow({ mode: "open" });
-    // A shadow root cannot declare a font face, so the board's three go in the page itself; the
-    // fonts are fetched only once something here is drawn in them.
-    if (!document.getElementById("lavish-font-style")) {
-      const fonts = document.createElement("style");
-      fonts.id = "lavish-font-style";
-      fonts.textContent = board.fontFaces;
-      (document.head || document.documentElement).appendChild(fonts);
-    }
+    ensureBoardFonts();
     const style = document.createElement("style");
     style.textContent =
       ":host{all:initial;position:fixed;z-index:2147483647;left:0;top:0}" +
@@ -2312,6 +2337,7 @@ export function createArtifactSdk(
   // not get through, and says so.
   function noteMark(chip) {
     if (chip.status === "delivered") return { tone: " succeeded", icon: CHECK_DOUBLE_ICON, label: "Delivered" };
+    if (chip.status === "restored") return { tone: "", icon: CHECK_ICON, label: "Sent" };
     if (chip.status === "queued" && chip.sawSending) {
       return {
         tone: " uncertain",
@@ -2382,6 +2408,20 @@ export function createArtifactSdk(
   }
 
   function updateNoteStatus(noteId, status) {
+    const answered = choiceCards.find((card) => card.noteId && card.noteId === String(noteId || ""));
+    if (answered) {
+      // The answer was taken out of the queue before it went: the question is open again.
+      if (status === "removed") {
+        answered.answered = "";
+        answered.noteId = "";
+        scheduleReviewStateReport();
+      } else if (status === "queued" || status === "sending" || status === "delivered") {
+        if (status === "sending") answered.sawSending = true;
+        answered.status = status;
+      }
+      answered.render();
+      return;
+    }
     if (!activeChip || activeChip.noteId !== String(noteId || "")) return;
     // The note was taken out of the queue in the conversation panel: its chip goes with it.
     if (status === "removed") {
@@ -2852,5 +2892,199 @@ export function createArtifactSdk(
     document.addEventListener("DOMContentLoaded", reportArtifactRevisions, { once: true });
   } else {
     reportArtifactRevisions();
+  }
+
+  // ---- The choices a page declares (src/page-choices.js) ----
+  // Each declared question is drawn as the board's question card, where the declaration sits: a
+  // plain radio list with the recommended option first and marked, Other for a written answer,
+  // and Send decision. A card keeps its state here rather than in its controls, so a reload can
+  // restore it and a redraw never loses a half-made pick.
+  function createChoiceCard(question, host) {
+    const form = document.createElement("form");
+    form.className = "question-card";
+    const choices = orderedChoices(question);
+    const asker = escapeAnnotationText(question.asker || "This page");
+    const head =
+      '<p class="asker"><span class="goblin-avatar" aria-hidden="true"></span><span><strong>' +
+      asker +
+      '</strong> asks</span></p><div class="question-body">' +
+      escapeAnnotationText(question.question) +
+      "</div>" +
+      (question.detail ? '<div class="question-detail">' + escapeAnnotationText(question.detail) + "</div>" : "");
+    const optionHtml = (choice) =>
+      '<span class="question-option"><span>' +
+      escapeAnnotationText(choice.text) +
+      "</span>" +
+      (choice.recommended ? '<span class="recommendation">Recommended</span>' : "") +
+      "</span>";
+
+    function openHtml() {
+      const radio = (value, selected) =>
+        '<input type="radio" name="answer" value="' +
+        escapeAnnotationText(value) +
+        '"' +
+        (selected ? " checked" : "") +
+        ">";
+      return (
+        head +
+        '<fieldset><legend class="sr-only">Choose your answer</legend>' +
+        choices
+          .map(
+            (choice) =>
+              '<label class="question-choice">' +
+              radio("option:" + choice.value, card.selection === "option:" + choice.value) +
+              optionHtml(choice) +
+              "</label>",
+          )
+          .join("") +
+        '<label class="question-choice">' +
+        radio("other", card.selection === "other") +
+        '<span class="question-option"><span>Other</span><small>Write your own answer.</small></span></label>' +
+        '<label class="written-answer"' +
+        (card.selection === "other" ? "" : " hidden") +
+        '><span class="sr-only">Your written answer</span><textarea name="written" rows="3" maxlength="4000" placeholder="Tell ' +
+        asker +
+        ' what you prefer...">' +
+        escapeAnnotationText(card.written) +
+        '</textarea></label></fieldset><div class="card-actions"><button class="primary send-decision" type="submit"' +
+        (choiceAnswer(question, card.selection, card.written) ? "" : " disabled") +
+        ">" +
+        SEND_ICON +
+        "Send decision</button></div>"
+      );
+    }
+
+    // A closed question shows what was chosen, not radios to choose again, and how its answer
+    // travelled.
+    function closedHtml() {
+      const mark = noteMark({ status: card.status, sawSending: card.sawSending, sendRequested: true });
+      const written = !question.options.includes(card.answered);
+      return (
+        head +
+        '<fieldset disabled><legend class="sr-only">Your answer</legend>' +
+        choices
+          .map((choice) => {
+            const chosen = choice.value === card.answered;
+            return (
+              '<label class="question-choice ' +
+              (chosen ? "chosen" : "dimmed") +
+              '"><span class="choice-mark">' +
+              (chosen ? CHECK_ICON : "") +
+              "</span>" +
+              optionHtml(choice) +
+              "</label>"
+            );
+          })
+          .join("") +
+        (written
+          ? '<label class="question-choice chosen"><span class="choice-mark">' +
+            CHECK_ICON +
+            '</span><span class="question-option"><span>Other</span><small>' +
+            escapeAnnotationText(card.answered) +
+            "</small></span></label>"
+          : "") +
+        '</fieldset><p class="question-outcome delivery' +
+        mark.tone +
+        '" role="status">' +
+        mark.icon +
+        escapeAnnotationText(mark.trouble || mark.label) +
+        "</p>"
+      );
+    }
+
+    const card = {
+      question,
+      form,
+      selection: "",
+      written: "",
+      answered: "",
+      noteId: "",
+      status: "queued",
+      sawSending: false,
+      render() {
+        form.innerHTML = card.answered ? closedHtml() : openHtml();
+      },
+    };
+
+    // A pick or a keystroke changes two things only, so the card is not redrawn under the
+    // reader's cursor: whether the written answer shows, and whether there is an answer to send.
+    function syncControls() {
+      const written = /** @type {HTMLElement | null} */ (form.querySelector(".written-answer"));
+      const send = /** @type {HTMLButtonElement | null} */ (form.querySelector(".send-decision"));
+      if (written) written.hidden = card.selection !== "other";
+      if (send) send.disabled = !choiceAnswer(question, card.selection, card.written);
+    }
+
+    form.addEventListener("change", (event) => {
+      const control = /** @type {HTMLInputElement | null} */ (event.target);
+      if (card.answered || !control || control.name !== "answer" || !control.checked) return;
+      card.selection = String(control.value);
+      syncControls();
+      scheduleReviewStateReport();
+    });
+    form.addEventListener("input", (event) => {
+      const control = /** @type {HTMLTextAreaElement | null} */ (event.target);
+      if (card.answered || !control || control.name !== "written") return;
+      card.written = String(control.value);
+      syncControls();
+      scheduleReviewStateReport();
+    });
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const answer = choiceAnswer(question, card.selection, card.written);
+      if (!answer || card.answered) return;
+      noteCounter += 1;
+      card.noteId = NOTE_ID_PREFIX + noteCounter;
+      card.answered = answer;
+      card.status = "queued";
+      card.sawSending = false;
+      // The prompt is the answer exactly, the option as the page declared it or the words he
+      // wrote, with nothing appended: that text is what reaches whoever asked.
+      queuePrompt(answer, {
+        element: host,
+        tag: "choice",
+        text: question.question,
+        selector: "script[data-lavish-choices]",
+        queueKey: "choice:" + question.id,
+        noteId: card.noteId,
+      });
+      sendQueuedPrompts();
+      card.render();
+      scheduleReviewStateReport();
+    });
+    card.render();
+    return card;
+  }
+
+  function renderPageChoices() {
+    const declaration = document.querySelector("script[data-lavish-choices]");
+    if (!declaration || !declaration.parentElement) return;
+    const questions = parsePageChoices(declaration.textContent || "");
+    if (!questions.length) return;
+    ensureBoardFonts();
+    const host = document.createElement("div");
+    host.className = "lavish-choices-root";
+    host.setAttribute("data-lavish-ui", "choices");
+    declaration.parentElement.insertBefore(host, declaration.nextSibling);
+    const root = host.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent =
+      ":host{all:initial}" +
+      board.shadowCss +
+      ':host{display:block;background:none}.lavish-choices{display:grid;gap:16px;max-width:820px;margin:32px auto;padding:0 16px 32px}.lavish-choices .question-card{background:var(--glass-bg),var(--hero-surface)}.lavish-choices fieldset{display:grid;gap:12px;min-width:0;margin:0;padding:0;border:0}.lavish-choices .goblin-avatar{display:block;flex:none;width:48px;height:48px;background:url("/assets/goblin-app.png") center / contain no-repeat}.lavish-choices .question-detail{max-width:72ch;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}';
+    root.appendChild(style);
+    const list = document.createElement("div");
+    list.className = "lavish-choices";
+    root.appendChild(list);
+    for (const question of questions) {
+      const card = createChoiceCard(question, host);
+      choiceCards.push(card);
+      list.appendChild(card.form);
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", renderPageChoices, { once: true });
+  } else {
+    renderPageChoices();
   }
 }

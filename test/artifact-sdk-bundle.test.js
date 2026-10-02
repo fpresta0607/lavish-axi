@@ -118,6 +118,8 @@ function bootSdk({
   revisionsScript = null,
   revisionMarkElements = [],
   pageHeadTags = [],
+  // What the page declares in its `<script data-lavish-choices>`, or null for a page without one.
+  choices = null,
 } = {}) {
   const posted = [];
   const documentListeners = [];
@@ -137,6 +139,11 @@ function bootSdk({
   appendTo(documentElement, head);
   appendTo(documentElement, body);
   for (const element of revisionMarkElements) appendTo(body, element);
+  let choicesScript = null;
+  if (choices !== null) {
+    choicesScript = appendTo(body, createElement("script"));
+    choicesScript.textContent = typeof choices === "string" ? choices : JSON.stringify(choices);
+  }
 
   const sandbox = {
     parent: { postMessage: (message) => posted.push(message) },
@@ -173,7 +180,11 @@ function bootSdk({
       createElement,
       getElementById: () => null,
       querySelector: (selector) =>
-        selector === "script[data-lavish-revisions]" ? revisionsScript : documentQuery(selector),
+        selector === "script[data-lavish-revisions]"
+          ? revisionsScript
+          : selector === "script[data-lavish-choices]"
+            ? choicesScript
+            : documentQuery(selector),
       querySelectorAll: (selector) => (selector === "[data-lavish-revision]" ? revisionMarkElements : []),
       getSelection: () => null,
     },
@@ -265,6 +276,14 @@ function bootSdk({
       assert.ok(listener, "the SDK registers a document mouseover listener");
       listener.handler({ target });
     },
+    // The question cards Scrawl drew for the page's declared choices, in order.
+    choiceForms() {
+      const host = body.children.find((child) => child.getAttribute("data-lavish-ui") === "choices");
+      const list = host?.shadowRoot.children.find((child) => child.className === "lavish-choices");
+      return list ? list.children : [];
+    },
+    choicesHostIndex: () => body.children.findIndex((child) => child.getAttribute("data-lavish-ui") === "choices"),
+    choicesScriptIndex: () => body.children.indexOf(choicesScript),
   };
 }
 
@@ -779,4 +798,190 @@ test("the served SDK bundle drops a late restore once the user has opened a card
     sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
     false,
   );
+});
+
+// ---- The choices a page declares are drawn as the board's question card ----
+// A page asks for a pick by declaring it as data. Scrawl draws the radio list where the
+// declaration sits, and the pick goes back as an ordinary prompt whose text is the option exactly
+// as the page wrote it.
+
+const PLAN_QUESTION = {
+  id: "plan",
+  question: "Which plan?",
+  asker: "cg-scrawl-look",
+  options: ["Keep 300 s", "Fix it next", "Drop <it>"],
+  recommended: "Fix it next",
+};
+
+function fire(form, type, event = {}) {
+  const handlers = form.listeners.filter((entry) => entry.type === type);
+  assert.ok(handlers.length > 0, `the question card listens for ${type}`);
+  for (const entry of handlers) entry.handler({ preventDefault() {}, ...event });
+}
+const pick = (form, value) => fire(form, "change", { target: { name: "answer", value, checked: true } });
+const write = (form, value) => fire(form, "input", { target: { name: "written", value } });
+const promptMessages = (sdk) => sdk.posted.filter((message) => /Prompt/.test(message.type));
+
+test("a page's declared choices are drawn after the declaration as the board's radio list", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+
+  assert.equal(sdk.choicesHostIndex(), sdk.choicesScriptIndex() + 1, "the card sits where the declaration is");
+  const [form] = sdk.choiceForms();
+  assert.ok(form, "one question, one card");
+  assert.equal(form.className, "question-card");
+
+  const html = form.innerHTML;
+  assert.match(
+    html,
+    /<p class="asker"><span class="goblin-avatar" aria-hidden="true"><\/span><span><strong>cg-scrawl-look<\/strong> asks<\/span><\/p>/,
+  );
+  assert.match(html, /<div class="question-body">Which plan\?<\/div>/);
+  // The recommended option is first and marked; the rest keep the page's order; Other is last.
+  const order = [...html.matchAll(/<input type="radio" name="answer" value="([^"]*)"/g)].map((match) => match[1]);
+  assert.deepEqual(order, ["option:Fix it next", "option:Keep 300 s", "option:Drop &lt;it&gt;", "other"]);
+  assert.match(html, /<span>Fix it next<\/span><span class="recommendation">Recommended<\/span>/);
+  assert.equal(html.split('class="recommendation"').length - 1, 1);
+  assert.match(html, /<span>Other<\/span><small>Write your own answer\.<\/small>/);
+  assert.match(html, /<button class="primary send-decision" type="submit" disabled>/);
+});
+
+test("a pick is sent as the exact option text, once", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+
+  pick(form, "option:Keep 300 s");
+  fire(form, "submit");
+
+  const messages = promptMessages(sdk);
+  assert.deepEqual(
+    messages.map((message) => message.type),
+    ["lavish:queuePrompt", "lavish:sendQueuedPrompts"],
+  );
+  const { prompt } = messages[0];
+  assert.equal(prompt.prompt, "Keep 300 s", "the prompt is the option and nothing else");
+  assert.equal(prompt.tag, "choice");
+  assert.equal(prompt.text, "Which plan?");
+  assert.equal(prompt._lavishQueueKey, "choice:plan");
+  assert.match(prompt._lavishNoteId, /\S/);
+
+  // The card closes on what was chosen, as the board's does: no radios to choose again.
+  assert.doesNotMatch(form.innerHTML, /type="radio"/);
+  assert.match(
+    form.innerHTML,
+    /<label class="question-choice chosen"><span class="choice-mark">.*<\/span><span class="question-option"><span>Keep 300 s<\/span>/,
+  );
+  assert.match(
+    form.innerHTML,
+    /<label class="question-choice dimmed"><span class="choice-mark"><\/span><span class="question-option"><span>Fix it next<\/span>/,
+  );
+
+  fire(form, "submit");
+  assert.equal(promptMessages(sdk).length, 2, "a second submit sends nothing");
+});
+
+test("Other sends the written answer, and only once something is written", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+
+  pick(form, "other");
+  fire(form, "submit");
+  assert.deepEqual(promptMessages(sdk), [], "an empty Other is not an answer");
+
+  write(form, "  Park it until the freeze lifts  ");
+  fire(form, "submit");
+
+  assert.equal(promptMessages(sdk)[0].prompt.prompt, "Park it until the freeze lifts");
+  assert.match(
+    form.innerHTML,
+    /<label class="question-choice chosen">.*<span>Other<\/span><small>Park it until the freeze lifts<\/small>/,
+  );
+});
+
+test("nothing is sent without a pick, or for an option the page never offered", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+
+  fire(form, "submit");
+  pick(form, "option:Something else");
+  fire(form, "submit");
+
+  assert.deepEqual(promptMessages(sdk), []);
+});
+
+test("each declared question is its own card with its own answer", () => {
+  const sdk = bootSdk({
+    choices: [PLAN_QUESTION, { id: "when", question: "When?", options: ["Now", "After the freeze"] }],
+  });
+  const [plan, when] = sdk.choiceForms();
+
+  pick(when, "option:Now");
+  fire(when, "submit");
+
+  const [message] = promptMessages(sdk);
+  assert.equal(message.prompt.prompt, "Now");
+  assert.equal(message.prompt.text, "When?");
+  assert.equal(message.prompt._lavishQueueKey, "choice:when");
+  assert.match(plan.innerHTML, /type="radio"/, "the other question is still open");
+  // No asker named: the page asks.
+  assert.match(when.innerHTML, /<strong>This page<\/strong> asks/);
+});
+
+test("the answered card follows its answer's delivery, and reopens if the answer is taken back", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "option:Fix it next");
+  fire(form, "submit");
+  const noteId = promptMessages(sdk)[0].prompt._lavishNoteId;
+  assert.match(form.innerHTML, /<p class="question-outcome delivery" role="status">.*Sending<\/p>/);
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
+  assert.match(form.innerHTML, /<p class="question-outcome delivery succeeded" role="status">.*Delivered<\/p>/);
+
+  // Removed from the queue in the conversation panel before it went: the question is open again.
+  const again = bootSdk({ choices: PLAN_QUESTION });
+  const [open] = again.choiceForms();
+  pick(open, "option:Fix it next");
+  fire(open, "submit");
+  again.sendChromeMessage({
+    type: "lavish:noteStatus",
+    noteId: promptMessages(again)[0].prompt._lavishNoteId,
+    status: "removed",
+  });
+  assert.match(open.innerHTML, /type="radio"/);
+});
+
+test("a pick survives a reload of the page: its state is reported and restored", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "option:Keep 300 s");
+  sdk.runTimers();
+  const report = sdk.posted.findLast((message) => message.type === "lavish:reviewState");
+  // Compared as JSON: the report was built inside the SDK's own realm.
+  assert.equal(
+    JSON.stringify(report.state.choices),
+    JSON.stringify([{ id: "plan", selection: "option:Keep 300 s", written: "", answered: "" }]),
+  );
+
+  const reloaded = bootSdk({ choices: PLAN_QUESTION });
+  const [restored] = reloaded.choiceForms();
+  reloaded.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: {
+      card: null,
+      fields: [],
+      choices: [{ id: "plan", selection: "other", written: "x", answered: "Fix it next" }],
+    },
+  });
+  assert.doesNotMatch(restored.innerHTML, /type="radio"/, "an answered question stays answered");
+  assert.match(restored.innerHTML, /<label class="question-choice chosen">.*<span>Fix it next<\/span>/);
+  assert.match(restored.innerHTML, /<p class="question-outcome delivery" role="status">.*Sent<\/p>/);
+  // Nothing is sent again by restoring.
+  assert.deepEqual(promptMessages(reloaded), []);
+});
+
+test("a page with no declaration, or a malformed one, gets no card", () => {
+  assert.equal(bootSdk().choicesHostIndex(), -1);
+  assert.equal(bootSdk({ choices: "not json" }).choicesHostIndex(), -1);
+  assert.equal(bootSdk({ choices: { id: "q", question: "Pick", options: ["only one"] } }).choicesHostIndex(), -1);
 });
