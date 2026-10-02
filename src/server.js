@@ -7,6 +7,7 @@ import { isIP } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 import chokidar from "chokidar";
 import express from "express";
@@ -1468,7 +1469,10 @@ export async function serve({
       // frame-ancestors expression can name.
       res.setHeader("x-frame-options", "DENY");
       res.setHeader("content-security-policy", "frame-ancestors 'none'");
-      res.type("html").send(
+      sendText(
+        req,
+        res,
+        "html",
         createChromeHtml(session, {
           layoutGateEnabled: shouldEnableLayoutGate(req.query || {}),
           faviconTag,
@@ -1604,7 +1608,7 @@ export async function serve({
 
   app.get("/chrome-client.js", async (req, res, next) => {
     try {
-      res.type("application/javascript").send(await readFile(chromeClientUrl, "utf8"));
+      sendText(req, res, "application/javascript", await readFile(chromeClientUrl, "utf8"));
     } catch (error) {
       next(error);
     }
@@ -1612,7 +1616,7 @@ export async function serve({
 
   app.get("/chrome.css", async (req, res, next) => {
     try {
-      res.type("text/css").send(await readChromeCss());
+      sendText(req, res, "text/css", await readChromeCss());
     } catch (error) {
       next(error);
     }
@@ -1643,7 +1647,7 @@ export async function serve({
         res.status(404).send("Not found");
         return;
       }
-      res.type(asset.type).send(await readDesignAsset(asset));
+      sendText(req, res, asset.type, await readDesignAsset(asset));
     } catch (error) {
       next(error);
     }
@@ -1664,7 +1668,10 @@ export async function serve({
         res.status(409).json({ status: "stale" });
         return;
       }
-      res.type("application/javascript").send(
+      sendText(
+        req,
+        res,
+        "application/javascript",
         createSdkJs(String(req.query.key || ""), verified.artifact_revision, verified.artifact_load_token, {
           maxAttachmentCount: attachmentConfig.maxPerPrompt,
           maxAttachmentBytes: attachmentConfig.maxBytes,
@@ -2487,6 +2494,21 @@ function createDeniedHtml({ title, message, workingUrl }) {
     `${safeTitle} - ${escapeHtml(brandName())}`,
     `<h1>${safeTitle}</h1><p>${safeMessage}</p><p>Open this working URL:</p><a class="url" href="${safeUrl}">${safeUrl}</a>`,
   );
+}
+
+// The shell's text (its page, stylesheet, script, the SDK and a page's stylesheets) is sent
+// gzipped to a caller that accepts it. The board's rules and fonts make the shell larger than it
+// was; compressed, a page load transfers less than it did before, which matters most over a
+// tailnet. A caller that does not ask, such as a header-less CLI probe, gets the plain bytes.
+function sendText(req, res, type, body) {
+  res.type(type);
+  res.setHeader("vary", "accept-encoding");
+  if (/\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""))) {
+    res.setHeader("content-encoding", "gzip");
+    res.send(gzipSync(body));
+    return;
+  }
+  res.send(body);
 }
 
 // The review page's stylesheet is one response: the board's token block, the rules copied from

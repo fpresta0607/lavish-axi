@@ -8,6 +8,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { gunzipSync } from "node:zlib";
 import WebSocket from "ws";
 
 process.env.LAVISH_AXI_HOST = "127.0.0.1";
@@ -3537,6 +3538,69 @@ test("/assets serves the board's fonts and goblin locally, and nothing else", as
       await res.arrayBuffer();
       assert.equal(res.status, 404, refused);
     }
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+function requestBytes(port, pathname, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path: pathname, headers }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, bytes: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+// The board's rules and fonts make the shell larger than it was. Its text goes over the wire
+// gzipped to a browser, which keeps what a page load transfers below what it was before.
+test("the shell's text is gzipped for a caller that accepts it and plain for one that does not", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body><h1>Plan</h1></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await opened.json();
+    const load = await beginArtifactLoad(base, key);
+    const sdk = `/sdk.js?key=${key}&artifact_revision=${load.artifact_revision}&artifact_load_token=${encodeURIComponent(load.artifact_load_token)}`;
+
+    for (const pathname of ["/chrome.css", "/chrome-client.js", sdk, "/design/board-page.css"]) {
+      const plain = await requestBytes(server.port, pathname);
+      const zipped = await requestBytes(server.port, pathname, { "accept-encoding": "gzip, deflate, br" });
+
+      assert.equal(plain.status, 200, pathname);
+      assert.equal(plain.headers["content-encoding"], undefined, pathname);
+      assert.equal(zipped.status, 200, pathname);
+      assert.equal(zipped.headers["content-encoding"], "gzip", pathname);
+      assert.match(String(zipped.headers.vary), /accept-encoding/i, pathname);
+      assert.equal(zipped.headers["content-type"], plain.headers["content-type"], pathname);
+      assert.deepEqual(gunzipSync(zipped.bytes), plain.bytes, `${pathname} unzips to the same bytes`);
+      assert.ok(zipped.bytes.length < plain.bytes.length / 2, `${pathname} is less than half the size zipped`);
+    }
+
+    // The review page itself carries a fresh handoff token on every load, so its two bodies
+    // differ; what matters is that the zipped one is the page.
+    const page = await requestBytes(server.port, `/session/${key}`, { "accept-encoding": "gzip" });
+    assert.equal(page.headers["content-encoding"], "gzip");
+    assert.match(gunzipSync(page.bytes).toString("utf8"), /<header class="bar topbar">/);
+    // Its framing guard is not lost with the encoding.
+    assert.equal(page.headers["x-frame-options"], "DENY");
+
+    // A font is already compressed, and an identity-only caller is never sent gzip.
+    const font = await requestBytes(server.port, "/assets/fonts/nunito.woff2", { "accept-encoding": "gzip" });
+    assert.equal(font.headers["content-encoding"], undefined);
+    const identity = await requestBytes(server.port, "/chrome.css", { "accept-encoding": "identity" });
+    assert.equal(identity.headers["content-encoding"], undefined);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
