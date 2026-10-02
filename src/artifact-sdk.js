@@ -476,11 +476,33 @@ export function createArtifactSdk(
   const IMAGES_ICON = boardIcon(
     "M7.5 3.5h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1ZM3.5 7.5v12a1 1 0 0 0 1 1h12M6.5 14l4-4 3 3 2-2 5 5M15 7.5h.01",
   );
+  const COMMENT_ICON = boardIcon(
+    "M5 4.5h14A1.5 1.5 0 0 1 20.5 6v9a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V6A1.5 1.5 0 0 1 5 4.5Z",
+  );
+  const CHECK_ICON = boardIcon("M5 12.5 9.5 17 19 7.5");
+  const CHECK_DOUBLE_ICON = boardIcon("M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5");
+  const CLOCK_ICON = boardIcon("M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM12 7.5V12l3 2");
+  const WARNING_ICON = boardIcon(
+    "M10.3 4.5 2.8 17.6A2 2 0 0 0 4.5 20.5h15a2 2 0 0 0 1.7-2.9L13.7 4.5a2 2 0 0 0-3.4 0ZM12 9.5v4.5M12 17.2v.3",
+  );
   let annotationMode = true;
   let hovered = null;
   let selected = null;
   let ignoreNextClick = false;
   let shadow = null;
+  // The pin: the board's comment mark, on the corner of whatever a click would annotate. While
+  // a card or a chip is up it comes back to what that one is about: an element or a text range.
+  let pin = null;
+  /** @type {{ getBoundingClientRect: () => DOMRect } | null} */
+  let annotated = null;
+  // The chip a sent note shrinks to, and what the chrome last said of that note's delivery.
+  /** @type {{ el: HTMLElement, noteId: string, label: string, status: string, sawSending: boolean, sendRequested: boolean, render: () => void } | null} */
+  let activeChip = null;
+  // Words typed into a card that was cancelled, kept for that element's next card as the board
+  // keeps a cancelled diff comment.
+  const cancelledDrafts = new Map();
+  const NOTE_ID_PREFIX = Date.now().toString(36) + "-";
+  let noteCounter = 0;
   let counter = 0;
   const ids = new WeakMap();
 
@@ -1162,10 +1184,29 @@ export function createArtifactSdk(
     return isNativeInteractive(el);
   }
 
+  function placePin(rect) {
+    const root = ensureShadow();
+    if (!pin) {
+      pin = document.createElement("span");
+      pin.className = "comment-mark lavish-pin";
+      pin.innerHTML = COMMENT_ICON;
+      root.appendChild(pin);
+    }
+    // The mark is 22px across and centres itself on its top; it never leaves the viewport.
+    pin.style.left = Math.max(2, rect.left - 11) + "px";
+    pin.style.top = Math.max(11, rect.top) + "px";
+    pin.hidden = false;
+  }
+
+  function hidePin() {
+    if (pin) pin.hidden = true;
+  }
+
   function highlightElement(el) {
     if (!el) return;
     el.style.outline = "var(--lavish-annotate-outline,2px solid " + board.accent + ")";
     el.style.outlineOffset = "var(--lavish-annotate-offset,2px)";
+    placePin(el.getBoundingClientRect());
   }
 
   function clearHighlight(el) {
@@ -1190,6 +1231,7 @@ export function createArtifactSdk(
       mark.style.height = rect.height + "px";
       root.appendChild(mark);
     }
+    placePin(range.getBoundingClientRect());
   }
 
   function setAnnotationMode(enabled) {
@@ -1214,7 +1256,7 @@ export function createArtifactSdk(
 
   function queuePrompt(prompt, options = {}) {
     const originElement = options.element || document.activeElement || document.body;
-    /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: unknown, attachments?: Array<{ id: string, name?: string }>, _lavishQueueKey?: string }} */
+    /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: unknown, attachments?: Array<{ id: string, name?: string }>, _lavishQueueKey?: string, _lavishNoteId?: string }} */
     const item = {
       ...context(originElement),
       prompt: String(prompt || ""),
@@ -1227,6 +1269,7 @@ export function createArtifactSdk(
     if (options.tag) item.tag = String(options.tag);
     if (options.text) item.text = String(options.text);
     if (options.target) item.target = options.target;
+    if (options.noteId) item._lavishNoteId = String(options.noteId);
     if (options.data) item.prompt += "\n\nContext data:\n" + JSON.stringify(options.data, null, 2);
     // Attach only the client-controllable fields (server-vetted id + display name);
     // the chrome forwards these and the server re-resolves each id (see queuePrompts).
@@ -2239,7 +2282,7 @@ export function createArtifactSdk(
     style.textContent =
       ":host{all:initial;position:fixed;z-index:2147483647;left:0;top:0}" +
       board.shadowCss +
-      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-attach{display:inline-flex;align-items:center;gap:8px;min-height:36px;padding:4px 12px;font-size:.9375rem}.lavish-attach .icon{width:18px;height:18px}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
+      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating,.lavish-annotation-chip.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.comment-mark.lavish-pin{position:fixed;opacity:1;pointer-events:none}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-attach{display:inline-flex;align-items:center;gap:8px;min-height:36px;padding:4px 12px;font-size:.9375rem}.lavish-attach .icon{width:18px;height:18px}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
     shadow.appendChild(style);
     return shadow;
   }
@@ -2251,14 +2294,104 @@ export function createArtifactSdk(
       activeAttachments = null;
     }
     if (shadow) {
-      for (const el of [...shadow.querySelectorAll(".lavish-annotation-card")]) el.remove();
+      for (const el of [...shadow.querySelectorAll(".lavish-annotation-card,.lavish-annotation-chip")]) el.remove();
     }
+    activeChip = null;
+    annotated = null;
+    hidePin();
     clearHighlight(hovered);
     clearHighlight(selected);
     hovered = null;
     clearTextHighlight();
     selected = null;
     scheduleReviewStateReport();
+  }
+
+  // What a note's delivery reads as on its chip: the board's marks, one check while it is on its
+  // way and two once delivered. A note that drops back to the queue after it was being sent did
+  // not get through, and says so.
+  function noteMark(chip) {
+    if (chip.status === "delivered") return { tone: " succeeded", icon: CHECK_DOUBLE_ICON, label: "Delivered" };
+    if (chip.status === "queued" && chip.sawSending) {
+      return {
+        tone: " uncertain",
+        icon: WARNING_ICON,
+        label: "Not sent",
+        trouble: "Not sent. It is still in the queue: Send to Agent tries again.",
+      };
+    }
+    if (chip.status === "queued" && !chip.sendRequested) {
+      return { tone: "", icon: CLOCK_ICON, label: "Queued: Send to Agent sends it" };
+    }
+    return { tone: "", icon: CHECK_ICON, label: "Sending" };
+  }
+
+  // Once sent, the card shrinks to the board's chip in the same place: what the note is about,
+  // what it says, its delivery, a new comment on the same thing, and close.
+  function showSentChip(target, options, c, label, noteText, noteId, sendRequested) {
+    const root = ensureShadow();
+    closeCard();
+    if (options.range) {
+      highlightTextRange(options.range);
+      annotated = options.range;
+    } else {
+      selected = annotationTargetEl(target);
+      highlightElement(selected);
+      annotated = selected;
+    }
+    const rect = annotated.getBoundingClientRect();
+    const el = document.createElement("div");
+    el.className = "lavish-annotation-chip comment-overlay floating sent";
+    el.setAttribute("role", "status");
+    root.appendChild(el);
+    const chip = {
+      el,
+      noteId,
+      label,
+      status: "queued",
+      sawSending: false,
+      sendRequested,
+      render() {
+        const mark = noteMark(chip);
+        el.setAttribute("aria-label", "Comment on " + label + ". " + mark.label);
+        el.innerHTML =
+          '<span class="delivery' +
+          mark.tone +
+          '" aria-hidden="true">' +
+          mark.icon +
+          '</span><p class="comment-sent-text"><strong>' +
+          escapeAnnotationText(label) +
+          "</strong> " +
+          escapeAnnotationText(noteText || "Image annotation") +
+          '</p><button class="icon-button lavish-chip-new" type="button" aria-label="New comment on this" data-tip="New comment" data-tip-align="end">' +
+          COMMENT_ICON +
+          '</button><button class="icon-button lavish-chip-close" type="button" aria-label="Close" data-tip="Close" data-tip-align="end">' +
+          CLOSE_ICON +
+          "</button>" +
+          (mark.trouble ? '<p class="warning-text">' + mark.trouble + "</p>" : "");
+        const again = /** @type {HTMLButtonElement | null} */ (el.querySelector(".lavish-chip-new"));
+        const close = /** @type {HTMLButtonElement | null} */ (el.querySelector(".lavish-chip-close"));
+        if (again) again.onclick = () => showAnnotationCard(target, { ...options, context: c, restoreText: undefined });
+        if (close) close.onclick = closeCard;
+        el.style.left = Math.min(Math.max(12, rect.left), window.innerWidth - el.offsetWidth - 12) + "px";
+        el.style.top = Math.min(Math.max(12, rect.bottom + 8), window.innerHeight - el.offsetHeight - 12) + "px";
+      },
+    };
+    activeChip = chip;
+    chip.render();
+  }
+
+  function updateNoteStatus(noteId, status) {
+    if (!activeChip || activeChip.noteId !== String(noteId || "")) return;
+    // The note was taken out of the queue in the conversation panel: its chip goes with it.
+    if (status === "removed") {
+      closeCard();
+      return;
+    }
+    if (status !== "queued" && status !== "sending" && status !== "delivered") return;
+    if (status === "sending") activeChip.sawSending = true;
+    activeChip.status = status;
+    activeChip.render();
   }
 
   function showAnnotationCard(target, options = {}) {
@@ -2271,10 +2404,12 @@ export function createArtifactSdk(
     let anchor = target;
     if (options.range) {
       highlightTextRange(options.range);
+      annotated = options.range;
     } else {
       anchor = annotationTargetEl(target);
       selected = anchor;
       highlightElement(selected);
+      annotated = selected;
     }
 
     const rect = options.range ? options.range.getBoundingClientRect() : anchor.getBoundingClientRect();
@@ -2298,6 +2433,18 @@ export function createArtifactSdk(
           : c.tag === "mermaid-node"
             ? "Annotate node" + (nodeLabel ? ": " + escapeAnnotationText(nodeLabel) : "")
             : "Annotate &lt;" + c.tag + "&gt;";
+    // What the note is about, in the words its chip and the conversation use.
+    const label =
+      c.tag === "text"
+        ? "text"
+        : tableLabel
+          ? isCellItself
+            ? "cell: " + tableLabel
+            : "<" + c.tag + "> in " + tableLabel
+          : c.tag === "mermaid-node"
+            ? "node" + (nodeLabel ? ": " + nodeLabel : "")
+            : "<" + c.tag + ">";
+    const draftKey = [c.selector, c.tag, c.target && c.target.text ? c.target.text : ""].join("\n");
     const placeholder =
       c.tag === "text"
         ? "Tell the agent what to change about this text..."
@@ -2319,10 +2466,10 @@ export function createArtifactSdk(
       '<input class="lavish-attach-input" type="file" accept="' +
       ATTACHMENT_IMAGE_TYPES.accept +
       '" multiple hidden></div>' +
-      '<footer><span class="muted lavish-hint">Enter to queue &middot; ' +
+      '<footer><span class="muted lavish-hint">Enter sends &middot; Shift+Enter new line &middot; Esc cancels' +
+      '</span><button class="icon-button send lavish-send" type="button" aria-label="Send to the agent" data-tip="Send. ' +
       sendNowHint +
-      "+Enter to send &middot; paste or drop an image" +
-      '</span><button class="icon-button send lavish-send" type="button" aria-label="Queue" data-tip="Queue" data-tip-align="end">' +
+      '+Enter only queues it" data-tip-align="end">' +
       SEND_ICON +
       '</button><button class="icon-button lavish-cancel" type="button" aria-label="Cancel" data-tip="Cancel" data-tip-align="end">' +
       CLOSE_ICON +
@@ -2405,58 +2552,74 @@ export function createArtifactSdk(
       }
     });
 
-    // Try to queue the card. Returns true only if a prompt was actually queued, so
-    // the caller knows whether a follow-up "send now" should fire. Gates on any
+    // Try to queue the card. Returns the note's id only if a prompt was actually queued, so
+    // the caller knows whether a follow-up send should fire. Gates on any
     // still-uploading attachment (R2.4): queuing then would silently drop it, so we
     // keep the card open and tell the user to wait instead. Also gates on any errored
     // attachment (W2): collectReady drops errors and closeCard tears down the card, so
     // queuing would discard the failed image and its retry/remove UI - keep the card
     // open so the user can retry or explicitly remove it first.
-    function tryQueue() {
+    function tryQueue(sendRequested) {
       if (attachments.hasPending()) {
         attachments.setQueueBlocked(true);
-        return false;
+        return "";
       }
       if (attachments.hasErrors()) {
         attachments.setQueueBlocked(true);
-        return false;
+        return "";
       }
       attachments.setQueueBlocked(false);
       const prompt = textarea.value.trim();
       const readyAttachments = attachments.collectReady();
       // Allow an image-only annotation (the element/target still identifies what it
       // refers to), but never queue an empty card.
-      if (prompt || readyAttachments.length) {
-        queuePrompt(prompt, { ...c, queueKey: "", attachments: readyAttachments });
+      if (!prompt && !readyAttachments.length) {
+        closeCard();
+        return "";
       }
-      closeCard();
-      return true;
+      noteCounter += 1;
+      const noteId = NOTE_ID_PREFIX + noteCounter;
+      queuePrompt(prompt, { ...c, queueKey: "", attachments: readyAttachments, noteId });
+      cancelledDrafts.delete(draftKey);
+      showSentChip(target, options, c, label, prompt, noteId, sendRequested);
+      return noteId;
     }
 
-    cancelButton.onclick = closeCard;
+    // Cancelling keeps the words for this element's next card, as the board keeps a cancelled
+    // diff comment; nothing typed is thrown away by a stray Escape.
+    function cancelCard() {
+      if (textarea.value.trim()) cancelledDrafts.set(draftKey, textarea.value);
+      else cancelledDrafts.delete(draftKey);
+      closeCard();
+    }
+
+    cancelButton.onclick = cancelCard;
     sendButton.onclick = () => {
-      tryQueue();
+      if (tryQueue(true)) sendQueuedPrompts();
     };
     textarea.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
-        const sendNow = (event.ctrlKey || event.metaKey) && (!!textarea.value.trim() || attachments.hasReady());
-        const queued = tryQueue();
+        // Enter sends, as on the board. Ctrl or Cmd only adds the note to the queue, for several
+        // notes that go together with one Send to Agent.
+        const queueOnly = event.ctrlKey || event.metaKey;
+        const queued = tryQueue(!queueOnly);
         // postMessage delivery is ordered, so the queued prompt lands before the send.
-        if (queued && sendNow) sendQueuedPrompts();
+        if (queued && !queueOnly) sendQueuedPrompts();
       } else if (event.key === "Escape" && !event.isComposing) {
-        // Close only when there is nothing to lose; excludes isComposing since mid-IME text isn't in textarea.value yet.
-        if (textarea.value.trim() || attachments.hasPending() || attachments.hasErrors() || attachments.hasReady())
-          return;
+        // An image has nowhere to be kept, so a card holding one stays open; excludes isComposing
+        // since mid-IME text isn't in textarea.value yet.
+        if (attachments.hasPending() || attachments.hasErrors() || attachments.hasReady()) return;
         event.preventDefault();
-        closeCard();
+        cancelCard();
       }
     });
     // Unsent annotation text is review context Lavish owns, so it is reported to the chrome and
     // replayed after a live reload.
     textarea.addEventListener("input", scheduleReviewStateReport);
-    if (typeof options.restoreText === "string") {
-      textarea.value = options.restoreText;
+    const restoreText = typeof options.restoreText === "string" ? options.restoreText : cancelledDrafts.get(draftKey);
+    if (typeof restoreText === "string") {
+      textarea.value = restoreText;
       // Re-report immediately so restored text survives a second reload too, rather than only
       // living until the next keystroke.
       scheduleReviewStateReport();
@@ -2502,6 +2665,7 @@ export function createArtifactSdk(
       window.scrollTo(Number(msg.x) || 0, Number(msg.y) || 0);
     }
     if (msg.type === "lavish:restoreReviewState") restoreReviewState(msg.state);
+    if (msg.type === "lavish:noteStatus") updateNoteStatus(msg.noteId, msg.status);
     if (msg.type === "lavish:revealElement") revealElement(msg.selector);
   });
 
@@ -2547,6 +2711,8 @@ export function createArtifactSdk(
       if (scrollFrame) return;
       scrollFrame = window.requestAnimationFrame(() => {
         scrollFrame = 0;
+        const pinned = hovered || annotated;
+        if (pinned && pin && !pin.hidden) placePin(pinned.getBoundingClientRect());
         postArtifactMessage("lavish:scroll", { x: window.scrollX, y: window.scrollY });
       });
     },
@@ -2578,6 +2744,9 @@ export function createArtifactSdk(
       if (hovered && hovered !== selected) {
         clearHighlight(hovered);
         hovered = null;
+        // The pin goes back to what is being annotated, or away.
+        if (annotated) placePin(annotated.getBoundingClientRect());
+        else hidePin();
       }
     },
     true,

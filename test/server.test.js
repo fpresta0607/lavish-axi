@@ -618,10 +618,14 @@ test("annotation card does not block its own Queue button", () => {
   assert.doesNotMatch(js, /card\.addEventListener\('click',event=>event\.stopPropagation\(\),true\)/);
 });
 
-test("annotation card labels its submit action as Queue", () => {
+test("annotation card labels its submit action as sending to the agent", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /class="icon-button send lavish-send" type="button" aria-label="Queue" data-tip="Queue"/);
+  assert.match(
+    js,
+    /class="icon-button send lavish-send" type="button" aria-label="Send to the agent" data-tip="Send\. '/,
+  );
+  assert.match(js, /\+Enter only queues it" data-tip-align="end">/);
   assert.doesNotMatch(js, /Queue Prompt/);
 });
 
@@ -6344,23 +6348,24 @@ test("layout gate curtain reuses the ended overlay card styling", async () => {
   assert.match(noGateHtml, /"layoutGateEnabled":false/);
 });
 
-test("annotation card queues prompt on Enter and inserts newline on Shift+Enter", () => {
+test("annotation card sends on Enter and inserts newline on Shift+Enter, as the board's comment box does", () => {
   const js = createSdkJs("abc");
 
   assert.match(js, /textarea\.addEventListener\(["']keydown["']/);
   assert.match(js, /event\.key === ["']Enter["'] && !event\.shiftKey/);
   assert.match(js, /event\.preventDefault\(\)/);
   // Enter routes through tryQueue(), which gates on in-flight uploads (R2.4).
-  assert.match(js, /const queued = tryQueue\(\)/);
+  assert.match(js, /const queued = tryQueue\(!queueOnly\)/);
+  assert.match(js, /if \(queued && !queueOnly\) sendQueuedPrompts\(\)/);
+  // The hint is the board's, word for word.
+  assert.match(js, /Enter sends &middot; Shift\+Enter new line &middot; Esc cancels/);
 });
 
-test("annotation card queues and sends immediately on Ctrl+Enter or Cmd+Enter", () => {
+test("annotation card only queues on Ctrl+Enter or Cmd+Enter, for notes that go together", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /event\.ctrlKey \|\| event\.metaKey/);
-  assert.match(js, /sendQueuedPrompts\(\)/);
+  assert.match(js, /const queueOnly = event\.ctrlKey \|\| event\.metaKey/);
   assert.match(js, /class="muted lavish-hint"/);
-  assert.match(js, /\+Enter to send/);
   assert.match(js, /\.comment-overlay footer \.muted \{ flex: 1; font-size: \.9375rem; \}/);
 });
 

@@ -247,11 +247,23 @@ function bootSdk({
       assert.ok(card, "clicking an element opens an annotation card");
       return card;
     },
+    // The card's Send queues the note and sends the queue; what the note carried is the
+    // queuePrompt message, whatever followed it.
     queue(text) {
       const card = this.card();
       card.querySelector("textarea").value = text;
       card.querySelector(".lavish-send").onclick();
-      return posted.at(-1);
+      return posted.findLast((message) => message.type === "lavish:queuePrompt");
+    },
+    shadowChildren(className) {
+      return documentElement.children
+        .flatMap((child) => child.shadowRoot?.children || [])
+        .filter((child) => String(child.className).split(" ").includes(className));
+    },
+    hover(target) {
+      const listener = documentListeners.find((entry) => entry.type === "mouseover");
+      assert.ok(listener, "the SDK registers a document mouseover listener");
+      listener.handler({ target });
     },
   };
 }
@@ -441,17 +453,195 @@ test("Escape during IME composition leaves an empty annotation card open", () =>
   assert.notEqual(paragraph.style.outline, "", "a composing Escape belongs to the IME, not the card");
 });
 
-test("Escape leaves an annotation card with typed text open and untouched", () => {
+// Escape cancels as it does on the board's diff comment, and as there the words are not lost:
+// the same element's next card opens with them.
+test("Escape cancels a card with typed text and keeps the text for that element", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  const other = appendTo(sdk.body, cell("h2", "A heading"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "keep this note";
+  pressEscape(sdk.card().querySelector("textarea"));
+  assert.equal(paragraph.style.outline, "", "the highlight is cleared, proving the card closed");
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:queuePrompt"),
+    false,
+    "a cancelled note is never queued",
+  );
+
+  sdk.click(other);
+  assert.equal(sdk.card().querySelector("textarea").value, "", "another element starts empty");
+
+  sdk.click(paragraph);
+  assert.equal(sdk.card().querySelector("textarea").value, "keep this note");
+});
+
+test("the Cancel button keeps the typed text for that element too", () => {
   const sdk = bootSdk();
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  const textarea = sdk.card().querySelector("textarea");
-  textarea.value = "keep this note";
-  pressEscape(textarea);
+  sdk.card().querySelector("textarea").value = "half a thought";
+  sdk.card().querySelector(".lavish-cancel").onclick();
+  sdk.click(paragraph);
 
-  assert.notEqual(paragraph.style.outline, "", "the card is still open, so the highlight remains");
-  assert.equal(textarea.value, "keep this note", "Escape never discards the typed text");
+  assert.equal(sdk.card().querySelector("textarea").value, "half a thought");
+});
+
+test("a sent note leaves nothing behind for its element's next card", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.queue("Reword this");
+  sdk.click(paragraph);
+
+  assert.equal(sdk.card().querySelector("textarea").value, "");
+});
+
+function pressEnter(textarea, modifiers = {}) {
+  const listener = textarea.listeners.find((entry) => entry.type === "keydown");
+  assert.ok(listener, "the annotation textarea registers a keydown listener");
+  listener.handler({ key: "Enter", preventDefault() {}, ...modifiers });
+}
+
+const postedTypes = (sdk) => sdk.posted.map((message) => message.type).filter((type) => /Prompt/.test(type));
+
+test("Enter sends the note: it is queued, then the queue is sent", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "Reword this";
+  pressEnter(sdk.card().querySelector("textarea"));
+
+  assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt", "lavish:sendQueuedPrompts"]);
+  assert.equal(sdk.posted.find((message) => message.type === "lavish:queuePrompt").prompt.prompt, "Reword this");
+});
+
+test("Shift+Enter is a new line and sends nothing", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "First line";
+  pressEnter(sdk.card().querySelector("textarea"), { shiftKey: true });
+
+  assert.deepEqual(postedTypes(sdk), []);
+});
+
+test("Ctrl+Enter and Cmd+Enter add the note to the queue without sending it", () => {
+  for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+    const sdk = bootSdk();
+    const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+    sdk.click(paragraph);
+    sdk.card().querySelector("textarea").value = "One of several";
+    pressEnter(sdk.card().querySelector("textarea"), modifier);
+
+    assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt"]);
+  }
+});
+
+test("Enter on an empty card closes it and sends nothing", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  pressEnter(sdk.card().querySelector("textarea"));
+
+  assert.deepEqual(postedTypes(sdk), []);
+  assert.equal(paragraph.style.outline, "");
+});
+
+// Once sent, the card shrinks to the board's chip: what it was about, what was said, and check
+// marks that follow the note's delivery as the chrome reports it.
+test("a sent note shrinks to a chip whose check marks follow its delivery", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  const note = sdk.queue("Reword <this>");
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+  assert.ok(chip, "the card became a chip");
+  assert.match(chip.className, /comment-overlay floating sent/);
+  assert.match(chip.innerHTML, /<p class="comment-sent-text"><strong>&lt;p&gt;<\/strong> Reword &lt;this&gt;<\/p>/);
+  assert.match(chip.innerHTML, /<span class="delivery" aria-hidden="true">/);
+  assert.notEqual(paragraph.style.outline, "", "the element stays marked while its chip is up");
+
+  const noteId = note.prompt._lavishNoteId;
+  assert.match(noteId, /\S/);
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  assert.match(chip.innerHTML, /<span class="delivery" aria-hidden="true">/);
+  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Sending");
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
+  assert.match(chip.innerHTML, /<span class="delivery succeeded" aria-hidden="true">/);
+  assert.match(chip.innerHTML, /M2 12\.5 6\.5 17 16 7\.5M11\.5 16l1 1L22 7\.5/);
+  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Delivered");
+});
+
+test("a note that falls back to the queue after a failed send says so on its chip", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  const noteId = sdk.queue("Reword this").prompt._lavishNoteId;
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "queued" });
+
+  assert.match(chip.innerHTML, /<span class="delivery uncertain" aria-hidden="true">/);
+  assert.match(
+    chip.innerHTML,
+    /<p class="warning-text">Not sent\. It is still in the queue: Send to Agent tries again\.<\/p>/,
+  );
+});
+
+test("a chip ignores the status of a note that is not its own", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.queue("Reword this");
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId: "someone-else", status: "delivered" });
+
+  assert.doesNotMatch(chip.innerHTML, /delivery succeeded/);
+});
+
+test("a note added to the queue without sending shows as queued on its chip", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "One of several";
+  pressEnter(sdk.card().querySelector("textarea"), { ctrlKey: true });
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+
+  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Queued: Send to Agent sends it");
+});
+
+// The pin is the board's comment mark: it sits on the corner of whatever a click would annotate.
+test("the pin marks the hovered element and stays on the one being annotated", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.hover(paragraph);
+  const pin = sdk.shadowChildren("lavish-pin").at(-1);
+  assert.ok(pin, "hovering shows the pin");
+  assert.match(pin.className, /comment-mark/);
+  // The stub element sits at left 10, top 10; the mark stays inside the viewport.
+  assert.equal(pin.style.left, "2px");
+  assert.equal(pin.style.top, "11px");
+  assert.equal(pin.hidden, false);
+
+  sdk.click(paragraph);
+  assert.equal(pin.hidden, false, "the annotated element keeps its pin");
+
+  pressEscape(sdk.card().querySelector("textarea"));
+  assert.equal(pin.hidden, true, "a cancelled card takes its pin with it");
 });
 
 test("Escape leaves an annotation card with an in-flight attachment open, even with no text", () => {

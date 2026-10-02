@@ -8048,6 +8048,106 @@ test("a failed send returns its notes to Queued with the remove control back", a
   );
 });
 
+// ---- A note written on the page hears of its own delivery ----
+// The annotation card shrinks to a chip whose check marks follow the note: the chrome owns the
+// queue, so it tells the page what became of each note the page put a chip up for.
+
+const noteStatuses = (chrome) =>
+  chrome.postedToFrame
+    .filter((message) => message.type === "lavish:noteStatus")
+    .map((message) => message.noteId + ":" + message.status);
+
+const pageNote = (noteId, prompt = "Rename this") => ({
+  type: "lavish:queuePrompt",
+  prompt: { prompt, selector: "h2#phase-1", tag: "h2", text: "Phase 1: Inventory", _lavishNoteId: noteId },
+});
+
+test("a page note is told queued, then sending, then delivered once the transcript carries it", async () => {
+  let resolvePost = () => {};
+  /** @type {string[]} */
+  const bodies = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/prompts")) {
+        bodies.push(String(init?.body || ""));
+        return new Promise((resolve) => {
+          resolvePost = () =>
+            resolve({
+              ok: true,
+              json: async () => ({
+                status: "queued",
+                pending_prompts: 1,
+                chat: [{ role: "user", kind: "annotation", text: "Rename this", at: "2026-10-02T00:00:00.000Z" }],
+              }),
+            });
+        });
+      }
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.sendFrameMessage(pageNote("note-1"));
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued"]);
+
+  chrome.sendFrameMessage({ type: "lavish:sendQueuedPrompts" });
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued", "note-1:sending"]);
+
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  resolvePost();
+  await flushPromises();
+
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued", "note-1:sending", "note-1:delivered"]);
+  assert.equal(bodies.length, 1);
+  assert.match(bodies[0], /Rename this/);
+  assert.doesNotMatch(
+    bodies[0],
+    /_lavishNoteId|note-1/,
+    "the chip's id is the page's own business, never the server's",
+  );
+});
+
+test("a page note whose send fails is told it is back in the queue", async () => {
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/prompts")) throw new Error("network unavailable");
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.sendFrameMessage(pageNote("note-1"));
+  chrome.sendFrameMessage({ type: "lavish:sendQueuedPrompts" });
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued", "note-1:sending", "note-1:queued"]);
+});
+
+test("a page note removed from the conversation is told so, and each note hears only of itself", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage(pageNote("note-1", "First"));
+  chrome.sendFrameMessage(pageNote("note-2", "Second"));
+
+  const [removeFirst] = chrome.element("queuedLog").querySelectorAll(".queued-remove");
+  removeFirst.click({ stopPropagation() {} });
+
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued", "note-2:queued", "note-1:removed"]);
+});
+
+test("a note with no chip, or an id no chip could have made, is reported to nobody", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "From a page control", selector: "form", tag: "choice", text: "Pick" },
+  });
+  chrome.sendFrameMessage(pageNote({ not: "a string" }));
+  chrome.sendFrameMessage(pageNote("x".repeat(65)));
+  chrome.element("chatInput").value = "Typed in the composer";
+  chrome.element("send").click();
+
+  assert.deepEqual(noteStatuses(chrome), []);
+});
+
 // ---- Agent prose renders as structure; user text never renders as html ----
 
 test("an agent reply renders the server's html and a text-only reply stays escaped", async () => {

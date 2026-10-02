@@ -49,7 +49,7 @@ test("the SDK bundle applies upload results and offers a retry", () => {
 test("the SDK bundle carries ready attachment refs on the queued prompt", () => {
   assert.match(sdk, /options\.attachments/);
   assert.match(sdk, /item\.attachments = attachments/);
-  assert.match(sdk, /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments \}\)/);
+  assert.match(sdk, /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, noteId \}\)/);
 });
 
 test("acceptedImageTypes turns the server's list into the card's lookups", () => {
@@ -113,7 +113,10 @@ test("the SDK bundle gates queuing until in-flight uploads settle (R2.4)", () =>
   assert.match(sdk, /if \(attachments\.hasPending\(\)\)/);
   assert.match(sdk, /Waiting for an image to finish uploading/);
   // "Send now" only fires when the queue actually happened.
-  assert.match(sdk, /const queued = tryQueue\(\);\s*\n?\s*[\s\S]*?if \(queued && sendNow\) sendQueuedPrompts\(\)/);
+  assert.match(
+    sdk,
+    /const queued = tryQueue\(!queueOnly\);\s*\n?\s*[\s\S]*?if \(queued && !queueOnly\) sendQueuedPrompts\(\)/,
+  );
 });
 
 test("the count-cap notice reads as an error, not as the passive keyboard hint", () => {

@@ -21,6 +21,12 @@ const retiredDraftStorageKey = "lavish-axi:retired-drafts:" + key;
 /** @type {any[]} */
 const retiredDraftNodes = [];
 const internalQueueKeyField = "_lavishQueueKey";
+// The id the annotation card gives a note so its chip can follow that note's delivery. It is the
+// page's own business: reported back to the page, never sent to the server.
+const internalNoteIdField = "_lavishNoteId";
+const NOTE_ID_MAX = 64;
+// What each note with a chip was last told, so a re-render says nothing twice.
+const reportedNoteStatuses = new Map();
 const promptIdentityField = "prompt_id";
 const PROMPT_IDENTITY_MAX = 128;
 const PROMPT_IDENTITY_RE = /^[A-Za-z0-9_-]+$/;
@@ -636,8 +642,24 @@ function isPromptSending(prompt) {
   );
 }
 
+function promptNoteId(prompt) {
+  const noteId = prompt ? prompt[internalNoteIdField] : "";
+  return typeof noteId === "string" && noteId.length <= NOTE_ID_MAX ? noteId : "";
+}
+
+// Tells the page what became of a note it put a chip up for: queued, sending, delivered or
+// removed. The last two are the last word on a note.
+function reportNoteStatus(prompt, status) {
+  const noteId = promptNoteId(prompt);
+  if (!noteId || reportedNoteStatuses.get(noteId) === status) return;
+  if (status === "delivered" || status === "removed") reportedNoteStatuses.delete(noteId);
+  else reportedNoteStatuses.set(noteId, status);
+  postToFrame({ type: "lavish:noteStatus", noteId, status });
+}
+
 function render() {
   queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
+  for (const prompt of queued) reportNoteStatus(prompt, isPromptSending(prompt) ? "sending" : "queued");
 
   for (const button of queuedLog.querySelectorAll(".queued-remove")) {
     const removeButton = /** @type {HTMLButtonElement} */ (button);
@@ -978,6 +1000,7 @@ function settleQueuedFromTranscript(chat, shouldRender = true) {
     if (!promptAcknowledgedInChat(prompt, chat)) continue;
     settledPrompts.add(prompt);
     deliveredPrompts.add(prompt);
+    reportNoteStatus(prompt, "delivered");
   }
   if (!settledPrompts.size) return false;
   for (let i = queued.length - 1; i >= 0; i -= 1) {
@@ -1362,6 +1385,7 @@ function scrollElementIntoView(el) {
 function removeQueuedPrompt(index, event) {
   if (event) event.stopPropagation();
   if (terminalSubmission || isPromptSending(queued[index])) return;
+  reportNoteStatus(queued[index], "removed");
   queued.splice(index, 1);
   persistQueuedPrompts();
   if (!queued.length) {
@@ -1419,6 +1443,7 @@ function stripInternalPromptFields(prompt) {
   if (!prompt || typeof prompt !== "object") return prompt;
   const clean = { ...prompt };
   delete clean[internalQueueKeyField];
+  delete clean[internalNoteIdField];
   return clean;
 }
 
@@ -2274,6 +2299,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
   if (!acceptedChat || reconciledChat) {
     for (const prompt of prompts) {
       deliveredPrompts.add(prompt);
+      reportNoteStatus(prompt, "delivered");
       const index = queued.indexOf(prompt);
       if (index !== -1) queued.splice(index, 1);
     }
