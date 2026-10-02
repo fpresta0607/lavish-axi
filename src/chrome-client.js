@@ -21,6 +21,12 @@ const retiredDraftStorageKey = "lavish-axi:retired-drafts:" + key;
 /** @type {any[]} */
 const retiredDraftNodes = [];
 const internalQueueKeyField = "_lavishQueueKey";
+// The id the annotation card gives a note so its chip can follow that note's delivery. It is the
+// page's own business: reported back to the page, never sent to the server.
+const internalNoteIdField = "_lavishNoteId";
+const NOTE_ID_MAX = 64;
+// What each note with a chip was last told, so a re-render says nothing twice.
+const reportedNoteStatuses = new Map();
 const promptIdentityField = "prompt_id";
 const PROMPT_IDENTITY_MAX = 128;
 const PROMPT_IDENTITY_RE = /^[A-Za-z0-9_-]+$/;
@@ -127,6 +133,7 @@ const panelScrim = /** @type {HTMLDivElement} */ (document.getElementById("panel
 const sendButton = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
 const sendAndEndButton = /** @type {HTMLButtonElement} */ (document.getElementById("sendAndEnd"));
 const annotationSwitch = /** @type {HTMLButtonElement} */ (document.getElementById("annotation"));
+const exploreSwitch = /** @type {HTMLButtonElement} */ (document.getElementById("explore"));
 const moreWrap = /** @type {HTMLDivElement} */ (document.getElementById("moreWrap"));
 const moreButton = /** @type {HTMLButtonElement} */ (document.getElementById("moreButton"));
 const moreMenu = /** @type {HTMLDivElement} */ (document.getElementById("moreMenu"));
@@ -485,8 +492,19 @@ function persistTerminalReservation(reserved) {
   }
 }
 
-const REMOVE_ICON_SVG =
-  '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+// The board's line icons (code-goblins frontend/src/Icon.tsx), drawn by its `.icon` rule.
+function boardIconSvg(path) {
+  return '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
+}
+const REMOVE_ICON_SVG = boardIconSvg("M6 6l12 12M18 6 6 18");
+// A note's delivery reads as the board's comment chip does: one check while it is on its way,
+// two once the transcript carries it.
+const SENDING_MARK_HTML =
+  '<span class="delivery" role="img" aria-label="Sending">' + boardIconSvg("M5 12.5 9.5 17 19 7.5") + "</span>";
+const DELIVERED_MARK_HTML =
+  '<span class="delivery succeeded" role="img" aria-label="Delivered">' +
+  boardIconSvg("M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5") +
+  "</span>";
 const ANCHOR_EXCERPT_MAX = 120;
 const ANCHOR_SELECTOR_MAX = 512;
 const ANCHOR_LABEL_MAX = 40;
@@ -594,7 +612,7 @@ function queuedBubbleHtml(prompt, index) {
   const sending = isPromptSending(prompt);
   return (
     '<div class="bubble user queued"><small>' +
-    (sending ? "Sending\u2026" : "Queued") +
+    (sending ? SENDING_MARK_HTML + "Sending\u2026" : "Queued") +
     ' <button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
     index +
     '">' +
@@ -624,8 +642,24 @@ function isPromptSending(prompt) {
   );
 }
 
+function promptNoteId(prompt) {
+  const noteId = prompt ? prompt[internalNoteIdField] : "";
+  return typeof noteId === "string" && noteId.length <= NOTE_ID_MAX ? noteId : "";
+}
+
+// Tells the page what became of a note it put a chip up for: queued, sending, delivered or
+// removed. The last two are the last word on a note.
+function reportNoteStatus(prompt, status) {
+  const noteId = promptNoteId(prompt);
+  if (!noteId || reportedNoteStatuses.get(noteId) === status) return;
+  if (status === "delivered" || status === "removed") reportedNoteStatuses.delete(noteId);
+  else reportedNoteStatuses.set(noteId, status);
+  postToFrame({ type: "lavish:noteStatus", noteId, status });
+}
+
 function render() {
   queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
+  for (const prompt of queued) reportNoteStatus(prompt, isPromptSending(prompt) ? "sending" : "queued");
 
   for (const button of queuedLog.querySelectorAll(".queued-remove")) {
     const removeButton = /** @type {HTMLButtonElement} */ (button);
@@ -647,6 +681,7 @@ function updateSendState() {
   sendButton.disabled = ended || terminalReserved;
   sendAndEndButton.disabled = ended || Boolean(terminalSubmission?.inFlight);
   annotationSwitch.disabled = ended || terminalReserved;
+  exploreSwitch.disabled = ended || terminalReserved;
   chatInput.disabled = ended || terminalReserved;
   chatAttachButton.disabled = ended || terminalReserved;
   if (chatInput.disabled) voiceDictation.dispose();
@@ -835,15 +870,19 @@ async function copyText(text) {
 // user entry is always escaped text, with its anchor line and thumbnails when it carries them.
 function chatBubbleHtml(entry) {
   if (entry.role === "agent") {
+    // The agent speaks in the board's dialogue box: its name on the tab, its portrait, its words.
     return (
-      "<small>Agent</small>" +
+      '<span class="dialogue-tab">Agent</span><div class="dialogue-box"><span class="dialogue-portrait"><span class="goblin-avatar"></span></span>' +
       (typeof entry.html === "string" && entry.html
-        ? '<div class="chat-md">' + entry.html + "</div>"
-        : '<div class="bubble-text">' + escapeHtml(entry.text) + "</div>")
+        ? '<div class="dialogue-text chat-md">' + entry.html + "</div>"
+        : '<div class="dialogue-text bubble-text">' + escapeHtml(entry.text) + "</div>") +
+      "</div>"
     );
   }
   return (
-    "<small>You</small>" +
+    "<small>" +
+    DELIVERED_MARK_HTML +
+    "You</small>" +
     anchorHtml(entry.anchor) +
     userBubbleTextHtml(entry, entry.text) +
     bubbleAttachmentsHtml(entry)
@@ -857,7 +896,7 @@ function addChat(entry, shouldScroll = true) {
   if (!text && !(role === "agent" ? entry.html : attachmentCount(entry) || entry.anchor)) return;
 
   const el = document.createElement("div");
-  el.className = "bubble " + role;
+  el.className = role === "agent" ? "bubble agent dialogue" : "bubble user";
   el.innerHTML = chatBubbleHtml({ ...entry, role, text });
   chatLog.appendChild(el);
   if (shouldScroll) scrollElementIntoView(el);
@@ -961,6 +1000,7 @@ function settleQueuedFromTranscript(chat, shouldRender = true) {
     if (!promptAcknowledgedInChat(prompt, chat)) continue;
     settledPrompts.add(prompt);
     deliveredPrompts.add(prompt);
+    reportNoteStatus(prompt, "delivered");
   }
   if (!settledPrompts.size) return false;
   for (let i = queued.length - 1; i >= 0; i -= 1) {
@@ -1052,7 +1092,8 @@ function setReviewState(state) {
   lastReviewState = state;
   // The artifact reported a card, so its anchor exists: whatever miss was recorded is answered.
   if (state?.card) unrestorableDraftMiss = null;
-  if (!state || (!state.card && !(Array.isArray(state.fields) && state.fields.length))) {
+  const holds = (list) => Array.isArray(list) && list.length > 0;
+  if (!state || (!state.card && !holds(state.fields) && !holds(state.choices))) {
     try {
       sessionStorage.removeItem(reviewStateStorageKey);
     } catch {
@@ -1345,6 +1386,7 @@ function scrollElementIntoView(el) {
 function removeQueuedPrompt(index, event) {
   if (event) event.stopPropagation();
   if (terminalSubmission || isPromptSending(queued[index])) return;
+  reportNoteStatus(queued[index], "removed");
   queued.splice(index, 1);
   persistQueuedPrompts();
   if (!queued.length) {
@@ -1402,6 +1444,7 @@ function stripInternalPromptFields(prompt) {
   if (!prompt || typeof prompt !== "object") return prompt;
   const clean = { ...prompt };
   delete clean[internalQueueKeyField];
+  delete clean[internalNoteIdField];
   return clean;
 }
 
@@ -2257,6 +2300,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
   if (!acceptedChat || reconciledChat) {
     for (const prompt of prompts) {
       deliveredPrompts.add(prompt);
+      reportNoteStatus(prompt, "delivered");
       const index = queued.indexOf(prompt);
       if (index !== -1) queued.splice(index, 1);
     }
@@ -3143,6 +3187,7 @@ function markSessionEnded() {
   renderRevisionLegend();
   closeWhiteboard();
   annotationSwitch.disabled = true;
+  exploreSwitch.disabled = true;
   moreButton.disabled = true;
   chatInput.disabled = true;
   updateSendState();
@@ -4441,10 +4486,17 @@ function toggleAnnotationMode() {
   if (ended || terminalSubmission) return;
   annotation = !annotation;
   annotationSwitch.setAttribute("aria-pressed", String(annotation));
+  exploreSwitch.setAttribute("aria-pressed", String(!annotation));
   postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation });
 }
 
-annotationSwitch.onclick = toggleAnnotationMode;
+// The mode pill's two halves each choose their mode; the half already chosen does nothing.
+annotationSwitch.onclick = () => {
+  if (!annotation) toggleAnnotationMode();
+};
+exploreSwitch.onclick = () => {
+  if (annotation) toggleAnnotationMode();
+};
 
 sendButton.onclick = () => sendQueued(false);
 sendAndEndButton.onclick = () => sendQueued(true);

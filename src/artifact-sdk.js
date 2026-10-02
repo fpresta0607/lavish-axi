@@ -2,6 +2,7 @@
 
 import { readArtifactRevisions } from "./artifact-revisions.js";
 import * as mermaidHelpers from "./mermaid-node.js";
+import { choiceAnswer, orderedChoices, parsePageChoices } from "./page-choices.js";
 import { tableCellTarget } from "./table-cell.js";
 
 export const LAVISH_INTERNAL_QUEUE_KEY = "_lavishQueueKey";
@@ -449,7 +450,7 @@ export function deriveAttachmentNoticeState(state = {}) {
  * @param {number} [artifactRevision]
  * @param {string} [artifactLoadToken]
  * @param {string} [sessionKey]
- * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[] }} [options]
+ * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[], board?: { shadowCss: string, fontFaces: string, accent: string, scrollbarThumb: string, scrollbarTrack: string } }} [options]
  */
 export function createArtifactSdk(
   deriveQueueKey,
@@ -464,11 +465,48 @@ export function createArtifactSdk(
   function postArtifactMessage(type, payload = {}) {
     parent.postMessage({ type, ...payload, artifact_load_token: String(artifactLoadToken || "") }, "*");
   }
+  // The Code Goblins board's look, by value: the server reads it from the board's own token block
+  // and copied rules (src/board-tokens.css, src/board-components.css) and hands it over here.
+  const board = options.board;
+  if (!board) throw new Error("the SDK needs the board's look: pass options.board");
+  // The board's line icons (code-goblins frontend/src/Icon.tsx), drawn by its `.icon` rule.
+  const boardIcon = (path) =>
+    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
+  const SEND_ICON = boardIcon("M20.5 3.5 10.5 13.5M20.5 3.5l-6.5 17-3.5-7-7-3.5Z");
+  const CLOSE_ICON = boardIcon("M6 6l12 12M18 6 6 18");
+  const IMAGES_ICON = boardIcon(
+    "M7.5 3.5h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1ZM3.5 7.5v12a1 1 0 0 0 1 1h12M6.5 14l4-4 3 3 2-2 5 5M15 7.5h.01",
+  );
+  const COMMENT_ICON = boardIcon(
+    "M5 4.5h14A1.5 1.5 0 0 1 20.5 6v9a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V6A1.5 1.5 0 0 1 5 4.5Z",
+  );
+  const CHECK_ICON = boardIcon("M5 12.5 9.5 17 19 7.5");
+  const CHECK_DOUBLE_ICON = boardIcon("M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5");
+  const CLOCK_ICON = boardIcon("M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM12 7.5V12l3 2");
+  const WARNING_ICON = boardIcon(
+    "M10.3 4.5 2.8 17.6A2 2 0 0 0 4.5 20.5h15a2 2 0 0 0 1.7-2.9L13.7 4.5a2 2 0 0 0-3.4 0ZM12 9.5v4.5M12 17.2v.3",
+  );
   let annotationMode = true;
   let hovered = null;
   let selected = null;
   let ignoreNextClick = false;
   let shadow = null;
+  // The pin: the board's comment mark, on the corner of whatever a click would annotate. While
+  // a card or a chip is up it comes back to what that one is about: an element or a text range.
+  let pin = null;
+  /** @type {{ getBoundingClientRect: () => DOMRect } | null} */
+  let annotated = null;
+  // The chip a sent note shrinks to, and what the chrome last said of that note's delivery.
+  /** @type {{ el: HTMLElement, noteId: string, label: string, status: string, sawSending: boolean, sendRequested: boolean, render: () => void } | null} */
+  let activeChip = null;
+  // Words typed into a card that was cancelled, kept for that element's next card as the board
+  // keeps a cancelled diff comment.
+  const cancelledDrafts = new Map();
+  // The question cards drawn for the choices this page declares, and what was picked on each.
+  /** @type {Array<{ question: { id: string, question: string, detail: string, asker: string, options: string[], recommended: string }, form: HTMLElement, selection: string, written: string, answered: string, noteId: string, status: string, sawSending: boolean, render: () => void }>} */
+  const choiceCards = [];
+  const NOTE_ID_PREFIX = Date.now().toString(36) + "-";
+  let noteCounter = 0;
   let counter = 0;
   const ids = new WeakMap();
 
@@ -511,9 +549,6 @@ export function createArtifactSdk(
   // annotation-card iframe where any external symbol reference would resolve to
   // nothing. The X sits inside a 14-unit viewBox with even margins so it is
   // optically centered in the round button.
-  const REMOVE_ICON =
-    '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
-
   function attachmentChipHtml(item, index) {
     const name = escapeAnnotationText(item.name || "image");
     const thumb = item.url
@@ -547,7 +582,7 @@ export function createArtifactSdk(
       '<button type="button" class="lavish-attachment-remove" data-attachment-remove="' +
       index +
       '" aria-label="Remove image" title="Remove">' +
-      REMOVE_ICON +
+      CLOSE_ICON +
       "</button></div>"
     );
   }
@@ -1153,10 +1188,29 @@ export function createArtifactSdk(
     return isNativeInteractive(el);
   }
 
+  function placePin(rect) {
+    const root = ensureShadow();
+    if (!pin) {
+      pin = document.createElement("span");
+      pin.className = "comment-mark lavish-pin";
+      pin.innerHTML = COMMENT_ICON;
+      root.appendChild(pin);
+    }
+    // The mark is 22px across and centres itself on its top; it never leaves the viewport.
+    pin.style.left = Math.max(2, rect.left - 11) + "px";
+    pin.style.top = Math.max(11, rect.top) + "px";
+    pin.hidden = false;
+  }
+
+  function hidePin() {
+    if (pin) pin.hidden = true;
+  }
+
   function highlightElement(el) {
     if (!el) return;
-    el.style.outline = "var(--lavish-annotate-outline,2px solid #f4c95d)";
+    el.style.outline = "var(--lavish-annotate-outline,2px solid " + board.accent + ")";
     el.style.outlineOffset = "var(--lavish-annotate-offset,2px)";
+    placePin(el.getBoundingClientRect());
   }
 
   function clearHighlight(el) {
@@ -1181,6 +1235,7 @@ export function createArtifactSdk(
       mark.style.height = rect.height + "px";
       root.appendChild(mark);
     }
+    placePin(range.getBoundingClientRect());
   }
 
   function setAnnotationMode(enabled) {
@@ -1190,7 +1245,9 @@ export function createArtifactSdk(
       style = document.createElement("style");
       style.id = "lavish-cursor-style";
       style.textContent =
-        ":root{--lavish-accent:#f4c95d;--lavish-annotate-outline:2px solid var(--lavish-accent);--lavish-annotate-offset:2px}*{cursor:default!important}[data-lavish-action],[data-lavish-action] *{cursor:pointer!important}input,textarea,[contenteditable]:not([contenteditable='false']){cursor:text!important}button,select,label,option,input[type='button'],input[type='submit'],input[type='reset'],input[type='checkbox'],input[type='radio'],input[type='file'],input[type='color'],input[type='range'],input[type='image']{cursor:pointer!important}";
+        ":root{--lavish-accent:" +
+        board.accent +
+        ";--lavish-annotate-outline:2px solid var(--lavish-accent);--lavish-annotate-offset:2px}*{cursor:default!important}[data-lavish-action],[data-lavish-action] *{cursor:pointer!important}input,textarea,[contenteditable]:not([contenteditable='false']){cursor:text!important}button,select,label,option,input[type='button'],input[type='submit'],input[type='reset'],input[type='checkbox'],input[type='radio'],input[type='file'],input[type='color'],input[type='range'],input[type='image']{cursor:pointer!important}";
       document.head.appendChild(style);
     }
     if (!annotationMode && style) style.remove();
@@ -1203,7 +1260,7 @@ export function createArtifactSdk(
 
   function queuePrompt(prompt, options = {}) {
     const originElement = options.element || document.activeElement || document.body;
-    /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: unknown, attachments?: Array<{ id: string, name?: string }>, _lavishQueueKey?: string }} */
+    /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: unknown, attachments?: Array<{ id: string, name?: string }>, _lavishQueueKey?: string, _lavishNoteId?: string }} */
     const item = {
       ...context(originElement),
       prompt: String(prompt || ""),
@@ -1216,6 +1273,7 @@ export function createArtifactSdk(
     if (options.tag) item.tag = String(options.tag);
     if (options.text) item.text = String(options.text);
     if (options.target) item.target = options.target;
+    if (options.noteId) item._lavishNoteId = String(options.noteId);
     if (options.data) item.prompt += "\n\nContext data:\n" + JSON.stringify(options.data, null, 2);
     // Attach only the client-controllable fields (server-vetted id + display name);
     // the chrome forwards these and the server re-resolves each id (see queuePrompts).
@@ -2134,6 +2192,12 @@ export function createArtifactSdk(
         activeCardContext && activeCardContext.tag !== "text" && text.trim()
           ? { selector: String(activeCardContext.selector || ""), text: text.slice(0, 4000) }
           : null,
+      choices: choiceCards.map((card) => ({
+        id: card.question.id,
+        selection: card.selection,
+        written: card.written.slice(0, 4000),
+        answered: card.answered,
+      })),
       fields: lavishQuestionControls().map((entry) => ({
         key: entry.key,
         index: entry.index,
@@ -2155,6 +2219,18 @@ export function createArtifactSdk(
 
   function restoreReviewState(state) {
     if (!state || typeof state !== "object") return;
+    for (const saved of Array.isArray(state.choices) ? state.choices : []) {
+      const card = choiceCards.find((candidate) => candidate.question.id === String(saved?.id || ""));
+      if (!card || card.answered) continue;
+      card.selection = typeof saved.selection === "string" ? saved.selection.slice(0, 400) : "";
+      card.written = typeof saved.written === "string" ? saved.written.slice(0, 4000) : "";
+      // An answer already sent stays sent: restoring never sends it again.
+      if (typeof saved.answered === "string" && saved.answered) {
+        card.answered = saved.answered.slice(0, 4000);
+        card.status = "restored";
+      }
+      card.render();
+    }
     const fields = Array.isArray(state.fields) ? state.fields : [];
     if (fields.length) {
       const entries = lavishQuestionControls();
@@ -2207,6 +2283,16 @@ export function createArtifactSdk(
     if (el instanceof Element && el.closest("[data-lavish-question]")) scheduleReviewStateReport();
   });
 
+  // A shadow root cannot declare a font face, so the board's three go in the page itself; the
+  // fonts are fetched only once something Scrawl draws is set in them.
+  function ensureBoardFonts() {
+    if (document.getElementById("lavish-font-style")) return;
+    const fonts = document.createElement("style");
+    fonts.id = "lavish-font-style";
+    fonts.textContent = board.fontFaces;
+    (document.head || document.documentElement).appendChild(fonts);
+  }
+
   function ensureShadow() {
     if (shadow) return shadow;
 
@@ -2216,8 +2302,12 @@ export function createArtifactSdk(
     document.documentElement.appendChild(host);
 
     shadow = host.attachShadow({ mode: "open" });
+    ensureBoardFonts();
     const style = document.createElement("style");
-    style.textContent = `:host{all:initial;position:fixed;z-index:2147483647;left:0;top:0;color-scheme:dark;--ink-900:#0f1115;--ink-800:#0b141b;--ink-700:#171a21;--ink-600:#1c212b;--steel-700:#2a2f3a;--steel-600:#303745;--steel-500:#34495a;--steel-400:#8c96aa;--steel-300:#aeb6c6;--steel-200:#b9c0cf;--steel-100:#d8deea;--cream-50:#fffbf3;--cream-100:#f7f3ea;--cream-200:#e8e1cf;--brass-500:#f4c95d;--brass-400:#ffd877;--brass-ink:#17130a;--bg:var(--ink-900);--bg-panel:var(--ink-800);--bg-elevated:var(--ink-600);--fg:var(--cream-100);--fg-faint:var(--steel-300);--border:var(--steel-600);--accent:#f4c95d;--accent-hover:#ffd877;--font-sans:Geist,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--font-mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--radius-md:10px;--radius-xl:14px;--shadow-floating:0 20px 70px rgba(0,0,0,.35);font-family:var(--font-sans)}*{box-sizing:border-box}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.lavish-text-highlight{position:fixed;pointer-events:none;background:rgba(244,201,93,.28);border-radius:2px;box-shadow:0 0 0 1px rgba(244,201,93,.45)}.lavish-annotation-card{position:fixed;width:min(320px,calc(100vw - 24px));padding:12px;border-radius:var(--radius-xl);background:var(--bg-panel);color:var(--fg);border:1px solid var(--accent);box-shadow:var(--shadow-floating);font:14px/1.4 var(--font-sans)}.lavish-heading{font-weight:700;margin-bottom:6px}.lavish-annotation-card textarea{width:100%;min-height:86px;resize:vertical;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--bg);color:var(--fg);padding:9px;font:inherit;font-family:var(--font-sans)}.lavish-annotation-card textarea::placeholder{color:var(--fg-faint)}.lavish-annotation-card .lavish-hint{margin-top:6px;font-size:11px;color:var(--fg-faint)}.lavish-annotation-card .lavish-hint-alert{color:#ff9d7a;font-weight:700}.lavish-annotation-card .lavish-row{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}.lavish-annotation-card button{border:0;border-radius:var(--radius-md);padding:8px 10px;font-family:var(--font-sans);font-size:13px;font-weight:700;cursor:pointer}.lavish-annotation-card button:active{opacity:.85}.lavish-annotation-card .lavish-send{background:var(--accent);color:var(--brass-ink)}.lavish-annotation-card .lavish-send:hover{background:var(--accent-hover)}.lavish-annotation-card .lavish-cancel{background:var(--steel-700);color:var(--fg)}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent);outline-offset:3px}.lavish-attachments{display:flex;flex-direction:column;gap:6px;margin-top:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:8px;padding:6px;border-radius:var(--radius-md);background:var(--bg);border:1px solid var(--border)}.lavish-attachment-chip.is-error{border-color:#e0623d}.lavish-attachment-thumb{width:32px;height:32px;border-radius:6px;object-fit:cover;background:var(--ink-700);flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{font-size:11px;color:var(--fg-faint)}.lavish-attachment-status-error{color:#ff9d7a}.lavish-attachment-retry{flex:0 0 auto;padding:4px 8px;font-size:11px;font-weight:700;border-radius:8px;background:var(--steel-700);color:var(--fg);cursor:pointer;border:0}.lavish-attachment-remove{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0!important;border-radius:50%;background:transparent;color:rgba(255,255,255,.85);cursor:pointer;border:0}.lavish-attachment-remove:hover{background:rgba(255,255,255,.14);color:#fff}.lavish-attach-row{margin-top:8px}.lavish-attach{display:inline-flex;align-items:center;gap:6px;padding:6px 9px!important;background:var(--steel-700)!important;color:var(--fg)!important;font-size:12px!important}.lavish-attach:hover{background:var(--steel-600)!important}.lavish-reveal-marker{position:fixed;pointer-events:none;border:2px solid var(--accent);border-radius:4px;box-shadow:0 0 0 4px rgba(244,201,93,.22);animation:lavish-reveal-pulse 2.4s var(--ease,ease-out) forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
+    style.textContent =
+      ":host{all:initial;position:fixed;z-index:2147483647;left:0;top:0}" +
+      board.shadowCss +
+      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating,.lavish-annotation-chip.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.comment-mark.lavish-pin{position:fixed;opacity:1;pointer-events:none}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-attach{display:inline-flex;align-items:center;gap:8px;min-height:36px;padding:4px 12px;font-size:.9375rem}.lavish-attach .icon{width:18px;height:18px}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
     shadow.appendChild(style);
     return shadow;
   }
@@ -2229,14 +2319,119 @@ export function createArtifactSdk(
       activeAttachments = null;
     }
     if (shadow) {
-      for (const el of [...shadow.querySelectorAll(".lavish-annotation-card")]) el.remove();
+      for (const el of [...shadow.querySelectorAll(".lavish-annotation-card,.lavish-annotation-chip")]) el.remove();
     }
+    activeChip = null;
+    annotated = null;
+    hidePin();
     clearHighlight(hovered);
     clearHighlight(selected);
     hovered = null;
     clearTextHighlight();
     selected = null;
     scheduleReviewStateReport();
+  }
+
+  // What a note's delivery reads as on its chip: the board's marks, one check while it is on its
+  // way and two once delivered. A note that drops back to the queue after it was being sent did
+  // not get through, and says so.
+  function noteMark(chip) {
+    if (chip.status === "delivered") return { tone: " succeeded", icon: CHECK_DOUBLE_ICON, label: "Delivered" };
+    if (chip.status === "restored") return { tone: "", icon: CHECK_ICON, label: "Sent" };
+    if (chip.status === "queued" && chip.sawSending) {
+      return {
+        tone: " uncertain",
+        icon: WARNING_ICON,
+        label: "Not sent",
+        trouble: "Not sent. It is still in the queue: Send to Agent tries again.",
+      };
+    }
+    if (chip.status === "queued" && !chip.sendRequested) {
+      return { tone: "", icon: CLOCK_ICON, label: "Queued: Send to Agent sends it" };
+    }
+    return { tone: "", icon: CHECK_ICON, label: "Sending" };
+  }
+
+  // Once sent, the card shrinks to the board's chip in the same place: what the note is about,
+  // what it says, its delivery, a new comment on the same thing, and close.
+  function showSentChip(target, options, c, label, noteText, noteId, sendRequested) {
+    const root = ensureShadow();
+    closeCard();
+    if (options.range) {
+      highlightTextRange(options.range);
+      annotated = options.range;
+    } else {
+      selected = annotationTargetEl(target);
+      highlightElement(selected);
+      annotated = selected;
+    }
+    const rect = annotated.getBoundingClientRect();
+    const el = document.createElement("div");
+    el.className = "lavish-annotation-chip comment-overlay floating sent";
+    el.setAttribute("role", "status");
+    root.appendChild(el);
+    const chip = {
+      el,
+      noteId,
+      label,
+      status: "queued",
+      sawSending: false,
+      sendRequested,
+      render() {
+        const mark = noteMark(chip);
+        el.setAttribute("aria-label", "Comment on " + label + ". " + mark.label);
+        el.innerHTML =
+          '<span class="delivery' +
+          mark.tone +
+          '" aria-hidden="true">' +
+          mark.icon +
+          '</span><p class="comment-sent-text"><strong>' +
+          escapeAnnotationText(label) +
+          "</strong> " +
+          escapeAnnotationText(noteText || "Image annotation") +
+          '</p><button class="icon-button lavish-chip-new" type="button" aria-label="New comment on this" data-tip="New comment" data-tip-align="end">' +
+          COMMENT_ICON +
+          '</button><button class="icon-button lavish-chip-close" type="button" aria-label="Close" data-tip="Close" data-tip-align="end">' +
+          CLOSE_ICON +
+          "</button>" +
+          (mark.trouble ? '<p class="warning-text">' + mark.trouble + "</p>" : "");
+        const again = /** @type {HTMLButtonElement | null} */ (el.querySelector(".lavish-chip-new"));
+        const close = /** @type {HTMLButtonElement | null} */ (el.querySelector(".lavish-chip-close"));
+        if (again) again.onclick = () => showAnnotationCard(target, { ...options, context: c, restoreText: undefined });
+        if (close) close.onclick = closeCard;
+        el.style.left = Math.min(Math.max(12, rect.left), window.innerWidth - el.offsetWidth - 12) + "px";
+        el.style.top = Math.min(Math.max(12, rect.bottom + 8), window.innerHeight - el.offsetHeight - 12) + "px";
+      },
+    };
+    activeChip = chip;
+    chip.render();
+  }
+
+  function updateNoteStatus(noteId, status) {
+    const answered = choiceCards.find((card) => card.noteId && card.noteId === String(noteId || ""));
+    if (answered) {
+      // The answer was taken out of the queue before it went: the question is open again.
+      if (status === "removed") {
+        answered.answered = "";
+        answered.noteId = "";
+        scheduleReviewStateReport();
+      } else if (status === "queued" || status === "sending" || status === "delivered") {
+        if (status === "sending") answered.sawSending = true;
+        answered.status = status;
+      }
+      answered.render();
+      return;
+    }
+    if (!activeChip || activeChip.noteId !== String(noteId || "")) return;
+    // The note was taken out of the queue in the conversation panel: its chip goes with it.
+    if (status === "removed") {
+      closeCard();
+      return;
+    }
+    if (status !== "queued" && status !== "sending" && status !== "delivered") return;
+    if (status === "sending") activeChip.sawSending = true;
+    activeChip.status = status;
+    activeChip.render();
   }
 
   function showAnnotationCard(target, options = {}) {
@@ -2249,15 +2444,17 @@ export function createArtifactSdk(
     let anchor = target;
     if (options.range) {
       highlightTextRange(options.range);
+      annotated = options.range;
     } else {
       anchor = annotationTargetEl(target);
       selected = anchor;
       highlightElement(selected);
+      annotated = selected;
     }
 
     const rect = options.range ? options.range.getBoundingClientRect() : anchor.getBoundingClientRect();
     const card = document.createElement("div");
-    card.className = "lavish-annotation-card";
+    card.className = "lavish-annotation-card comment-overlay floating";
     const nodeLabel = c.tag === "mermaid-node" ? c.target?.label || c.text || "" : "";
     const isTableCell = c.target?.type === "table-cell";
     // The annotation targets the element that was clicked, which inside a table cell is often a
@@ -2276,6 +2473,18 @@ export function createArtifactSdk(
           : c.tag === "mermaid-node"
             ? "Annotate node" + (nodeLabel ? ": " + escapeAnnotationText(nodeLabel) : "")
             : "Annotate &lt;" + c.tag + "&gt;";
+    // What the note is about, in the words its chip and the conversation use.
+    const label =
+      c.tag === "text"
+        ? "text"
+        : tableLabel
+          ? isCellItself
+            ? "cell: " + tableLabel
+            : "<" + c.tag + "> in " + tableLabel
+          : c.tag === "mermaid-node"
+            ? "node" + (nodeLabel ? ": " + nodeLabel : "")
+            : "<" + c.tag + ">";
+    const draftKey = [c.selector, c.tag, c.target && c.target.text ? c.target.text : ""].join("\n");
     const placeholder =
       c.tag === "text"
         ? "Tell the agent what to change about this text..."
@@ -2286,21 +2495,25 @@ export function createArtifactSdk(
             : "Tell the agent what to change about this element...";
     const sendNowHint = /Mac|iP(hone|ad|od)/.test(navigator.platform) ? "⌘" : "Ctrl";
     card.innerHTML =
-      '<div class="lavish-heading">' +
+      '<header><strong class="lavish-heading">' +
       heading +
-      '</div><textarea placeholder="' +
+      '</strong></header><textarea rows="3" placeholder="' +
       placeholder +
       '"></textarea><div class="lavish-attachments" data-attachments hidden></div>' +
       '<div class="lavish-attach-row"><button class="lavish-attach" type="button">' +
-      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>' +
+      IMAGES_ICON +
       "<span>Attach image</span></button>" +
       '<input class="lavish-attach-input" type="file" accept="' +
       ATTACHMENT_IMAGE_TYPES.accept +
       '" multiple hidden></div>' +
-      '<div class="lavish-hint">Enter to queue &middot; ' +
+      '<footer><span class="muted lavish-hint">Enter sends &middot; Shift+Enter new line &middot; Esc cancels' +
+      '</span><button class="icon-button send lavish-send" type="button" aria-label="Send to the agent" data-tip="Send. ' +
       sendNowHint +
-      "+Enter to send &middot; paste or drop an image" +
-      '</div><div class="lavish-row"><button class="lavish-cancel" type="button">Cancel</button><button class="lavish-send" type="button">Queue</button></div>';
+      '+Enter only queues it" data-tip-align="end">' +
+      SEND_ICON +
+      '</button><button class="icon-button lavish-cancel" type="button" aria-label="Cancel" data-tip="Cancel" data-tip-align="end">' +
+      CLOSE_ICON +
+      "</button></footer>";
     root.appendChild(card);
 
     // Clamp the card fully inside the viewport. Called again whenever its height
@@ -2379,58 +2592,74 @@ export function createArtifactSdk(
       }
     });
 
-    // Try to queue the card. Returns true only if a prompt was actually queued, so
-    // the caller knows whether a follow-up "send now" should fire. Gates on any
+    // Try to queue the card. Returns the note's id only if a prompt was actually queued, so
+    // the caller knows whether a follow-up send should fire. Gates on any
     // still-uploading attachment (R2.4): queuing then would silently drop it, so we
     // keep the card open and tell the user to wait instead. Also gates on any errored
     // attachment (W2): collectReady drops errors and closeCard tears down the card, so
     // queuing would discard the failed image and its retry/remove UI - keep the card
     // open so the user can retry or explicitly remove it first.
-    function tryQueue() {
+    function tryQueue(sendRequested) {
       if (attachments.hasPending()) {
         attachments.setQueueBlocked(true);
-        return false;
+        return "";
       }
       if (attachments.hasErrors()) {
         attachments.setQueueBlocked(true);
-        return false;
+        return "";
       }
       attachments.setQueueBlocked(false);
       const prompt = textarea.value.trim();
       const readyAttachments = attachments.collectReady();
       // Allow an image-only annotation (the element/target still identifies what it
       // refers to), but never queue an empty card.
-      if (prompt || readyAttachments.length) {
-        queuePrompt(prompt, { ...c, queueKey: "", attachments: readyAttachments });
+      if (!prompt && !readyAttachments.length) {
+        closeCard();
+        return "";
       }
-      closeCard();
-      return true;
+      noteCounter += 1;
+      const noteId = NOTE_ID_PREFIX + noteCounter;
+      queuePrompt(prompt, { ...c, queueKey: "", attachments: readyAttachments, noteId });
+      cancelledDrafts.delete(draftKey);
+      showSentChip(target, options, c, label, prompt, noteId, sendRequested);
+      return noteId;
     }
 
-    cancelButton.onclick = closeCard;
+    // Cancelling keeps the words for this element's next card, as the board keeps a cancelled
+    // diff comment; nothing typed is thrown away by a stray Escape.
+    function cancelCard() {
+      if (textarea.value.trim()) cancelledDrafts.set(draftKey, textarea.value);
+      else cancelledDrafts.delete(draftKey);
+      closeCard();
+    }
+
+    cancelButton.onclick = cancelCard;
     sendButton.onclick = () => {
-      tryQueue();
+      if (tryQueue(true)) sendQueuedPrompts();
     };
     textarea.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
-        const sendNow = (event.ctrlKey || event.metaKey) && (!!textarea.value.trim() || attachments.hasReady());
-        const queued = tryQueue();
+        // Enter sends, as on the board. Ctrl or Cmd only adds the note to the queue, for several
+        // notes that go together with one Send to Agent.
+        const queueOnly = event.ctrlKey || event.metaKey;
+        const queued = tryQueue(!queueOnly);
         // postMessage delivery is ordered, so the queued prompt lands before the send.
-        if (queued && sendNow) sendQueuedPrompts();
+        if (queued && !queueOnly) sendQueuedPrompts();
       } else if (event.key === "Escape" && !event.isComposing) {
-        // Close only when there is nothing to lose; excludes isComposing since mid-IME text isn't in textarea.value yet.
-        if (textarea.value.trim() || attachments.hasPending() || attachments.hasErrors() || attachments.hasReady())
-          return;
+        // An image has nowhere to be kept, so a card holding one stays open; excludes isComposing
+        // since mid-IME text isn't in textarea.value yet.
+        if (attachments.hasPending() || attachments.hasErrors() || attachments.hasReady()) return;
         event.preventDefault();
-        closeCard();
+        cancelCard();
       }
     });
     // Unsent annotation text is review context Lavish owns, so it is reported to the chrome and
     // replayed after a live reload.
     textarea.addEventListener("input", scheduleReviewStateReport);
-    if (typeof options.restoreText === "string") {
-      textarea.value = options.restoreText;
+    const restoreText = typeof options.restoreText === "string" ? options.restoreText : cancelledDrafts.get(draftKey);
+    if (typeof restoreText === "string") {
+      textarea.value = restoreText;
       // Re-report immediately so restored text survives a second reload too, rather than only
       // living until the next keystroke.
       scheduleReviewStateReport();
@@ -2476,6 +2705,7 @@ export function createArtifactSdk(
       window.scrollTo(Number(msg.x) || 0, Number(msg.y) || 0);
     }
     if (msg.type === "lavish:restoreReviewState") restoreReviewState(msg.state);
+    if (msg.type === "lavish:noteStatus") updateNoteStatus(msg.noteId, msg.status);
     if (msg.type === "lavish:revealElement") revealElement(msg.selector);
   });
 
@@ -2521,6 +2751,8 @@ export function createArtifactSdk(
       if (scrollFrame) return;
       scrollFrame = window.requestAnimationFrame(() => {
         scrollFrame = 0;
+        const pinned = hovered || annotated;
+        if (pinned && pin && !pin.hidden) placePin(pinned.getBoundingClientRect());
         postArtifactMessage("lavish:scroll", { x: window.scrollX, y: window.scrollY });
       });
     },
@@ -2552,6 +2784,9 @@ export function createArtifactSdk(
       if (hovered && hovered !== selected) {
         clearHighlight(hovered);
         hovered = null;
+        // The pin goes back to what is being annotated, or away.
+        if (annotated) placePin(annotated.getBoundingClientRect());
+        else hidePin();
       }
     },
     true,
@@ -2604,8 +2839,22 @@ export function createArtifactSdk(
   if (!document.getElementById("lavish-scrollbar-style")) {
     const scrollbars = document.createElement("style");
     scrollbars.id = "lavish-scrollbar-style";
+    const thumb = board.scrollbarThumb;
+    const track = board.scrollbarTrack;
     scrollbars.textContent =
-      ":where(html){scrollbar-color:#34495a #0b141b}:where(html) ::-webkit-scrollbar{width:10px;height:10px;background:#0b141b}:where(html) ::-webkit-scrollbar-thumb{background:#34495a;border:2px solid #0b141b;border-radius:999px}:where(html) ::-webkit-scrollbar-corner{background:#0b141b}";
+      ":where(html){scrollbar-color:" +
+      thumb +
+      " " +
+      track +
+      "}:where(html) ::-webkit-scrollbar{width:10px;height:10px;background:" +
+      track +
+      "}:where(html) ::-webkit-scrollbar-thumb{background:" +
+      thumb +
+      ";border:2px solid " +
+      track +
+      ";border-radius:999px}:where(html) ::-webkit-scrollbar-corner{background:" +
+      track +
+      "}";
     const head = document.head || document.documentElement;
     head.insertBefore(scrollbars, head.firstChild);
   }
@@ -2643,5 +2892,199 @@ export function createArtifactSdk(
     document.addEventListener("DOMContentLoaded", reportArtifactRevisions, { once: true });
   } else {
     reportArtifactRevisions();
+  }
+
+  // ---- The choices a page declares (src/page-choices.js) ----
+  // Each declared question is drawn as the board's question card, where the declaration sits: a
+  // plain radio list with the recommended option first and marked, Other for a written answer,
+  // and Send decision. A card keeps its state here rather than in its controls, so a reload can
+  // restore it and a redraw never loses a half-made pick.
+  function createChoiceCard(question, host) {
+    const form = document.createElement("form");
+    form.className = "question-card";
+    const choices = orderedChoices(question);
+    const asker = escapeAnnotationText(question.asker || "This page");
+    const head =
+      '<p class="asker"><span class="goblin-avatar" aria-hidden="true"></span><span><strong>' +
+      asker +
+      '</strong> asks</span></p><div class="question-body">' +
+      escapeAnnotationText(question.question) +
+      "</div>" +
+      (question.detail ? '<div class="question-detail">' + escapeAnnotationText(question.detail) + "</div>" : "");
+    const optionHtml = (choice) =>
+      '<span class="question-option"><span>' +
+      escapeAnnotationText(choice.text) +
+      "</span>" +
+      (choice.recommended ? '<span class="recommendation">Recommended</span>' : "") +
+      "</span>";
+
+    function openHtml() {
+      const radio = (value, selected) =>
+        '<input type="radio" name="answer" value="' +
+        escapeAnnotationText(value) +
+        '"' +
+        (selected ? " checked" : "") +
+        ">";
+      return (
+        head +
+        '<fieldset><legend class="sr-only">Choose your answer</legend>' +
+        choices
+          .map(
+            (choice) =>
+              '<label class="question-choice">' +
+              radio("option:" + choice.value, card.selection === "option:" + choice.value) +
+              optionHtml(choice) +
+              "</label>",
+          )
+          .join("") +
+        '<label class="question-choice">' +
+        radio("other", card.selection === "other") +
+        '<span class="question-option"><span>Other</span><small>Write your own answer.</small></span></label>' +
+        '<label class="written-answer"' +
+        (card.selection === "other" ? "" : " hidden") +
+        '><span class="sr-only">Your written answer</span><textarea name="written" rows="3" maxlength="4000" placeholder="Tell ' +
+        asker +
+        ' what you prefer...">' +
+        escapeAnnotationText(card.written) +
+        '</textarea></label></fieldset><div class="card-actions"><button class="primary send-decision" type="submit"' +
+        (choiceAnswer(question, card.selection, card.written) ? "" : " disabled") +
+        ">" +
+        SEND_ICON +
+        "Send decision</button></div>"
+      );
+    }
+
+    // A closed question shows what was chosen, not radios to choose again, and how its answer
+    // travelled.
+    function closedHtml() {
+      const mark = noteMark({ status: card.status, sawSending: card.sawSending, sendRequested: true });
+      const written = !question.options.includes(card.answered);
+      return (
+        head +
+        '<fieldset disabled><legend class="sr-only">Your answer</legend>' +
+        choices
+          .map((choice) => {
+            const chosen = choice.value === card.answered;
+            return (
+              '<label class="question-choice ' +
+              (chosen ? "chosen" : "dimmed") +
+              '"><span class="choice-mark">' +
+              (chosen ? CHECK_ICON : "") +
+              "</span>" +
+              optionHtml(choice) +
+              "</label>"
+            );
+          })
+          .join("") +
+        (written
+          ? '<label class="question-choice chosen"><span class="choice-mark">' +
+            CHECK_ICON +
+            '</span><span class="question-option"><span>Other</span><small>' +
+            escapeAnnotationText(card.answered) +
+            "</small></span></label>"
+          : "") +
+        '</fieldset><p class="question-outcome delivery' +
+        mark.tone +
+        '" role="status">' +
+        mark.icon +
+        escapeAnnotationText(mark.trouble || mark.label) +
+        "</p>"
+      );
+    }
+
+    const card = {
+      question,
+      form,
+      selection: "",
+      written: "",
+      answered: "",
+      noteId: "",
+      status: "queued",
+      sawSending: false,
+      render() {
+        form.innerHTML = card.answered ? closedHtml() : openHtml();
+      },
+    };
+
+    // A pick or a keystroke changes two things only, so the card is not redrawn under the
+    // reader's cursor: whether the written answer shows, and whether there is an answer to send.
+    function syncControls() {
+      const written = /** @type {HTMLElement | null} */ (form.querySelector(".written-answer"));
+      const send = /** @type {HTMLButtonElement | null} */ (form.querySelector(".send-decision"));
+      if (written) written.hidden = card.selection !== "other";
+      if (send) send.disabled = !choiceAnswer(question, card.selection, card.written);
+    }
+
+    form.addEventListener("change", (event) => {
+      const control = /** @type {HTMLInputElement | null} */ (event.target);
+      if (card.answered || !control || control.name !== "answer" || !control.checked) return;
+      card.selection = String(control.value);
+      syncControls();
+      scheduleReviewStateReport();
+    });
+    form.addEventListener("input", (event) => {
+      const control = /** @type {HTMLTextAreaElement | null} */ (event.target);
+      if (card.answered || !control || control.name !== "written") return;
+      card.written = String(control.value);
+      syncControls();
+      scheduleReviewStateReport();
+    });
+    form.addEventListener("submit", (event) => {
+      event.preventDefault();
+      const answer = choiceAnswer(question, card.selection, card.written);
+      if (!answer || card.answered) return;
+      noteCounter += 1;
+      card.noteId = NOTE_ID_PREFIX + noteCounter;
+      card.answered = answer;
+      card.status = "queued";
+      card.sawSending = false;
+      // The prompt is the answer exactly, the option as the page declared it or the words he
+      // wrote, with nothing appended: that text is what reaches whoever asked.
+      queuePrompt(answer, {
+        element: host,
+        tag: "choice",
+        text: question.question,
+        selector: "script[data-lavish-choices]",
+        queueKey: "choice:" + question.id,
+        noteId: card.noteId,
+      });
+      sendQueuedPrompts();
+      card.render();
+      scheduleReviewStateReport();
+    });
+    card.render();
+    return card;
+  }
+
+  function renderPageChoices() {
+    const declaration = document.querySelector("script[data-lavish-choices]");
+    if (!declaration || !declaration.parentElement) return;
+    const questions = parsePageChoices(declaration.textContent || "");
+    if (!questions.length) return;
+    ensureBoardFonts();
+    const host = document.createElement("div");
+    host.className = "lavish-choices-root";
+    host.setAttribute("data-lavish-ui", "choices");
+    declaration.parentElement.insertBefore(host, declaration.nextSibling);
+    const root = host.attachShadow({ mode: "open" });
+    const style = document.createElement("style");
+    style.textContent =
+      ":host{all:initial}" +
+      board.shadowCss +
+      ':host{display:block;background:none}.lavish-choices{display:grid;gap:16px;max-width:820px;margin:32px auto;padding:0 16px 32px}.lavish-choices .question-card{background:var(--glass-bg),var(--hero-surface)}.lavish-choices fieldset{display:grid;gap:12px;min-width:0;margin:0;padding:0;border:0}.lavish-choices .goblin-avatar{display:block;flex:none;width:48px;height:48px;background:url("/assets/goblin-app.png") center / contain no-repeat}.lavish-choices .question-detail{max-width:72ch;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}';
+    root.appendChild(style);
+    const list = document.createElement("div");
+    list.className = "lavish-choices";
+    root.appendChild(list);
+    for (const question of questions) {
+      const card = createChoiceCard(question, host);
+      choiceCards.push(card);
+      list.appendChild(card.form);
+    }
+  }
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", renderPageChoices, { once: true });
+  } else {
+    renderPageChoices();
   }
 }

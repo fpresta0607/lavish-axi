@@ -8,6 +8,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { gunzipSync } from "node:zlib";
 import WebSocket from "ws";
 
 process.env.LAVISH_AXI_HOST = "127.0.0.1";
@@ -34,6 +35,7 @@ import {
   resolveWatchTarget,
   serve,
 } from "../src/server.js";
+import { buildSelfContainedHtml } from "../src/export-bundle.js";
 import { canonicalFile, sessionKey, SessionStore } from "../src/session-store.js";
 
 async function chromeClientSource() {
@@ -41,7 +43,12 @@ async function chromeClientSource() {
 }
 
 async function chromeCssSource() {
-  return normalizeCssForAssertions(await readFile(new URL("../src/chrome.css", import.meta.url), "utf8"));
+  const parts = await Promise.all(
+    ["board-tokens.css", "board-components.css", "chrome.css"].map((name) =>
+      readFile(new URL("../src/" + name, import.meta.url), "utf8"),
+    ),
+  );
+  return normalizeCssForAssertions(parts.join("\n"));
 }
 
 function normalizeCssForAssertions(css) {
@@ -136,16 +143,13 @@ test("server delegates artifact SDK generation to a dedicated source module", as
   assert.match(source, /from "\.\/artifact-sdk\.js"/);
 });
 
-test("the chrome's top bar names Lavish Editor, or the brand that replaces it", () => {
+test("the chrome's top bar names Lavish Editor, or the brand that replaces it, beside the board's goblin", () => {
   const lavish = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const branded = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" }, { brand: "Acme <Review>" });
+  const goblin = '<img src="/assets/goblin-app.png" width="48" height="48" alt="">';
 
-  assert.match(
-    lavish,
-    /<div class="brand"><span class="brand-mark">Lavish<\/span><span class="brand-support">Editor<\/span><\/div>/,
-  );
-  assert.match(branded, /<div class="brand"><span class="brand-mark">Acme &lt;Review&gt;<\/span><\/div>/);
-  assert.doesNotMatch(branded, /brand-support/);
+  assert.ok(lavish.includes(`<div class="brand">${goblin}<h1 class="brand-mark">Lavish Editor</h1></div>`));
+  assert.ok(branded.includes(`<div class="brand">${goblin}<h1 class="brand-mark">Acme &lt;Review&gt;</h1></div>`));
 });
 
 test("everything the chrome says about itself uses the brand's name", () => {
@@ -616,10 +620,14 @@ test("annotation card does not block its own Queue button", () => {
   assert.doesNotMatch(js, /card\.addEventListener\('click',event=>event\.stopPropagation\(\),true\)/);
 });
 
-test("annotation card labels its submit action as Queue", () => {
+test("annotation card labels its submit action as sending to the agent", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, />Queue<\/button>/);
+  assert.match(
+    js,
+    /class="icon-button send lavish-send" type="button" aria-label="Send to the agent" data-tip="Send\. '/,
+  );
+  assert.match(js, /\+Enter only queues it" data-tip-align="end">/);
   assert.doesNotMatch(js, /Queue Prompt/);
 });
 
@@ -713,7 +721,8 @@ test("chrome client toggles annotation mode via Cmd/Ctrl+I and on request from t
   assert.doesNotMatch(js, /const MODE_TOGGLE_HOTKEY_KEY = "i";/);
   assert.match(js, /function isModeToggleHotkeyEvent\(event\)/);
   assert.match(js, /function toggleAnnotationMode\(\)/);
-  assert.match(js, /annotationSwitch\.onclick = toggleAnnotationMode;/);
+  assert.match(js, /annotationSwitch\.onclick = \(\) => \{\s*if \(!annotation\) toggleAnnotationMode\(\);\s*\};/);
+  assert.match(js, /exploreSwitch\.onclick = \(\) => \{\s*if \(annotation\) toggleAnnotationMode\(\);\s*\};/);
   assert.match(js, /if \(msg\.type === "lavish:toggleAnnotationMode"\) toggleAnnotationMode\(\);/);
   assert.match(
     js,
@@ -786,71 +795,91 @@ test("annotation card title renders selected tag as an html element name", () =>
   assert.match(js, /"Annotate &lt;" \+ c\.tag \+ "&gt;"/);
 });
 
-test("annotation card shadow styles use Lavish design-system variables", () => {
+test("annotation card shadow styles are the board's tokens and its copied rules", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /--ink-900:#0f1115/);
-  assert.match(js, /--accent:#f4c95d/);
-  assert.match(js, /--font-sans:/);
-  assert.match(js, /font-family:var\(--font-sans\)/);
-  assert.match(js, /:focus-visible\{outline:2px solid var\(--accent\);outline-offset:2px/);
+  // The tokens sit on :host, where a shadow root reads them; the card is the board's comment box.
+  assert.match(js, /:host\{color-scheme: dark;/);
+  assert.match(js, /--accent-green: #00e59b;/);
+  assert.match(js, /--font-body: \\"Nunito\\"/);
+  assert.match(js, /\.comment-overlay \{ display: grid;/);
+  assert.match(js, /\.comment-overlay \.send:not\(:disabled\) \{ background: var\(--accent-green\)/);
+  assert.match(js, /outline: var\(--focus-ring\); outline-offset: 3px;/);
+  // None of the board's shell-only rules ride along into the page.
+  assert.doesNotMatch(js, /\.topbar \{/);
+  assert.doesNotMatch(js, /\.dialogue-box/);
+  assert.doesNotMatch(js, /#f4c95d/);
 });
 
-test("chrome top bar uses an Annotate switch instead of a labeled toggle button", () => {
+test("the page gets the board's font faces only once Scrawl draws its own UI there", () => {
+  const js = createSdkJs("abc");
+
+  assert.match(js, /fonts\.id = "lavish-font-style";\s*fonts\.textContent = board\.fontFaces;/);
+  assert.match(
+    js,
+    /@font-face \{ font-family: \\"Pixelify Sans\\"; src: url\(\\"\/assets\/fonts\/pixelify-sans\.woff2\\"\)/,
+  );
+});
+
+test("chrome top bar offers Annotate and Explore as the board's mode pill", () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
 
-  assert.match(html, /class="annotate-switch" id="annotation"[^>]*aria-pressed="true"/);
-  assert.match(html, /class="switch-track"/);
-  assert.match(html, />Annotate</);
+  assert.match(html, /<div class="panel-pill mode-switch" role="group" aria-label="Mode">/);
+  assert.match(
+    html,
+    /<button id="annotation" type="button" aria-pressed="true"[^>]*>.*<span>Annotate<\/span><\/button>/,
+  );
+  assert.match(html, /<button id="explore" type="button" aria-pressed="false"[^>]*>.*<span>Explore<\/span><\/button>/);
   assert.doesNotMatch(html, /Annotation: On/);
   assert.doesNotMatch(html, /Inspect/);
 });
 
-test("annotate switch shows a brass track and ink knob when enabled", async () => {
+test("the mode pill lights the chosen mode with the board's electric ring", async () => {
   const js = await chromeClientSource();
   const css = await chromeCssSource();
 
-  assert.match(css, /\.annotate-switch\[aria-pressed="true"\] \.switch-track\{background:var\(--accent\)/);
-  assert.match(css, /\.annotate-switch\[aria-pressed="true"\] \.switch-knob\{[^}]*background:var\(--accent-ink\)/);
+  assert.match(
+    css,
+    /\.panel-pill button\[aria-pressed="true"\]\{[^}]*var\(--electric-ring\) border-box;box-shadow:var\(--electric-glow\)/,
+  );
   assert.match(js, /annotationSwitch\.setAttribute\("aria-pressed", String\(annotation\)\)/);
+  assert.match(js, /exploreSwitch\.setAttribute\("aria-pressed", String\(!annotation\)\)/);
 });
 
-test("chrome declares the Lavish design-system tokens", async () => {
+test("chrome declares the board's tokens and its own layout measures", async () => {
   const css = await chromeCssSource();
 
-  assert.match(css, /--ink-900:#0f1115/);
-  assert.match(css, /--cream-100:#f7f3ea/);
-  assert.match(css, /--brass-500:#f4c95d/);
-  assert.match(css, /--font-serif:/);
-  assert.match(css, /--font-sans:/);
-  assert.match(css, /--text-display:92px/);
-  assert.match(css, /--lh-display:1/);
-  assert.match(css, /--space-32:64px/);
-  assert.match(css, /--shadow-floating:0 20px 70px rgba\(0,0,0,.35\)/);
+  assert.match(css, /--accent-green:#00e59b/);
+  assert.match(css, /--body-bg:#03050a/);
+  assert.match(css, /--font-display:"Pixelify Sans"/);
+  assert.match(css, /--font-body:"Nunito"/);
+  assert.match(css, /--font-mono:"JetBrains Mono"/);
+  assert.match(css, /--lantern:#F2B447/);
+  assert.match(css, /--radius:.625rem/);
   assert.match(css, /--ease:cubic-bezier\(.2,.6,.2,1\)/);
   assert.match(css, /--dur-slow:320ms/);
-  assert.match(css, /--bar-h:56px/);
-  assert.match(css, /--panel-w:360px/);
+  assert.match(css, /--bar-h:72px/);
+  assert.match(css, /--panel-w:420px/);
+  // The upstream palette is gone, not aliased.
+  assert.doesNotMatch(css, /--brass-|--ink-|--steel-|--cream-|#f4c95d/);
 });
 
-test("artifact SDK uses design-token aliases for annotation highlight and shadow UI", () => {
+test("artifact SDK highlights with the board's accent, handed over by the server", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /--lavish-accent:#f4c95d/);
+  assert.match(js, /"accent":"#00e59b"/);
+  assert.match(js, /":root\{--lavish-accent:" \+\s*board\.accent \+/);
   assert.match(js, /--lavish-annotate-outline:2px solid var\(--lavish-accent\)/);
-  assert.match(js, /el\.style\.outline\s*=\s*["']var\(--lavish-annotate-outline,2px solid #f4c95d\)["']/);
+  assert.match(js, /el\.style\.outline = "var\(--lavish-annotate-outline,2px solid " \+ board\.accent \+ "\)"/);
   assert.match(js, /el\.style\.outlineOffset\s*=\s*["']var\(--lavish-annotate-offset,2px\)["']/);
-  assert.match(js, /--fg-faint:var\(--steel-300\)/);
-  assert.match(js, /textarea::placeholder\{color:var\(--fg-faint\)\}/);
-  assert.doesNotMatch(js, /placeholder\{color:#aeb6c6\}/);
+  assert.match(js, /::placeholder \{ color: #869da9; \}/);
 });
 
-test("chrome uses the annotation outline as the keyboard focus outline", async () => {
+test("chrome uses the board's focus ring as the keyboard focus outline", async () => {
   const css = await chromeCssSource();
 
-  assert.match(css, /:focus-visible\{outline:var\(--annotate-outline\);outline-offset:var\(--annotate-offset\)/);
-  assert.match(css, /--annotate-outline:2px solid var\(--accent\)/);
-  assert.match(css, /--annotate-offset:2px/);
+  assert.match(css, /:focus-visible\{outline:var\(--focus-ring\);outline-offset:3px;\}/);
+  assert.match(css, /--focus-ring:3px solid var\(--accent-blue\)/);
 });
 
 test("chrome page ships the phone conversation dock and the viewport contract it relies on", () => {
@@ -873,15 +902,15 @@ test("chrome page ships the phone conversation dock and the viewport contract it
   assert.match(html, /<span class="panel-summary" id="panelSummary" role="status" aria-live="polite"><\/span>/);
 });
 
-test("chrome top bar follows the design mock wordmark and overflow menu treatment", async () => {
+test("chrome top bar follows the board's wordmark and overflow menu treatment", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const css = await chromeCssSource();
 
-  assert.match(html, /class="brand-mark">Lavish/);
-  assert.match(html, /class="brand-support">Editor/);
-  assert.match(css, /font-family:var\(--font-serif\)/);
-  assert.match(css, /letter-spacing:\.18em/);
-  assert.match(html, /class="more-button" id="moreButton"/);
+  assert.match(html, /<header class="bar topbar">/);
+  assert.match(html, /class="brand-mark">Lavish Editor</);
+  assert.match(css, /\.brand h1\{[^}]*background:var\(--brand-gradient\)/);
+  assert.match(css, /h1,h2,h3\{font-family:var\(--font-display\)/);
+  assert.match(html, /class="more-button icon-button raised" id="moreButton"/);
   assert.match(html, /class="menu more-menu" id="moreMenu" hidden/);
   assert.doesNotMatch(html, /class="file-input"/);
   assert.doesNotMatch(html, /class="divider"/);
@@ -896,7 +925,7 @@ test("overflow menu shows the artifact path with a copy affordance", async () =>
   assert.match(html, /class="menu-file" id="copyPath"[^>]*title="Copy path · \/tmp\/artifact\/index\.html"/);
   assert.match(html, /class="copy-hint"/);
   assert.match(css, /\.menu-file\{[^}]*font-family:var\(--font-mono\)/);
-  assert.match(css, /\.copy-hint\.copied\{color:var\(--accent-hover\)/);
+  assert.match(css, /\.copy-hint\.copied\{color:var\(--mint\)/);
 });
 
 test("overflow menu path keeps the file name visible and elides the directories", async () => {
@@ -972,7 +1001,7 @@ test("overflow menu offers publishing an ht-ml.app link via a share dialog", asy
   assert.match(html, /id="shareDialog"/);
   assert.match(
     html,
-    /Publish to <a class="share-link" href="https:\/\/ht-ml\.app" target="_blank" rel="noopener noreferrer">ht-ml\.app<\/a>/,
+    /Publish artifact<span class="share-kicker">to <a class="share-link" href="https:\/\/ht-ml\.app" target="_blank" rel="noopener noreferrer">ht-ml\.app<\/a>/,
   );
   assert.match(html, /third-party hosting service, not part of Lavish/);
   assert.match(html, /id="sharePassword"/);
@@ -985,11 +1014,10 @@ test("overflow menu offers publishing an ht-ml.app link via a share dialog", asy
   assert.match(css, /\.share-overlay\{[^}]*z-index:80;/);
   assert.match(css, /\.share-card/);
   assert.match(css, /\.share-link/);
-  assert.match(css, /box-shadow:var\(--shadow-floating\)/);
-  // The codebase has no global [hidden] rule, so display-setting overlays need explicit
-  // [hidden] rules or they show through before they should (e.g. the result block).
-  assert.match(css, /\.share-overlay\[hidden\]\{display:none;?\}/);
-  assert.match(css, /\.share-result\[hidden\]\{display:none;?\}/);
+  assert.match(css, /\.share-card\{[^}]*box-shadow:var\(--glass-shadow-hover\)/);
+  // The board's global [hidden] rule keeps display-setting overlays from showing through before
+  // they should (e.g. the result block).
+  assert.match(css, /\[hidden\]\{display:none !important;\}/);
   assert.match(js, /const shareArtifactButton/);
   assert.match(js, /async function publishShare/);
   assert.match(js, /fetch\("\/api\/" \+ key \+ "\/share"/);
@@ -1039,22 +1067,26 @@ test("clipboard copy falls back when navigator clipboard rejects", async () => {
   assert.doesNotMatch(js, /navigator\.clipboard\.writeText\(text\)\.catch/);
 });
 
-test("chrome centers the top bar row while bottom-aligning the identity cluster", async () => {
+test("chrome top bar is the board's: brand, the mode pill in its middle, controls on the right", async () => {
   const css = await chromeCssSource();
 
-  assert.match(css, /\.bar\{[^}]*align-items:center/);
-  assert.match(css, /\.brand\{[^}]*height:22px/);
-  assert.match(css, /\.brand\{[^}]*align-items:flex-end/);
+  assert.match(css, /\.topbar\{[^}]*grid-template-columns:minmax\(0,1fr\) auto minmax\(0,1fr\);align-items:center/);
+  assert.match(css, /\.topbar\{[^}]*background:var\(--glass-bg\)/);
+  assert.match(css, /\.brand\{[^}]*align-items:center/);
 });
 
-test("chrome chat bubbles follow the preview mock shades", async () => {
+test("chrome chat bubbles are the board's dialogue box for the agent and its comment chip for the user", async () => {
   const css = await chromeCssSource();
+  const js = await chromeClientSource();
 
-  assert.match(css, /\.bubble\.user\{[^}]*background:var\(--bg-elevated\)/);
-  assert.match(css, /\.bubble\.user\{[^}]*border-color:var\(--border-strong\)/);
-  assert.match(css, /\.bubble\.agent\{[^}]*background:transparent/);
-  assert.match(css, /\.bubble\.agent\{[^}]*border-color:var\(--border-subtle\)/);
-  assert.match(css, /border-top-color:var\(--accent\)/);
+  assert.match(js, /el\.className = role === "agent" \? "bubble agent dialogue" : "bubble user";/);
+  assert.match(
+    css,
+    /\.dialogue-box::before,\.dialogue-portrait::before\{border:2px solid var\(--soot\);background:var\(--hide\)/,
+  );
+  assert.match(css, /\.bubble\.user\{[^}]*border:1px solid var\(--glass-border\)/);
+  assert.match(css, /\.bubble\.user\{[^}]*background:var\(--field-bg\)/);
+  assert.match(css, /\.spinner\{[^}]*border-top-color:var\(--mint\)/);
 });
 
 test("chrome includes a chat-like prompt composer and agent reply listener", async () => {
@@ -1098,16 +1130,20 @@ test("composer offers two always-visible top-level send actions", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const css = await chromeCssSource();
 
-  assert.match(html, /class="button" id="send">Send to Agent</);
+  assert.match(html, /class="button primary send-decision" id="send">.*<span>Send to Agent<\/span><\/button>/);
   assert.match(html, /class="button button-danger" id="sendAndEnd"[^<]*>.*Send &amp; End</);
   assert.match(
     html,
-    /<div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first\.<\/div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">.*<button class="button" id="send">Send to Agent<\/button><\/div>/,
+    /<div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first\.<\/div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">.*<button class="button primary send-decision" id="send">.*<span>Send to Agent<\/span><\/button><\/div>/,
   );
   assert.doesNotMatch(html, /id="sendCaret"/);
   assert.doesNotMatch(html, /id="sendMenu"/);
   assert.doesNotMatch(html, /id="sendFromMenu"/);
-  assert.match(css, /\.button-danger\{[^}]*color:var\(--danger\)/);
+  assert.match(
+    css,
+    /\.primary\{background:var\(--accent-green\);border-color:var\(--accent-green\);border-radius:999px/,
+  );
+  assert.match(css, /\.button-danger\{[^}]*color:var\(--danger-ink\)/);
   assert.match(css, /\.actions\{[^}]*min-width:0/);
 });
 
@@ -3461,11 +3497,130 @@ test("/chrome.css serves the extracted chrome stylesheet", async () => {
 
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") || "", /text\/css/);
-    assert.match(normalizeCssForAssertions(body), /--ink-900:#0f1115/);
-    assert.match(
-      normalizeCssForAssertions(body),
-      /\.layout\{[^}]*grid-template-columns:minmax\(0,1fr\) ?var\(--panel-w\)/,
-    );
+    // One response carries the board's token block, the rules copied from the board, then
+    // Scrawl's own rules, in that order.
+    const css = normalizeCssForAssertions(body);
+    const tokens = css.indexOf("--accent-green:#00e59b");
+    const copied = css.indexOf(".topbar{");
+    const own = css.indexOf(".layout{");
+    assert.ok(tokens >= 0 && copied > tokens && own > copied, "tokens, copied rules, own rules, in order");
+    assert.match(css, /\.layout\{[^}]*grid-template-columns:minmax\(0,1fr\) ?var\(--panel-w\)/);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("/assets serves the board's fonts and goblin locally, and nothing else", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    for (const name of ["pixelify-sans.woff2", "nunito.woff2", "jetbrains-mono.woff2"]) {
+      const res = await fetch(`${base}/assets/fonts/${name}`);
+      const served = Buffer.from(await res.arrayBuffer());
+
+      assert.equal(res.status, 200, name);
+      assert.match(res.headers.get("content-type") || "", /font\/woff2/);
+      // The artifact frame has an opaque origin, and a font fetch from one is CORS-gated.
+      assert.equal(res.headers.get("access-control-allow-origin"), "*");
+      assert.match(res.headers.get("cache-control") || "", /max-age=604800/);
+      assert.deepEqual(served, await readFile(new URL("../src/fonts/" + name, import.meta.url)));
+    }
+
+    const goblin = await fetch(`${base}/assets/goblin-app.png`);
+    assert.equal(goblin.status, 200);
+    assert.match(goblin.headers.get("content-type") || "", /image\/png/);
+    await goblin.arrayBuffer();
+
+    for (const refused of ["nunito-OFL.txt", "unknown.woff2", "..%2Fchrome.css", "%2e%2e%2f%2e%2e%2fpackage.json"]) {
+      const res = await fetch(`${base}/assets/fonts/${refused}`);
+      await res.arrayBuffer();
+      assert.equal(res.status, 404, refused);
+    }
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+function requestBytes(port, pathname, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path: pathname, headers }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, bytes: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+// The board's rules and fonts make the shell larger than it was. Its text goes over the wire
+// gzipped to a browser, which keeps what a page load transfers below what it was before.
+test("the shell's text is gzipped for a caller that accepts it and plain for one that does not", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body><h1>Plan</h1></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await opened.json();
+    const load = await beginArtifactLoad(base, key);
+    const sdk = `/sdk.js?key=${key}&artifact_revision=${load.artifact_revision}&artifact_load_token=${encodeURIComponent(load.artifact_load_token)}`;
+
+    for (const pathname of ["/chrome.css", "/chrome-client.js", sdk, "/design/board-page.css"]) {
+      const plain = await requestBytes(server.port, pathname);
+      const zipped = await requestBytes(server.port, pathname, { "accept-encoding": "gzip, deflate, br" });
+
+      assert.equal(plain.status, 200, pathname);
+      assert.equal(plain.headers["content-encoding"], undefined, pathname);
+      assert.equal(zipped.status, 200, pathname);
+      assert.equal(zipped.headers["content-encoding"], "gzip", pathname);
+      assert.match(String(zipped.headers.vary), /accept-encoding/i, pathname);
+      assert.equal(zipped.headers["content-type"], plain.headers["content-type"], pathname);
+      assert.deepEqual(gunzipSync(zipped.bytes), plain.bytes, `${pathname} unzips to the same bytes`);
+      assert.ok(zipped.bytes.length < plain.bytes.length / 2, `${pathname} is less than half the size zipped`);
+    }
+
+    // The review page itself carries a fresh handoff token on every load, so its two bodies
+    // differ; what matters is that the zipped one is the page.
+    const page = await requestBytes(server.port, `/session/${key}`, { "accept-encoding": "gzip" });
+    assert.equal(page.headers["content-encoding"], "gzip");
+    assert.match(gunzipSync(page.bytes).toString("utf8"), /<header class="bar topbar">/);
+    // Its framing guard is not lost with the encoding.
+    assert.equal(page.headers["x-frame-options"], "DENY");
+
+    // A font is already compressed, and an identity-only caller is never sent gzip.
+    const font = await requestBytes(server.port, "/assets/fonts/nunito.woff2", { "accept-encoding": "gzip" });
+    assert.equal(font.headers["content-encoding"], undefined);
+    const identity = await requestBytes(server.port, "/chrome.css", { "accept-encoding": "identity" });
+    assert.equal(identity.headers["content-encoding"], undefined);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the landing page stands alone in the board's look", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/`, { headers: { accept: "text/html" } });
+    const body = await res.text();
+
+    assert.equal(res.status, 200);
+    assert.match(body, /<h1>Scrawl is running<\/h1>/);
+    // The tokens are inline: a host this server refuses cannot fetch the stylesheet.
+    assert.match(body, /--accent-green: #00e59b;/);
+    assert.match(body, /\.card\{[^}]*background:var\(--glass-bg\),var\(--hero-surface\)/);
+    assert.doesNotMatch(body, /<link rel="stylesheet"/);
+    assert.doesNotMatch(body, /#f7f4ef|#fffdf9/);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
@@ -3499,6 +3654,64 @@ test("/design serves local Tailwind and DaisyUI artifact assets", async () => {
 test("design asset resolver only trusts exact packaged design asset paths", () => {
   assert.equal(resolveDesignAssetPath("/design/daisyui.css/extra"), null);
   assert.equal(resolveDesignAssetPath("/design/tailwindcss-browser.js/extra"), null);
+  assert.equal(resolveDesignAssetPath("/design/board-page.css/extra"), null);
+  assert.equal(resolveDesignAssetPath("/assets/fonts/nunito-OFL.txt"), null);
+  assert.equal(resolveDesignAssetPath("/assets/fonts/../board-tokens.css"), null);
+});
+
+// A page in the board's look links two stylesheets the server serves: the board's token block,
+// the same file the review page itself is drawn from, and the page patterns laid out in it.
+test("/design serves the board look a page links: its tokens, then the page patterns", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const tokens = await fetch(`${base}/design/board-tokens.css`);
+    const page = await fetch(`${base}/design/board-page.css`);
+
+    assert.equal(tokens.status, 200);
+    assert.match(tokens.headers.get("content-type") || "", /text\/css/);
+    assert.equal(
+      await tokens.text(),
+      await readFile(new URL("../src/board-tokens.css", import.meta.url), "utf8"),
+      "a page wears the very token file the shell does",
+    );
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type") || "", /text\/css/);
+    const pageCss = normalizeCssForAssertions(await page.text());
+    for (const pattern of [".page{", ".stats{", ".compare{", ".before-after{", ".evidence{", ".recommendation{"]) {
+      assert.ok(pageCss.includes(pattern), `the page stylesheet has ${pattern}`);
+    }
+    // Every colour comes from the board: its tokens, or a value its stylesheet writes out.
+    assert.doesNotMatch(pageCss, /#f4c95d|--brass|--ink-|daisyui/i);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an export of a page in the board's look carries its stylesheets and fonts inline", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-export-"));
+  try {
+    const html =
+      '<!doctype html><html><head><link rel="stylesheet" href="/design/board-tokens.css">' +
+      '<link rel="stylesheet" href="/design/board-page.css"></head><body><main class="page"></main></body></html>';
+    const { html: out, warnings } = await buildSelfContainedHtml(html, {
+      baseDir: dir,
+      confineDir: dir,
+      resolveAbsolute: resolveDesignAssetPath,
+    });
+
+    assert.deepEqual(warnings, []);
+    assert.doesNotMatch(out, /<link rel="stylesheet"/);
+    assert.match(out, /--accent-green: #00e59b;/);
+    assert.match(out, /\.before-after \{/);
+    // The three font faces no longer point at the server: each carries its font.
+    assert.doesNotMatch(out, /url\("?\/assets\/fonts\//);
+    assert.equal(out.split("data:font/woff2;base64,").length - 1, 3);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("GET /api/:key/export inlines local assets and leaves remote references intact", async () => {
@@ -6218,14 +6431,14 @@ test("ended session shows an overlay card over the dimmed chrome", async () => {
   const css = await chromeCssSource();
 
   assert.match(html, /class="ended-overlay" id="endedOverlay" hidden/);
-  assert.match(html, /class="ended-card"/);
+  assert.match(html, /class="ended-card done-card"/);
   assert.match(html, /Session ended\./);
   assert.match(html, /Return to your agent to continue\./);
   assert.match(html, /class="ended-copy">\/tmp\/artifact\.html</);
   assert.doesNotMatch(html, /The agent polling loop can stop\./);
-  assert.match(css, /\.ended-overlay\{[^}]*inset:var\(--bar-h\) 0 0 0/);
-  assert.match(css, /\.ended-overlay\{[^}]*background:rgba\(15,17,21,.86\)/);
-  assert.match(css, /\.ended-title\{[^}]*font-family:var\(--font-serif\)/);
+  assert.match(css, /\.ended-overlay\{[^}]*inset:var\(--shell-top\) var\(--shell-pad\) var\(--shell-pad\)/);
+  assert.match(css, /\.ended-overlay\{[^}]*background:var\(--scrim\)/);
+  assert.match(css, /\.ended-title\{[^}]*font-family:var\(--font-display\)/);
   assert.match(js, /endedOverlay\.hidden = false/);
   assert.match(js, /annotationSwitch\.disabled = true/);
   assert.match(js, /moreButton\.disabled = true/);
@@ -6244,35 +6457,39 @@ test("layout gate curtain reuses the ended overlay card styling", async () => {
   );
   assert.doesNotMatch(html, /<iframe id="artifact"[^>]* src=/);
   assert.match(html, /class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"/);
-  assert.match(html, /<div class="ended-card"><div class="ended-title" id="layoutGateTitle">Checking layout/);
+  assert.match(
+    html,
+    /<div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"><\/span><h3 class="ended-title" id="layoutGateTitle">Checking layout/,
+  );
   assert.match(html, /class="ended-copy" id="layoutGateCopy"/);
   assert.match(html, /class="button ended-action" id="layoutGateAction" type="button">Show anyway/);
   assert.match(css, /body\.layout-gate-active iframe#artifact\{[^}]*opacity:0/);
-  assert.match(css, /\.ended-action\{[^}]*margin-top:var\(--space-8\)/);
+  assert.match(css, /\.ended-action\{[^}]*margin-top:8px/);
   assert.match(js, /layoutGateAction\.onclick = \(\) => forceRevealLayoutGate\("manual"\)/);
   assert.match(noGateHtml, /<body class="lavish">/);
   assert.match(noGateHtml, /id="layoutGateOverlay" hidden/);
   assert.match(noGateHtml, /"layoutGateEnabled":false/);
 });
 
-test("annotation card queues prompt on Enter and inserts newline on Shift+Enter", () => {
+test("annotation card sends on Enter and inserts newline on Shift+Enter, as the board's comment box does", () => {
   const js = createSdkJs("abc");
 
   assert.match(js, /textarea\.addEventListener\(["']keydown["']/);
   assert.match(js, /event\.key === ["']Enter["'] && !event\.shiftKey/);
   assert.match(js, /event\.preventDefault\(\)/);
   // Enter routes through tryQueue(), which gates on in-flight uploads (R2.4).
-  assert.match(js, /const queued = tryQueue\(\)/);
+  assert.match(js, /const queued = tryQueue\(!queueOnly\)/);
+  assert.match(js, /if \(queued && !queueOnly\) sendQueuedPrompts\(\)/);
+  // The hint is the board's, word for word.
+  assert.match(js, /Enter sends &middot; Shift\+Enter new line &middot; Esc cancels/);
 });
 
-test("annotation card queues and sends immediately on Ctrl+Enter or Cmd+Enter", () => {
+test("annotation card only queues on Ctrl+Enter or Cmd+Enter, for notes that go together", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /event\.ctrlKey \|\| event\.metaKey/);
-  assert.match(js, /sendQueuedPrompts\(\)/);
-  assert.match(js, /class="lavish-hint"/);
-  assert.match(js, /\+Enter to send/);
-  assert.match(js, /\.lavish-annotation-card \.lavish-hint\{/);
+  assert.match(js, /const queueOnly = event\.ctrlKey \|\| event\.metaKey/);
+  assert.match(js, /class="muted lavish-hint"/);
+  assert.match(js, /\.comment-overlay footer \.muted \{ flex: 1; font-size: \.9375rem; \}/);
 });
 
 test("chrome client chat input sends on Enter and inserts newline on Shift+Enter", async () => {

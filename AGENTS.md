@@ -108,6 +108,9 @@ Each line is the rule. [docs/invariants.md](docs/invariants.md) has the failure 
 - The share route echoes a password only when it minted one. [Hosted sharing (ht-ml.app)](docs/invariants.md#hosted-sharing-ht-mlapp).
 - Share writes classify failure through `hostRejectedShareWrite`, where only a 4xx proves nothing landed. An echoed `site_id` is untrusted, and recovery commands come only from `republishCommand`/`unpublishCommand`. [Hosted sharing (ht-ml.app)](docs/invariants.md#hosted-sharing-ht-mlapp).
 - Every surface reporting a page as newly gated carries the CDN public-to-private caveat. [Hosted sharing (ht-ml.app)](docs/invariants.md#hosted-sharing-ht-mlapp).
+- Scrawl's colours, fonts, edges and radii come only from `src/board-tokens.css` and `src/board-components.css`, copies of the Code Goblins board's own. Never hand-edit a value in them or add a palette; re-copy with `node scripts/sync-board-tokens.js`. [Board look](docs/invariants.md#board-look).
+- A note's `_lavishNoteId` is reported back to the page as `lavish:noteStatus` and stripped before anything reaches the server. [Board look](docs/invariants.md#board-look).
+- A pick on a page's declared choices is queued with no `data`: the prompt text is the option exactly as declared. An answer restored after a reload is never queued again. [Board look](docs/invariants.md#board-look).
 - `DESIGN_PRIORITY_RULE` is stated once in `src/design-reference.js`. Do not restate it. Do not hardcode one Mermaid theme. [AXI integration](docs/invariants.md#axi-integration).
 - Poll wake-path guidance comes only from `POLL_WAKE_PATH_RULES`. [AXI integration](docs/invariants.md#axi-integration).
 - The internal brand skill keeps `metadata.internal: true`. The generated skill omits a `version` frontmatter field. [AXI integration](docs/invariants.md#axi-integration).

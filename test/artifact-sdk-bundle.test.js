@@ -118,6 +118,8 @@ function bootSdk({
   revisionsScript = null,
   revisionMarkElements = [],
   pageHeadTags = [],
+  // What the page declares in its `<script data-lavish-choices>`, or null for a page without one.
+  choices = null,
 } = {}) {
   const posted = [];
   const documentListeners = [];
@@ -137,6 +139,11 @@ function bootSdk({
   appendTo(documentElement, head);
   appendTo(documentElement, body);
   for (const element of revisionMarkElements) appendTo(body, element);
+  let choicesScript = null;
+  if (choices !== null) {
+    choicesScript = appendTo(body, createElement("script"));
+    choicesScript.textContent = typeof choices === "string" ? choices : JSON.stringify(choices);
+  }
 
   const sandbox = {
     parent: { postMessage: (message) => posted.push(message) },
@@ -173,7 +180,11 @@ function bootSdk({
       createElement,
       getElementById: () => null,
       querySelector: (selector) =>
-        selector === "script[data-lavish-revisions]" ? revisionsScript : documentQuery(selector),
+        selector === "script[data-lavish-revisions]"
+          ? revisionsScript
+          : selector === "script[data-lavish-choices]"
+            ? choicesScript
+            : documentQuery(selector),
       querySelectorAll: (selector) => (selector === "[data-lavish-revision]" ? revisionMarkElements : []),
       getSelection: () => null,
     },
@@ -240,19 +251,39 @@ function bootSdk({
     cards() {
       return documentElement.children
         .flatMap((child) => child.shadowRoot?.children || [])
-        .filter((child) => child.className === "lavish-annotation-card");
+        .filter((child) => String(child.className).split(" ").includes("lavish-annotation-card"));
     },
     card() {
       const card = this.cards().at(-1);
       assert.ok(card, "clicking an element opens an annotation card");
       return card;
     },
+    // The card's Send queues the note and sends the queue; what the note carried is the
+    // queuePrompt message, whatever followed it.
     queue(text) {
       const card = this.card();
       card.querySelector("textarea").value = text;
       card.querySelector(".lavish-send").onclick();
-      return posted.at(-1);
+      return posted.findLast((message) => message.type === "lavish:queuePrompt");
     },
+    shadowChildren(className) {
+      return documentElement.children
+        .flatMap((child) => child.shadowRoot?.children || [])
+        .filter((child) => String(child.className).split(" ").includes(className));
+    },
+    hover(target) {
+      const listener = documentListeners.find((entry) => entry.type === "mouseover");
+      assert.ok(listener, "the SDK registers a document mouseover listener");
+      listener.handler({ target });
+    },
+    // The question cards Scrawl drew for the page's declared choices, in order.
+    choiceForms() {
+      const host = body.children.find((child) => child.getAttribute("data-lavish-ui") === "choices");
+      const list = host?.shadowRoot.children.find((child) => child.className === "lavish-choices");
+      return list ? list.children : [];
+    },
+    choicesHostIndex: () => body.children.findIndex((child) => child.getAttribute("data-lavish-ui") === "choices"),
+    choicesScriptIndex: () => body.children.indexOf(choicesScript),
   };
 }
 
@@ -441,17 +472,195 @@ test("Escape during IME composition leaves an empty annotation card open", () =>
   assert.notEqual(paragraph.style.outline, "", "a composing Escape belongs to the IME, not the card");
 });
 
-test("Escape leaves an annotation card with typed text open and untouched", () => {
+// Escape cancels as it does on the board's diff comment, and as there the words are not lost:
+// the same element's next card opens with them.
+test("Escape cancels a card with typed text and keeps the text for that element", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  const other = appendTo(sdk.body, cell("h2", "A heading"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "keep this note";
+  pressEscape(sdk.card().querySelector("textarea"));
+  assert.equal(paragraph.style.outline, "", "the highlight is cleared, proving the card closed");
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:queuePrompt"),
+    false,
+    "a cancelled note is never queued",
+  );
+
+  sdk.click(other);
+  assert.equal(sdk.card().querySelector("textarea").value, "", "another element starts empty");
+
+  sdk.click(paragraph);
+  assert.equal(sdk.card().querySelector("textarea").value, "keep this note");
+});
+
+test("the Cancel button keeps the typed text for that element too", () => {
   const sdk = bootSdk();
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  const textarea = sdk.card().querySelector("textarea");
-  textarea.value = "keep this note";
-  pressEscape(textarea);
+  sdk.card().querySelector("textarea").value = "half a thought";
+  sdk.card().querySelector(".lavish-cancel").onclick();
+  sdk.click(paragraph);
 
-  assert.notEqual(paragraph.style.outline, "", "the card is still open, so the highlight remains");
-  assert.equal(textarea.value, "keep this note", "Escape never discards the typed text");
+  assert.equal(sdk.card().querySelector("textarea").value, "half a thought");
+});
+
+test("a sent note leaves nothing behind for its element's next card", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.queue("Reword this");
+  sdk.click(paragraph);
+
+  assert.equal(sdk.card().querySelector("textarea").value, "");
+});
+
+function pressEnter(textarea, modifiers = {}) {
+  const listener = textarea.listeners.find((entry) => entry.type === "keydown");
+  assert.ok(listener, "the annotation textarea registers a keydown listener");
+  listener.handler({ key: "Enter", preventDefault() {}, ...modifiers });
+}
+
+const postedTypes = (sdk) => sdk.posted.map((message) => message.type).filter((type) => /Prompt/.test(type));
+
+test("Enter sends the note: it is queued, then the queue is sent", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "Reword this";
+  pressEnter(sdk.card().querySelector("textarea"));
+
+  assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt", "lavish:sendQueuedPrompts"]);
+  assert.equal(sdk.posted.find((message) => message.type === "lavish:queuePrompt").prompt.prompt, "Reword this");
+});
+
+test("Shift+Enter is a new line and sends nothing", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "First line";
+  pressEnter(sdk.card().querySelector("textarea"), { shiftKey: true });
+
+  assert.deepEqual(postedTypes(sdk), []);
+});
+
+test("Ctrl+Enter and Cmd+Enter add the note to the queue without sending it", () => {
+  for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
+    const sdk = bootSdk();
+    const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+    sdk.click(paragraph);
+    sdk.card().querySelector("textarea").value = "One of several";
+    pressEnter(sdk.card().querySelector("textarea"), modifier);
+
+    assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt"]);
+  }
+});
+
+test("Enter on an empty card closes it and sends nothing", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  pressEnter(sdk.card().querySelector("textarea"));
+
+  assert.deepEqual(postedTypes(sdk), []);
+  assert.equal(paragraph.style.outline, "");
+});
+
+// Once sent, the card shrinks to the board's chip: what it was about, what was said, and check
+// marks that follow the note's delivery as the chrome reports it.
+test("a sent note shrinks to a chip whose check marks follow its delivery", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  const note = sdk.queue("Reword <this>");
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+  assert.ok(chip, "the card became a chip");
+  assert.match(chip.className, /comment-overlay floating sent/);
+  assert.match(chip.innerHTML, /<p class="comment-sent-text"><strong>&lt;p&gt;<\/strong> Reword &lt;this&gt;<\/p>/);
+  assert.match(chip.innerHTML, /<span class="delivery" aria-hidden="true">/);
+  assert.notEqual(paragraph.style.outline, "", "the element stays marked while its chip is up");
+
+  const noteId = note.prompt._lavishNoteId;
+  assert.match(noteId, /\S/);
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  assert.match(chip.innerHTML, /<span class="delivery" aria-hidden="true">/);
+  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Sending");
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
+  assert.match(chip.innerHTML, /<span class="delivery succeeded" aria-hidden="true">/);
+  assert.match(chip.innerHTML, /M2 12\.5 6\.5 17 16 7\.5M11\.5 16l1 1L22 7\.5/);
+  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Delivered");
+});
+
+test("a note that falls back to the queue after a failed send says so on its chip", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  const noteId = sdk.queue("Reword this").prompt._lavishNoteId;
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "queued" });
+
+  assert.match(chip.innerHTML, /<span class="delivery uncertain" aria-hidden="true">/);
+  assert.match(
+    chip.innerHTML,
+    /<p class="warning-text">Not sent\. It is still in the queue: Send to Agent tries again\.<\/p>/,
+  );
+});
+
+test("a chip ignores the status of a note that is not its own", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.queue("Reword this");
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId: "someone-else", status: "delivered" });
+
+  assert.doesNotMatch(chip.innerHTML, /delivery succeeded/);
+});
+
+test("a note added to the queue without sending shows as queued on its chip", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "One of several";
+  pressEnter(sdk.card().querySelector("textarea"), { ctrlKey: true });
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+
+  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Queued: Send to Agent sends it");
+});
+
+// The pin is the board's comment mark: it sits on the corner of whatever a click would annotate.
+test("the pin marks the hovered element and stays on the one being annotated", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.hover(paragraph);
+  const pin = sdk.shadowChildren("lavish-pin").at(-1);
+  assert.ok(pin, "hovering shows the pin");
+  assert.match(pin.className, /comment-mark/);
+  // The stub element sits at left 10, top 10; the mark stays inside the viewport.
+  assert.equal(pin.style.left, "2px");
+  assert.equal(pin.style.top, "11px");
+  assert.equal(pin.hidden, false);
+
+  sdk.click(paragraph);
+  assert.equal(pin.hidden, false, "the annotated element keeps its pin");
+
+  pressEscape(sdk.card().querySelector("textarea"));
+  assert.equal(pin.hidden, true, "a cancelled card takes its pin with it");
 });
 
 test("Escape leaves an annotation card with an in-flight attachment open, even with no text", () => {
@@ -589,4 +798,190 @@ test("the served SDK bundle drops a late restore once the user has opened a card
     sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
     false,
   );
+});
+
+// ---- The choices a page declares are drawn as the board's question card ----
+// A page asks for a pick by declaring it as data. Scrawl draws the radio list where the
+// declaration sits, and the pick goes back as an ordinary prompt whose text is the option exactly
+// as the page wrote it.
+
+const PLAN_QUESTION = {
+  id: "plan",
+  question: "Which plan?",
+  asker: "cg-scrawl-look",
+  options: ["Keep 300 s", "Fix it next", "Drop <it>"],
+  recommended: "Fix it next",
+};
+
+function fire(form, type, event = {}) {
+  const handlers = form.listeners.filter((entry) => entry.type === type);
+  assert.ok(handlers.length > 0, `the question card listens for ${type}`);
+  for (const entry of handlers) entry.handler({ preventDefault() {}, ...event });
+}
+const pick = (form, value) => fire(form, "change", { target: { name: "answer", value, checked: true } });
+const write = (form, value) => fire(form, "input", { target: { name: "written", value } });
+const promptMessages = (sdk) => sdk.posted.filter((message) => /Prompt/.test(message.type));
+
+test("a page's declared choices are drawn after the declaration as the board's radio list", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+
+  assert.equal(sdk.choicesHostIndex(), sdk.choicesScriptIndex() + 1, "the card sits where the declaration is");
+  const [form] = sdk.choiceForms();
+  assert.ok(form, "one question, one card");
+  assert.equal(form.className, "question-card");
+
+  const html = form.innerHTML;
+  assert.match(
+    html,
+    /<p class="asker"><span class="goblin-avatar" aria-hidden="true"><\/span><span><strong>cg-scrawl-look<\/strong> asks<\/span><\/p>/,
+  );
+  assert.match(html, /<div class="question-body">Which plan\?<\/div>/);
+  // The recommended option is first and marked; the rest keep the page's order; Other is last.
+  const order = [...html.matchAll(/<input type="radio" name="answer" value="([^"]*)"/g)].map((match) => match[1]);
+  assert.deepEqual(order, ["option:Fix it next", "option:Keep 300 s", "option:Drop &lt;it&gt;", "other"]);
+  assert.match(html, /<span>Fix it next<\/span><span class="recommendation">Recommended<\/span>/);
+  assert.equal(html.split('class="recommendation"').length - 1, 1);
+  assert.match(html, /<span>Other<\/span><small>Write your own answer\.<\/small>/);
+  assert.match(html, /<button class="primary send-decision" type="submit" disabled>/);
+});
+
+test("a pick is sent as the exact option text, once", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+
+  pick(form, "option:Keep 300 s");
+  fire(form, "submit");
+
+  const messages = promptMessages(sdk);
+  assert.deepEqual(
+    messages.map((message) => message.type),
+    ["lavish:queuePrompt", "lavish:sendQueuedPrompts"],
+  );
+  const { prompt } = messages[0];
+  assert.equal(prompt.prompt, "Keep 300 s", "the prompt is the option and nothing else");
+  assert.equal(prompt.tag, "choice");
+  assert.equal(prompt.text, "Which plan?");
+  assert.equal(prompt._lavishQueueKey, "choice:plan");
+  assert.match(prompt._lavishNoteId, /\S/);
+
+  // The card closes on what was chosen, as the board's does: no radios to choose again.
+  assert.doesNotMatch(form.innerHTML, /type="radio"/);
+  assert.match(
+    form.innerHTML,
+    /<label class="question-choice chosen"><span class="choice-mark">.*<\/span><span class="question-option"><span>Keep 300 s<\/span>/,
+  );
+  assert.match(
+    form.innerHTML,
+    /<label class="question-choice dimmed"><span class="choice-mark"><\/span><span class="question-option"><span>Fix it next<\/span>/,
+  );
+
+  fire(form, "submit");
+  assert.equal(promptMessages(sdk).length, 2, "a second submit sends nothing");
+});
+
+test("Other sends the written answer, and only once something is written", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+
+  pick(form, "other");
+  fire(form, "submit");
+  assert.deepEqual(promptMessages(sdk), [], "an empty Other is not an answer");
+
+  write(form, "  Park it until the freeze lifts  ");
+  fire(form, "submit");
+
+  assert.equal(promptMessages(sdk)[0].prompt.prompt, "Park it until the freeze lifts");
+  assert.match(
+    form.innerHTML,
+    /<label class="question-choice chosen">.*<span>Other<\/span><small>Park it until the freeze lifts<\/small>/,
+  );
+});
+
+test("nothing is sent without a pick, or for an option the page never offered", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+
+  fire(form, "submit");
+  pick(form, "option:Something else");
+  fire(form, "submit");
+
+  assert.deepEqual(promptMessages(sdk), []);
+});
+
+test("each declared question is its own card with its own answer", () => {
+  const sdk = bootSdk({
+    choices: [PLAN_QUESTION, { id: "when", question: "When?", options: ["Now", "After the freeze"] }],
+  });
+  const [plan, when] = sdk.choiceForms();
+
+  pick(when, "option:Now");
+  fire(when, "submit");
+
+  const [message] = promptMessages(sdk);
+  assert.equal(message.prompt.prompt, "Now");
+  assert.equal(message.prompt.text, "When?");
+  assert.equal(message.prompt._lavishQueueKey, "choice:when");
+  assert.match(plan.innerHTML, /type="radio"/, "the other question is still open");
+  // No asker named: the page asks.
+  assert.match(when.innerHTML, /<strong>This page<\/strong> asks/);
+});
+
+test("the answered card follows its answer's delivery, and reopens if the answer is taken back", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "option:Fix it next");
+  fire(form, "submit");
+  const noteId = promptMessages(sdk)[0].prompt._lavishNoteId;
+  assert.match(form.innerHTML, /<p class="question-outcome delivery" role="status">.*Sending<\/p>/);
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
+  assert.match(form.innerHTML, /<p class="question-outcome delivery succeeded" role="status">.*Delivered<\/p>/);
+
+  // Removed from the queue in the conversation panel before it went: the question is open again.
+  const again = bootSdk({ choices: PLAN_QUESTION });
+  const [open] = again.choiceForms();
+  pick(open, "option:Fix it next");
+  fire(open, "submit");
+  again.sendChromeMessage({
+    type: "lavish:noteStatus",
+    noteId: promptMessages(again)[0].prompt._lavishNoteId,
+    status: "removed",
+  });
+  assert.match(open.innerHTML, /type="radio"/);
+});
+
+test("a pick survives a reload of the page: its state is reported and restored", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "option:Keep 300 s");
+  sdk.runTimers();
+  const report = sdk.posted.findLast((message) => message.type === "lavish:reviewState");
+  // Compared as JSON: the report was built inside the SDK's own realm.
+  assert.equal(
+    JSON.stringify(report.state.choices),
+    JSON.stringify([{ id: "plan", selection: "option:Keep 300 s", written: "", answered: "" }]),
+  );
+
+  const reloaded = bootSdk({ choices: PLAN_QUESTION });
+  const [restored] = reloaded.choiceForms();
+  reloaded.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: {
+      card: null,
+      fields: [],
+      choices: [{ id: "plan", selection: "other", written: "x", answered: "Fix it next" }],
+    },
+  });
+  assert.doesNotMatch(restored.innerHTML, /type="radio"/, "an answered question stays answered");
+  assert.match(restored.innerHTML, /<label class="question-choice chosen">.*<span>Fix it next<\/span>/);
+  assert.match(restored.innerHTML, /<p class="question-outcome delivery" role="status">.*Sent<\/p>/);
+  // Nothing is sent again by restoring.
+  assert.deepEqual(promptMessages(reloaded), []);
+});
+
+test("a page with no declaration, or a malformed one, gets no card", () => {
+  assert.equal(bootSdk().choicesHostIndex(), -1);
+  assert.equal(bootSdk({ choices: "not json" }).choicesHostIndex(), -1);
+  assert.equal(bootSdk({ choices: { id: "q", question: "Pick", options: ["only one"] } }).choicesHostIndex(), -1);
 });

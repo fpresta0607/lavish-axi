@@ -146,17 +146,112 @@ export const REVISION_REGISTRY_SNIPPET = `<script type="application/json" data-l
 </script>
 <section data-lavish-revision="r1">...the block you changed...</section>`;
 
+// The Code Goblins board's look for a page: the board's own token block, then the page patterns
+// laid out in it (src/board-page.css). The review server serves both, so a page stays small and
+// always wears the board's current colours, fonts, edges and radii.
+export const BOARD_LOOK_SNIPPET = `<link rel="stylesheet" href="/design/board-tokens.css">
+<link rel="stylesheet" href="/design/board-page.css">`;
+
+// A page that needs a pick declares it as data and the review page draws it (src/page-choices.js).
+export const PAGE_CHOICES_SNIPPET = `<script type="application/json" data-lavish-choices>
+{
+  "id": "poll-timeout",
+  "asker": "your task id",
+  "question": "Fix the poll timeout next, or keep 300 s?",
+  "options": ["Fix it next", "Keep 300 s"],
+  "recommended": "Fix it next"
+}
+</script>`;
+
+// A small set of page shapes in the board's look. Each is plain HTML with the few classes the
+// page stylesheet styles; a page combines them freely.
+export const BOARD_PAGE_PATTERNS = [
+  {
+    id: "report",
+    use_when: "What was found or done: the conclusion first, the numbers that matter, then the findings.",
+    markup: `<main class="page">
+  <header class="page-head">
+    <p class="eyebrow">task id · date · what this is</p>
+    <h1>The conclusion, as a title</h1>
+    <p class="lead">One or two sentences that say what was found and what to do about it.</p>
+  </header>
+  <section class="stats">
+    <div class="stat"><strong>42%</strong><span>what the number counts</span></div>
+  </section>
+  <section>
+    <h2>A finding</h2>
+    <div class="card"><p>What it is, with the evidence.</p></div>
+  </section>
+</main>`,
+  },
+  {
+    id: "comparison",
+    use_when: "Options or trade-offs side by side, with the recommended one lit.",
+    markup: `<section class="compare">
+  <article class="card option recommended">
+    <h3>Option one <span class="recommendation">Recommended</span></h3>
+    <p>What it is and what it costs.</p>
+    <ul class="pros"><li>What it gains</li></ul>
+    <ul class="cons"><li>What it gives up</li></ul>
+  </article>
+  <article class="card option">
+    <h3>Option two</h3>
+    <p>What it is and what it costs.</p>
+  </article>
+</section>`,
+  },
+  {
+    id: "before_after",
+    use_when: "A picture review: the same view before and after a change, each named.",
+    markup: `<section class="before-after">
+  <figure>
+    <figcaption><span class="chip">Before</span> What this view was</figcaption>
+    <img src="before/view.png" alt="The view before the change">
+  </figure>
+  <figure>
+    <figcaption><span class="chip after">After</span> What changed in it</figcaption>
+    <img src="after/view.png" alt="The view after the change">
+  </figure>
+</section>`,
+  },
+  {
+    id: "evidence",
+    use_when: "A table of evidence: what was checked, what it showed, where to look.",
+    markup: `<div class="table-wrap">
+  <table class="evidence">
+    <thead><tr><th>Check</th><th>Result</th><th>Evidence</th></tr></thead>
+    <tbody>
+      <tr><td>What was run</td><td><span class="status ok">Pass</span></td><td><code>the command or file</code></td></tr>
+      <tr><td>What was run</td><td><span class="status bad">Fail</span></td><td>What it printed</td></tr>
+    </tbody>
+  </table>
+</div>`,
+  },
+  {
+    id: "decision",
+    use_when: "A pick is needed: say what is being decided and what each option means, then declare the choices.",
+    markup: `<main class="page">
+  <header class="page-head">
+    <h1>What is being decided</h1>
+    <p class="lead">What each option means and what happens next.</p>
+  </header>
+  <p class="callout">Anything he must know before choosing.</p>
+</main>
+${PAGE_CHOICES_SNIPPET}`,
+  },
+];
+
 // Single source for how agents choose an artifact's design direction. It flows into the
 // no-args home output, top-level --help (via DESIGN_SYSTEM_HINT), the `lavish-axi design`
 // summary, and the design command help. The installable skill does not embed this rule;
 // it points at `lavish-axi design`. Edit the rule here only.
 export const DESIGN_PRIORITY_RULE =
-  "Decide the design direction in this strict priority order, and only move to the next step when the current one truly yields nothing: (1) if the user asked for a specific look or named design system, use that; (2) otherwise you must first inspect the project the artifact is about - the subject or product whose content or UI it represents, which may differ from your current working directory - and match that project's design system: Tailwind or theme config, shared CSS variables or design tokens, component library, brand assets, or existing styled pages. If the artifact previews, proposes, or mocks a specific app's UI, render it in that app's own design system so it faithfully shows the product, even when you are running in a different repo; (3) only when both steps come up empty, use the Lavish-recommended Tailwind CSS browser runtime v4 + DaisyUI v5, available via CDN, and prefer that CDN snippet over hand-writing styles unless explicitly instructed otherwise by the user.";
+  "Decide the design direction in this strict priority order, and only move to the next step when the current one truly yields nothing: (1) if the user asked for a specific look or named design system, use that; (2) otherwise you must first inspect the project the artifact is about - the subject or product whose content or UI it represents, which may differ from your current working directory - and match that project's design system: Tailwind or theme config, shared CSS variables or design tokens, component library, brand assets, or existing styled pages. If the artifact previews, proposes, or mocks a specific app's UI, render it in that app's own design system so it faithfully shows the product, even when you are running in a different repo; (3) only when both steps come up empty, use the Code Goblins board look this build serves: link its two stylesheets and build the page from its page patterns, and prefer those over hand-writing styles unless explicitly instructed otherwise by the user. The Tailwind CSS browser runtime v4 + DaisyUI v5, available via CDN, stay for a page whose content needs a component the page patterns lack.";
 
 export const DESIGN_SYSTEM_HINT =
   "Lavish does not auto-inject any design system - artifacts stay portable so they render identically when opened directly without lavish-axi running. Before writing any HTML: " +
   DESIGN_PRIORITY_RULE +
-  " Run `lavish-axi design` for a content-to-playbook router, a copy-pasteable CDN snippet, the whiteboard (Mermaid) opt-in snippet, and the DaisyUI component reference. When you deliver the artifact, state which of the three design sources you used and why.";
+  " Run `lavish-axi design` for a content-to-playbook router, the board look's stylesheets and page patterns, a copy-pasteable CDN snippet, the whiteboard (Mermaid) opt-in snippet, and the DaisyUI component reference. When you deliver the artifact, state which of the three design sources you used and why.";
 
 export const DAISYUI_THEMES = [
   "light",
@@ -202,9 +297,22 @@ export function createDesignOutput() {
       instruction: PLAYBOOK_ROUTER_INSTRUCTION,
       playbooks: listPlaybooks(),
     },
+    board_look: {
+      use_when:
+        "The default for a page with no design direction of its own, step (3) of the priority order: a report, a comparison, a before and after, a table of evidence, a decision. A page that shows another product's UI wears that product's design instead, and a page may take any layout its content calls for.",
+      stylesheet_snippet: BOARD_LOOK_SNIPPET,
+      how: "Paste the two links into your `<head>`. The review server serves both, so the page stays small and always wears the board's current colours, its three fonts, edges and radii; `lavish-axi export` and `lavish-axi share` carry them inline, fonts included. Opened as a bare file the links resolve to nothing, so open the page through lavish-axi. Write plain semantic HTML and add only the classes the patterns below use. Add CSS of your own only for what they do not cover, and take every colour from the tokens (`var(--accent-green)`, `var(--mint)`, `var(--muted)`, `var(--glass-border)`, `var(--amber)`, `var(--red)`), never a new one.",
+      patterns: BOARD_PAGE_PATTERNS,
+      choices: {
+        use_when:
+          "The page asks him to pick one of a few options. Never build an answer form, a notes box or a send button of your own: the review page is the one place he answers.",
+        snippet: PAGE_CHOICES_SNIPPET,
+        how: 'Put the declaration where the choices should appear, normally at the end of the page; one question or a list of them. The review page draws each as the board draws a question: who asks, a plain radio list with the recommended option first and marked, Other for a written answer, and Send decision. His pick comes back as an ordinary prompt with tag "choice" whose prompt text is the option exactly as declared (or what he wrote for Other) and whose text is the question, so write each option as the answer itself, a short phrase, never a bare letter. `id` is required and stable; `recommended` must equal one of `options`; `asker` and `detail` are optional. Two to four options is the fleet\'s question contract.',
+      },
+    },
     design: {
       summary:
-        "Use this Lavish CDN fallback only if (1) the user gave no design direction and (2) you already inspected the project the artifact is about and found no design system or style conventions to match. If you have not checked the subject project yet, check first. Lavish does not auto-inject any design system; artifacts stay portable HTML. Paint an explicit page background and readable text. " +
+        "Use this Lavish CDN fallback only if the board look above lacks a component the page needs, and only after (1) the user gave no design direction and (2) you already inspected the project the artifact is about and found no design system or style conventions to match. If you have not checked the subject project yet, check first. Lavish does not auto-inject any design system; artifacts stay portable HTML. Paint an explicit page background and readable text. " +
         DESIGN_PRIORITY_RULE +
         " Paste the CDN snippet below into your `<head>`.",
       cdn_snippet: DESIGN_CDN_SNIPPET,
@@ -233,7 +341,7 @@ export function createDesignOutput() {
       how: 'Append one entry per round to the `data-lavish-revisions` JSON (oldest first, stable `id`s), and put `data-lavish-revision="<id>"` on each block you actually edited or added. Lavish reads them and never restyles the page, so the saved file looks the same opened directly.',
     },
     theme_usage: [
-      'Default to `<html data-theme="luxury">` - it matches the Lavish look. Pick a different theme from the list below only when the user asked for one or the content clearly calls for it.',
+      'These apply only to a page that uses the DaisyUI kit instead of the board look. There, default to `<html data-theme="luxury">`. Pick a different theme from the list below only when the user asked for one or the content clearly calls for it.',
       'Set a nested section theme with `<section data-theme="night">`.',
       "Prefer semantic colors such as `bg-base-100`, `bg-base-200`, `text-base-content`, `bg-primary`, `text-primary-content`, `alert-warning`, and `btn-primary` so themes remain readable.",
       "Avoid hardcoded Tailwind color names for text and surfaces unless the user asked for exact colors.",
