@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [main, code-goblins]
   pull_request:
-    branches: [main]
+    branches: [main, code-goblins]
     # release-please opens its release PR with GITHUB_TOKEN, which creates a
     # pull_request run that can only sit in action_required. Its output set is
     # exactly these files, so excluding them means no run is ever created.
