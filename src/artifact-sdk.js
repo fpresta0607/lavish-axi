@@ -449,7 +449,7 @@ export function deriveAttachmentNoticeState(state = {}) {
  * @param {number} [artifactRevision]
  * @param {string} [artifactLoadToken]
  * @param {string} [sessionKey]
- * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[] }} [options]
+ * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[], board?: { shadowCss: string, fontFaces: string, accent: string, scrollbarThumb: string, scrollbarTrack: string } }} [options]
  */
 export function createArtifactSdk(
   deriveQueueKey,
@@ -464,6 +464,18 @@ export function createArtifactSdk(
   function postArtifactMessage(type, payload = {}) {
     parent.postMessage({ type, ...payload, artifact_load_token: String(artifactLoadToken || "") }, "*");
   }
+  // The Code Goblins board's look, by value: the server reads it from the board's own token block
+  // and copied rules (src/board-tokens.css, src/board-components.css) and hands it over here.
+  const board = options.board;
+  if (!board) throw new Error("the SDK needs the board's look: pass options.board");
+  // The board's line icons (code-goblins frontend/src/Icon.tsx), drawn by its `.icon` rule.
+  const boardIcon = (path) =>
+    '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
+  const SEND_ICON = boardIcon("M20.5 3.5 10.5 13.5M20.5 3.5l-6.5 17-3.5-7-7-3.5Z");
+  const CLOSE_ICON = boardIcon("M6 6l12 12M18 6 6 18");
+  const IMAGES_ICON = boardIcon(
+    "M7.5 3.5h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1ZM3.5 7.5v12a1 1 0 0 0 1 1h12M6.5 14l4-4 3 3 2-2 5 5M15 7.5h.01",
+  );
   let annotationMode = true;
   let hovered = null;
   let selected = null;
@@ -511,9 +523,6 @@ export function createArtifactSdk(
   // annotation-card iframe where any external symbol reference would resolve to
   // nothing. The X sits inside a 14-unit viewBox with even margins so it is
   // optically centered in the round button.
-  const REMOVE_ICON =
-    '<svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true"><path d="M3.5 3.5l7 7M10.5 3.5l-7 7" stroke="currentColor" stroke-width="1.5" stroke-linecap="round"/></svg>';
-
   function attachmentChipHtml(item, index) {
     const name = escapeAnnotationText(item.name || "image");
     const thumb = item.url
@@ -547,7 +556,7 @@ export function createArtifactSdk(
       '<button type="button" class="lavish-attachment-remove" data-attachment-remove="' +
       index +
       '" aria-label="Remove image" title="Remove">' +
-      REMOVE_ICON +
+      CLOSE_ICON +
       "</button></div>"
     );
   }
@@ -1155,7 +1164,7 @@ export function createArtifactSdk(
 
   function highlightElement(el) {
     if (!el) return;
-    el.style.outline = "var(--lavish-annotate-outline,2px solid #f4c95d)";
+    el.style.outline = "var(--lavish-annotate-outline,2px solid " + board.accent + ")";
     el.style.outlineOffset = "var(--lavish-annotate-offset,2px)";
   }
 
@@ -1190,7 +1199,9 @@ export function createArtifactSdk(
       style = document.createElement("style");
       style.id = "lavish-cursor-style";
       style.textContent =
-        ":root{--lavish-accent:#f4c95d;--lavish-annotate-outline:2px solid var(--lavish-accent);--lavish-annotate-offset:2px}*{cursor:default!important}[data-lavish-action],[data-lavish-action] *{cursor:pointer!important}input,textarea,[contenteditable]:not([contenteditable='false']){cursor:text!important}button,select,label,option,input[type='button'],input[type='submit'],input[type='reset'],input[type='checkbox'],input[type='radio'],input[type='file'],input[type='color'],input[type='range'],input[type='image']{cursor:pointer!important}";
+        ":root{--lavish-accent:" +
+        board.accent +
+        ";--lavish-annotate-outline:2px solid var(--lavish-accent);--lavish-annotate-offset:2px}*{cursor:default!important}[data-lavish-action],[data-lavish-action] *{cursor:pointer!important}input,textarea,[contenteditable]:not([contenteditable='false']){cursor:text!important}button,select,label,option,input[type='button'],input[type='submit'],input[type='reset'],input[type='checkbox'],input[type='radio'],input[type='file'],input[type='color'],input[type='range'],input[type='image']{cursor:pointer!important}";
       document.head.appendChild(style);
     }
     if (!annotationMode && style) style.remove();
@@ -2216,8 +2227,19 @@ export function createArtifactSdk(
     document.documentElement.appendChild(host);
 
     shadow = host.attachShadow({ mode: "open" });
+    // A shadow root cannot declare a font face, so the board's three go in the page itself; the
+    // fonts are fetched only once something here is drawn in them.
+    if (!document.getElementById("lavish-font-style")) {
+      const fonts = document.createElement("style");
+      fonts.id = "lavish-font-style";
+      fonts.textContent = board.fontFaces;
+      (document.head || document.documentElement).appendChild(fonts);
+    }
     const style = document.createElement("style");
-    style.textContent = `:host{all:initial;position:fixed;z-index:2147483647;left:0;top:0;color-scheme:dark;--ink-900:#0f1115;--ink-800:#0b141b;--ink-700:#171a21;--ink-600:#1c212b;--steel-700:#2a2f3a;--steel-600:#303745;--steel-500:#34495a;--steel-400:#8c96aa;--steel-300:#aeb6c6;--steel-200:#b9c0cf;--steel-100:#d8deea;--cream-50:#fffbf3;--cream-100:#f7f3ea;--cream-200:#e8e1cf;--brass-500:#f4c95d;--brass-400:#ffd877;--brass-ink:#17130a;--bg:var(--ink-900);--bg-panel:var(--ink-800);--bg-elevated:var(--ink-600);--fg:var(--cream-100);--fg-faint:var(--steel-300);--border:var(--steel-600);--accent:#f4c95d;--accent-hover:#ffd877;--font-sans:Geist,ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;--font-mono:"Geist Mono",ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;--radius-md:10px;--radius-xl:14px;--shadow-floating:0 20px 70px rgba(0,0,0,.35);font-family:var(--font-sans)}*{box-sizing:border-box}:focus-visible{outline:2px solid var(--accent);outline-offset:2px}.lavish-text-highlight{position:fixed;pointer-events:none;background:rgba(244,201,93,.28);border-radius:2px;box-shadow:0 0 0 1px rgba(244,201,93,.45)}.lavish-annotation-card{position:fixed;width:min(320px,calc(100vw - 24px));padding:12px;border-radius:var(--radius-xl);background:var(--bg-panel);color:var(--fg);border:1px solid var(--accent);box-shadow:var(--shadow-floating);font:14px/1.4 var(--font-sans)}.lavish-heading{font-weight:700;margin-bottom:6px}.lavish-annotation-card textarea{width:100%;min-height:86px;resize:vertical;border-radius:var(--radius-md);border:1px solid var(--border);background:var(--bg);color:var(--fg);padding:9px;font:inherit;font-family:var(--font-sans)}.lavish-annotation-card textarea::placeholder{color:var(--fg-faint)}.lavish-annotation-card .lavish-hint{margin-top:6px;font-size:11px;color:var(--fg-faint)}.lavish-annotation-card .lavish-hint-alert{color:#ff9d7a;font-weight:700}.lavish-annotation-card .lavish-row{display:flex;gap:8px;justify-content:flex-end;margin-top:8px}.lavish-annotation-card button{border:0;border-radius:var(--radius-md);padding:8px 10px;font-family:var(--font-sans);font-size:13px;font-weight:700;cursor:pointer}.lavish-annotation-card button:active{opacity:.85}.lavish-annotation-card .lavish-send{background:var(--accent);color:var(--brass-ink)}.lavish-annotation-card .lavish-send:hover{background:var(--accent-hover)}.lavish-annotation-card .lavish-cancel{background:var(--steel-700);color:var(--fg)}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent);outline-offset:3px}.lavish-attachments{display:flex;flex-direction:column;gap:6px;margin-top:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:8px;padding:6px;border-radius:var(--radius-md);background:var(--bg);border:1px solid var(--border)}.lavish-attachment-chip.is-error{border-color:#e0623d}.lavish-attachment-thumb{width:32px;height:32px;border-radius:6px;object-fit:cover;background:var(--ink-700);flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:flex;flex-direction:column;gap:1px;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-size:12px;font-weight:600;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{font-size:11px;color:var(--fg-faint)}.lavish-attachment-status-error{color:#ff9d7a}.lavish-attachment-retry{flex:0 0 auto;padding:4px 8px;font-size:11px;font-weight:700;border-radius:8px;background:var(--steel-700);color:var(--fg);cursor:pointer;border:0}.lavish-attachment-remove{flex:0 0 auto;display:flex;align-items:center;justify-content:center;width:22px;height:22px;padding:0!important;border-radius:50%;background:transparent;color:rgba(255,255,255,.85);cursor:pointer;border:0}.lavish-attachment-remove:hover{background:rgba(255,255,255,.14);color:#fff}.lavish-attach-row{margin-top:8px}.lavish-attach{display:inline-flex;align-items:center;gap:6px;padding:6px 9px!important;background:var(--steel-700)!important;color:var(--fg)!important;font-size:12px!important}.lavish-attach:hover{background:var(--steel-600)!important}.lavish-reveal-marker{position:fixed;pointer-events:none;border:2px solid var(--accent);border-radius:4px;box-shadow:0 0 0 4px rgba(244,201,93,.22);animation:lavish-reveal-pulse 2.4s var(--ease,ease-out) forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
+    style.textContent =
+      ":host{all:initial;position:fixed;z-index:2147483647;left:0;top:0}" +
+      board.shadowCss +
+      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-attach{display:inline-flex;align-items:center;gap:8px;min-height:36px;padding:4px 12px;font-size:.9375rem}.lavish-attach .icon{width:18px;height:18px}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
     shadow.appendChild(style);
     return shadow;
   }
@@ -2257,7 +2279,7 @@ export function createArtifactSdk(
 
     const rect = options.range ? options.range.getBoundingClientRect() : anchor.getBoundingClientRect();
     const card = document.createElement("div");
-    card.className = "lavish-annotation-card";
+    card.className = "lavish-annotation-card comment-overlay floating";
     const nodeLabel = c.tag === "mermaid-node" ? c.target?.label || c.text || "" : "";
     const isTableCell = c.target?.type === "table-cell";
     // The annotation targets the element that was clicked, which inside a table cell is often a
@@ -2286,21 +2308,25 @@ export function createArtifactSdk(
             : "Tell the agent what to change about this element...";
     const sendNowHint = /Mac|iP(hone|ad|od)/.test(navigator.platform) ? "⌘" : "Ctrl";
     card.innerHTML =
-      '<div class="lavish-heading">' +
+      '<header><strong class="lavish-heading">' +
       heading +
-      '</div><textarea placeholder="' +
+      '</strong></header><textarea rows="3" placeholder="' +
       placeholder +
       '"></textarea><div class="lavish-attachments" data-attachments hidden></div>' +
       '<div class="lavish-attach-row"><button class="lavish-attach" type="button">' +
-      '<svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="8.5" cy="8.5" r="1.5"/><path d="M21 15l-5-5L5 21"/></svg>' +
+      IMAGES_ICON +
       "<span>Attach image</span></button>" +
       '<input class="lavish-attach-input" type="file" accept="' +
       ATTACHMENT_IMAGE_TYPES.accept +
       '" multiple hidden></div>' +
-      '<div class="lavish-hint">Enter to queue &middot; ' +
+      '<footer><span class="muted lavish-hint">Enter to queue &middot; ' +
       sendNowHint +
       "+Enter to send &middot; paste or drop an image" +
-      '</div><div class="lavish-row"><button class="lavish-cancel" type="button">Cancel</button><button class="lavish-send" type="button">Queue</button></div>';
+      '</span><button class="icon-button send lavish-send" type="button" aria-label="Queue" data-tip="Queue" data-tip-align="end">' +
+      SEND_ICON +
+      '</button><button class="icon-button lavish-cancel" type="button" aria-label="Cancel" data-tip="Cancel" data-tip-align="end">' +
+      CLOSE_ICON +
+      "</button></footer>";
     root.appendChild(card);
 
     // Clamp the card fully inside the viewport. Called again whenever its height
@@ -2604,8 +2630,22 @@ export function createArtifactSdk(
   if (!document.getElementById("lavish-scrollbar-style")) {
     const scrollbars = document.createElement("style");
     scrollbars.id = "lavish-scrollbar-style";
+    const thumb = board.scrollbarThumb;
+    const track = board.scrollbarTrack;
     scrollbars.textContent =
-      ":where(html){scrollbar-color:#34495a #0b141b}:where(html) ::-webkit-scrollbar{width:10px;height:10px;background:#0b141b}:where(html) ::-webkit-scrollbar-thumb{background:#34495a;border:2px solid #0b141b;border-radius:999px}:where(html) ::-webkit-scrollbar-corner{background:#0b141b}";
+      ":where(html){scrollbar-color:" +
+      thumb +
+      " " +
+      track +
+      "}:where(html) ::-webkit-scrollbar{width:10px;height:10px;background:" +
+      track +
+      "}:where(html) ::-webkit-scrollbar-thumb{background:" +
+      thumb +
+      ";border:2px solid " +
+      track +
+      ";border-radius:999px}:where(html) ::-webkit-scrollbar-corner{background:" +
+      track +
+      "}";
     const head = document.head || document.documentElement;
     head.insertBefore(scrollbars, head.firstChild);
   }

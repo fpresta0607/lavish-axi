@@ -1,6 +1,6 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import { createServer, get as httpGet } from "node:http";
 import { isIP } from "node:net";
@@ -56,6 +56,13 @@ import { hostRejectedShareWrite, publishedDespiteError, publishToHtmlApp } from 
 import { serializeChat, serializeChatAckIds, serializeChatSync } from "./chat-messages.js";
 import { formatServerLogLine, serverStdioIsTimestamped } from "./server-log.js";
 import { injectLavishSdk } from "./html-transform.js";
+import {
+  boardFontFaces,
+  boardRulesFor,
+  boardScrollbarThumb,
+  boardTokenDeclarations,
+  boardTokenValue,
+} from "./board-tokens.js";
 import { brandName, brandTitleSuffix, DEFAULT_BRAND } from "./brand.js";
 import {
   bindHost,
@@ -87,6 +94,56 @@ import {
 
 const chromeClientUrl = new URL("./chrome-client.js", import.meta.url);
 const chromeCssUrl = new URL("./chrome.css", import.meta.url);
+// The Code Goblins board's look, by value: its token block, the rules copied from it, its fonts
+// and its goblin. test/board-tokens.test.js fails when the copies differ from the board's.
+const boardTokensUrl = new URL("./board-tokens.css", import.meta.url);
+const boardComponentsUrl = new URL("./board-components.css", import.meta.url);
+const boardFontsUrl = new URL("./fonts/", import.meta.url);
+const boardGoblinUrl = new URL("./assets/goblin-app.png", import.meta.url);
+const BOARD_FONT_FILES = new Set(["pixelify-sans.woff2", "nunito.woff2", "jetbrains-mono.woff2"]);
+const BOARD_ASSET_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
+const boardTokensCss = readFileSync(boardTokensUrl, "utf8");
+const boardComponentsCss = readFileSync(boardComponentsUrl, "utf8");
+// The copied board rules the annotation UI inside a reviewed page is drawn with: base controls,
+// the comment box and its chip, and the question card.
+const BOARD_SDK_RULE_PREFIXES = [
+  "*",
+  "[data-tip",
+  "[hidden]",
+  "button",
+  "textarea",
+  "::placeholder",
+  "::selection",
+  ":focus-visible",
+  ".muted",
+  ".sr-only",
+  ".icon",
+  ".primary",
+  ".delivery",
+  ".warning-text",
+  ".comment-",
+  ".question-",
+  ".choice-mark",
+  ".answered-by",
+  ".recommendation",
+  ".written-answer",
+  ".card-actions",
+  ".send-decision",
+  "@keyframes card-in",
+];
+// What the SDK takes from the board: the stylesheet for its shadow root, where `:root` selects
+// nothing so the tokens sit on `:host`; the font faces, which a shadow root cannot declare; and
+// the colours the page itself wears while it is annotated.
+const SDK_BOARD = {
+  shadowCss: [
+    `:host{${boardTokenDeclarations(boardTokensCss)}}`,
+    boardRulesFor(boardComponentsCss, BOARD_SDK_RULE_PREFIXES),
+  ].join("\n"),
+  fontFaces: boardFontFaces(boardTokensCss),
+  accent: boardTokenValue(boardTokensCss, "--accent-green"),
+  scrollbarThumb: boardScrollbarThumb(boardComponentsCss),
+  scrollbarTrack: boardTokenValue(boardTokensCss, "--body-bg"),
+};
 const designAssetUrls = {
   "daisyui.css": {
     packaged: new URL("./design/daisyui.css", import.meta.url),
@@ -1549,10 +1606,28 @@ export async function serve({
 
   app.get("/chrome.css", async (req, res, next) => {
     try {
-      res.type("text/css").send(await readFile(chromeCssUrl, "utf8"));
+      res.type("text/css").send(await readChromeCss());
     } catch (error) {
       next(error);
     }
+  });
+
+  // The board's fonts, at the address the board serves them from, so its font faces load here
+  // unchanged. The artifact frame has an opaque origin, and a font fetch from one is CORS-gated,
+  // so this static, public-content route answers any origin, as /whiteboard-assets does.
+  app.get("/assets/fonts/:name", (req, res) => {
+    if (!BOARD_FONT_FILES.has(req.params.name)) {
+      res.status(404).send("Not found");
+      return;
+    }
+    res.setHeader("access-control-allow-origin", "*");
+    res.setHeader("cache-control", `public, max-age=${BOARD_ASSET_MAX_AGE_SECONDS}`);
+    res.type("font/woff2").sendFile(fileURLToPath(new URL(req.params.name, boardFontsUrl)), { dotfiles: "allow" });
+  });
+
+  app.get("/assets/goblin-app.png", (req, res) => {
+    res.setHeader("cache-control", `public, max-age=${BOARD_ASSET_MAX_AGE_SECONDS}`);
+    res.type("image/png").sendFile(fileURLToPath(boardGoblinUrl), { dotfiles: "allow" });
   });
 
   app.get("/design/:asset", async (req, res, next) => {
@@ -2382,16 +2457,39 @@ function wantsHtml(req) {
   return accept.toLowerCase().includes("text/html");
 }
 
+// The landing page and a refused host's page stand alone: they carry the board's token block
+// inline, because a host this server refuses cannot fetch the review page's stylesheet.
+const STANDALONE_PAGE_CSS = `${boardTokensCss}body{margin:0;min-height:100vh;display:grid;place-items:center}.card{width:min(560px,calc(100% - 40px));padding:32px;border:1px solid var(--glass-border-hover);border-radius:var(--radius);background:var(--glass-bg),var(--hero-surface);box-shadow:var(--glass-shadow-hover)}h1{margin:0 0 12px;font:400 1.75rem/1.3 var(--font-display)}p{margin:0 0 18px}p:last-child{margin-bottom:0}.url{display:block;padding:12px 14px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);color:var(--mint);font-weight:700;overflow-wrap:anywhere}`;
+
+function createStandalonePageHtml(title, body) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>${STANDALONE_PAGE_CSS}</style></head><body><main class="card">${body}</main></body></html>`;
+}
+
 function createLandingHtml() {
   const brand = escapeHtml(brandName());
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${brand}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f4ef;color:#25221f;font:16px/1.5 system-ui,sans-serif}.card{width:min(560px,calc(100% - 40px));padding:32px;border:1px solid #d9d0c5;border-radius:16px;background:#fffdf9;box-shadow:0 12px 40px #25221f18}h1{margin:0 0 12px;font-size:26px}p{margin:0}</style></head><body><main class="card"><h1>${brand} is running</h1><p>Open the review session URL printed by your agent.</p></main></body></html>`;
+  return createStandalonePageHtml(
+    brand,
+    `<h1>${brand} is running</h1><p>Open the review session URL printed by your agent.</p>`,
+  );
 }
 
 function createDeniedHtml({ title, message, workingUrl }) {
   const safeTitle = escapeHtml(title);
   const safeMessage = escapeHtml(message);
   const safeUrl = escapeHtml(workingUrl);
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeTitle} - ${escapeHtml(brandName())}</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f4ef;color:#25221f;font:16px/1.5 system-ui,sans-serif}.card{width:min(560px,calc(100% - 40px));padding:32px;border:1px solid #d9d0c5;border-radius:16px;background:#fffdf9;box-shadow:0 12px 40px #25221f18}h1{margin:0 0 12px;font-size:26px}p{margin:0 0 18px}.url{display:block;padding:12px 14px;border-radius:10px;background:#f0ebe4;color:#25221f;overflow-wrap:anywhere}a{color:inherit;font-weight:700}</style></head><body><main class="card"><h1>${safeTitle}</h1><p>${safeMessage}</p><p>Open this working URL:</p><a class="url" href="${safeUrl}">${safeUrl}</a></main></body></html>`;
+  return createStandalonePageHtml(
+    `${safeTitle} - ${escapeHtml(brandName())}`,
+    `<h1>${safeTitle}</h1><p>${safeMessage}</p><p>Open this working URL:</p><a class="url" href="${safeUrl}">${safeUrl}</a>`,
+  );
+}
+
+// The review page's stylesheet is one response: the board's token block, the rules copied from
+// the board, then Scrawl's own rules, which lay those out for a review page.
+async function readChromeCss() {
+  const parts = await Promise.all(
+    [boardTokensUrl, boardComponentsUrl, chromeCssUrl].map((url) => readFile(url, "utf8")),
+  );
+  return parts.join("\n");
 }
 
 async function readDesignAsset(asset) {
@@ -2747,54 +2845,42 @@ function presenceEventData(key, state, activePolls, deliveredFeedback) {
   return mode === "waiting-on-captain" ? { state } : { state, mode };
 }
 
-function chromeIcon(paths, size = 16, strokeWidth = 1.7) {
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+// Line icons on the board's one 24px grid (code-goblins frontend/src/Icon.tsx), sized and stroked by
+// the board's own `.icon` rule. The paths the board has are the board's; the rest are drawn to match.
+function chromeIcon(path, extraClass = "") {
+  return `<svg class="icon${extraClass ? " " + extraClass : ""}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${path}"/></svg>`;
 }
 
 const chromeIcons = {
-  more: chromeIcon(
-    '<circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/>',
-  ),
-  file: chromeIcon(
-    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
-    13,
-  ),
-  copy: chromeIcon(
-    '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-    12,
-  ),
-  check: chromeIcon('<polyline points="20 6 9 17 4 12"/>', 12),
-  refresh: chromeIcon(
-    '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
-    15,
-  ),
+  more: chromeIcon("M12 5.5v.01M12 12v.01M12 18.5v.01", "icon-dots"),
+  file: chromeIcon("M6.5 3.5h7l4 4v12a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1ZM13.5 3.5v4h4"),
+  copy: chromeIcon("M9 9h10v11H9ZM5 15V4h10"),
+  check: chromeIcon("M5 12.5 9.5 17 19 7.5"),
+  close: chromeIcon("M6 6l12 12M18 6 6 18"),
+  refresh: chromeIcon("M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4.5H15"),
   camera: chromeIcon(
-    '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3"/>',
-    15,
+    "M9 5.5 7.5 8H5a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 5 19h14a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 19 8h-2.5L15 5.5ZM12 10.5a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
   ),
-  download: chromeIcon(
-    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
-    15,
-  ),
-  globe: chromeIcon(
-    '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14.5 14.5 0 0 1 0 18a14.5 14.5 0 0 1 0-18z"/>',
-    15,
-  ),
-  exit: chromeIcon(
-    '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
-    15,
-  ),
+  download: chromeIcon("M12 4v11M7 10.5l5 5 5-5M5 19.5h14"),
+  external: chromeIcon("M14 4h6v6M20 4l-8 8M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"),
+  exit: chromeIcon("M9 20.5H5.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H9M16 16.5l4.5-4.5L16 7.5M20.5 12H9"),
   warning: chromeIcon(
-    '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
-    16,
+    "M10.3 4.5 2.8 17.6A2 2 0 0 0 4.5 20.5h15a2 2 0 0 0 1.7-2.9L13.7 4.5a2 2 0 0 0-3.4 0ZM12 9.5v4.5M12 17.2v.3",
   ),
-  reveal: chromeIcon('<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>', 13),
-  dismiss: chromeIcon('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>', 13),
+  clock: chromeIcon("M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM12 7.5V12l3 2"),
+  comment: chromeIcon(
+    "M5 4.5h14A1.5 1.5 0 0 1 20.5 6v9a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V6A1.5 1.5 0 0 1 5 4.5Z",
+  ),
+  pointer: chromeIcon("M6 4.5l12.5 6.5-5.5 1.7L11.3 18.5Z"),
+  send: chromeIcon("M20.5 3.5 10.5 13.5M20.5 3.5l-6.5 17-3.5-7-7-3.5Z"),
+  images: chromeIcon(
+    "M7.5 3.5h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1ZM3.5 7.5v12a1 1 0 0 0 1 1h12M6.5 14l4-4 3 3 2-2 5 5M15 7.5h.01",
+  ),
   mic: chromeIcon(
-    '<path d="M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3z"/><path d="M5.5 11a6.5 6.5 0 0 0 13 0"/><line x1="12" y1="17.5" x2="12" y2="21"/><line x1="8.5" y1="21" x2="15.5" y2="21"/>',
+    "M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3ZM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7",
   ),
   // The mobile conversation sheet's only chevron: CSS rotates it when the sheet is open.
-  chevronUp: chromeIcon('<polyline points="6 15 12 9 18 15"/>', 18, 2),
+  chevronUp: chromeIcon("m6 15 6-6 6 6"),
 };
 
 // Display the path with the home directory shortened to "~", split so the directory part can
@@ -3013,12 +3099,12 @@ ${faviconTag}
 <link rel="stylesheet" href="/chrome.css">
 </head>
 <body class="${bodyClass}">
-<div class="bar"><div class="brand">${brand === DEFAULT_BRAND ? '<span class="brand-mark">Lavish</span><span class="brand-support">Editor</span>' : `<span class="brand-mark">${escapeHtml(brand)}</span>`}</div><div class="spacer" aria-hidden="true"></div><div class="warnings-wrap" id="warningsWrap" hidden><button class="warnings-button" id="warningsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="warningsDrawer">${chromeIcons.warning}<span class="warnings-count" id="warningsCount">0</span></button><div class="menu warnings-drawer" id="warningsDrawer" role="dialog" aria-labelledby="warningsTitle" aria-describedby="warningsSummary" hidden><div class="warnings-head"><h2 class="warnings-title" id="warningsTitle">Layout issues</h2><p class="warnings-summary" id="warningsSummary"></p></div><div class="warnings-toolbar"><label class="warnings-selectall"><input type="checkbox" id="warningsSelectAll"><span>Select all</span></label><span class="warnings-selected" id="warningsSelected" role="status" aria-live="polite"></span></div><div class="warnings-list" id="warningsList"></div><div class="warnings-foot"><p class="warnings-note">Queueing sends a repair request with your next feedback. An issue is marked resolved only after a newer artifact load and a complete check at the same viewport no longer finds it.</p><button class="button" id="warningsQueueButton" type="button" disabled>Queue selected fixes</button></div></div></div><div class="revisions-wrap" id="revisionsWrap" hidden><button class="revisions-button" id="revisionsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="revisionsDrawer"><span class="revisions-button-text">Revisions</span><span class="revisions-count" id="revisionsCount">0</span></button><div class="menu revisions-drawer" id="revisionsDrawer" role="dialog" aria-labelledby="revisionsTitle" aria-describedby="revisionsSummary" hidden><div class="revisions-head"><h2 class="revisions-title" id="revisionsTitle">Revisions</h2><p class="revisions-summary" id="revisionsSummary"></p></div><div class="revisions-list" id="revisionsList"></div><div class="revisions-foot"><p class="revisions-note">The agent declares these in the artifact itself. Reveal flashes the next block it marked for that revision; nothing about the page is restyled, so the saved file still looks the way it does here.</p></div></div></div><button class="annotate-switch" id="annotation" type="button" aria-pressed="true" title="${escapeHtml(modeToggleHint)}"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span><span>Annotate</span></button><div class="more-wrap" id="moreWrap"><button class="more-button" id="moreButton" type="button" title="More" aria-haspopup="menu" aria-expanded="false">${chromeIcons.more}</button><div class="menu more-menu" id="moreMenu" hidden><div class="menu-head"><div class="menu-label">Editing</div><button class="menu-file" id="copyPath" type="button" title="Copy path · ${escapeHtml(session.file)}">${chromeIcons.file}<span class="menu-file-text"><span class="path-head">${escapeHtml(pathHead)}</span><span class="path-tail">${escapeHtml(pathTail)}</span></span><span class="copy-hint" id="copyHint"><span class="icon-copy">${chromeIcons.copy}</span><span class="icon-check">${chromeIcons.check}</span><span id="copyHintText">Copy</span></span></button></div><div class="menu-rule"></div><button class="menu-item" id="reloadArtifact" type="button">${chromeIcons.refresh}<span>Reload artifact</span></button><button class="menu-item" id="copySnapshot" type="button">${chromeIcons.camera}<span>Copy DOM snapshot</span></button><button class="menu-item" id="exportArtifact" type="button">${chromeIcons.download}<span>Export standalone HTML</span></button><button class="menu-item" id="shareArtifact" type="button">${chromeIcons.globe}<span>Publish link</span></button><div class="menu-rule"></div><button class="menu-item danger" id="end" type="button">${chromeIcons.exit}<span>End session</span></button></div></div></div>
-<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" data-artifact-src="/artifact/${session.key}/index.html"></iframe></div><div class="panel-scrim" id="panelScrim"></div><aside class="panel" id="panel"><div class="panel-head" id="panelHead"><span class="panel-handle" aria-hidden="true"></span><div class="panel-head-row"><h2>Conversation</h2><span class="panel-summary" id="panelSummary" role="status" aria-live="polite"></span><button class="panel-toggle" id="panelToggle" type="button" aria-expanded="false" aria-controls="panel" aria-label="Show conversation">${chromeIcons.chevronUp}</button></div></div><div class="panel-scroll" id="panelScroll"><div class="chat" id="chatLog"></div><div class="chat chat-queued" id="queuedLog"></div></div><div class="composer" id="chatComposer"><div class="presence-banner handoff-banner" id="handoffBanner" hidden><span>This review is open in another ${safeProduct} tab.</span><button class="handoff-takeover" id="handoffTakeover" type="button">Take over here</button></div><div class="presence-banner handoff-banner" id="outdatedBanner" hidden><span id="outdatedText">The ${safeProduct} server this page was connected to is no longer running. Reloading will work once it is running again.</span><span class="outdated-actions"><button class="handoff-takeover" id="outdatedReload" type="button">Check and reload</button><button class="handoff-takeover" id="outdatedDismiss" type="button">Dismiss</button></span></div><div class="presence-banner" id="presenceBanner" hidden>Your agent is not listening. If this persists, ask your agent to poll for updates from ${safeProduct}.</div><textarea id="chatInput" placeholder="Write a message for the agent..."></textarea><div class="chat-attachments" id="chatAttachments"></div><div class="chat-attachment-toolbar"><button class="chat-voice" id="chatVoice" type="button" aria-label="Voice input" aria-pressed="false">${chromeIcons.mic}<span class="chat-voice-dot" aria-hidden="true"></span><span class="chat-voice-bars" id="chatVoiceBars" aria-hidden="true">${"<span></span>".repeat(9)}</span></button><button class="chat-attach" id="chatAttach" type="button">Attach images</button><input id="chatAttachInput" type="file" accept="${escapeHtml(acceptedMime.join(","))}" multiple hidden><span class="chat-attachment-notice" id="chatAttachmentNotice" role="status"></span></div><div class="chat-voice-note" id="chatVoiceNote" role="status"></div><div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first.</div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">${chromeIcons.exit}<span>Send &amp; End</span></button><button class="button" id="send">Send to Agent</button></div></div></aside></div>
-<div class="share-overlay" id="shareDialog" role="dialog" aria-modal="true" aria-labelledby="shareTitleText" hidden><form class="share-card" id="shareForm"><div class="share-head"><div><div class="share-kicker">Publish to <a class="share-link" href="https://ht-ml.app" target="_blank" rel="noopener noreferrer">ht-ml.app</a></div><h2 id="shareTitleText">Publish artifact</h2></div><button class="share-close" id="shareClose" type="button" aria-label="Close publish dialog"><svg width="14" height="14" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div><p class="share-note">ht-ml.app is a separate, third-party hosting service, not part of ${safeProduct}. Publishing sends this artifact to its servers.</p><p class="share-copy">This uploads this artifact to ht-ml.app with local assets inlined. Without a password, the page is PUBLIC and anyone with the link can open it. With a password, the page is PRIVATE and viewers must supply the password to view.</p><p class="share-note">Do not publish secrets. The ${safeProduct} annotation SDK is not included.</p><div class="share-grid"><label class="share-check"><input id="shareGenerate" type="checkbox"><span>Generate a password (makes this page private)</span></label><label>Password (optional)<input id="sharePassword" name="password" type="password" autocomplete="new-password" placeholder="Leave blank for a public page"></label></div><div class="share-status" id="shareStatus" role="status"></div><div class="share-result" id="shareResult" hidden><label id="shareUrlResult">Share URL<div class="share-copy-row"><input id="shareUrl" readonly><button class="share-copy-btn" id="copyShareUrl" type="button">Copy URL</button></div></label><label id="sharePasswordResult" hidden>Password (shared secret)<div class="share-copy-row"><input id="sharePasswordOut" readonly><button class="share-copy-btn" id="copySharePassword" type="button">Copy password</button></div></label><label id="shareSiteIdResult" hidden>Site ID<div class="share-copy-row"><input id="shareSiteId" readonly><button class="share-copy-btn" id="copyShareSiteId" type="button">Copy site ID</button></div></label><label id="shareUpdateKeyResult">Update key (secret)<div class="share-copy-row"><input id="shareUpdateKey" readonly><button class="share-copy-btn" id="copyUpdateKey" type="button">Copy key</button></div></label><p class="share-note" id="shareUpdateKeyNote">Keep the update key private. ht-ml.app returns it once and it is the only way to update this page later; the service has no delete. Republish this page&#39;s HTML with <code>lavish-axi share &lt;file&gt; --site &lt;site id&gt; --update-key &lt;key&gt;</code>, and add <code>--private</code> to also lock it behind a new generated password.</p></div><div class="share-actions"><button class="share-cancel" id="shareCancel" type="button">Cancel</button><button class="button" id="sharePublish" type="submit">Publish</button></div></form></div>
-<div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"${layoutGateHidden}><div class="ended-card"><div class="ended-title" id="layoutGateTitle">Checking layout.<br>One moment.</div><p class="ended-copy" id="layoutGateCopy">${safeProduct} is waiting for fonts and final geometry before revealing this artifact.</p><button class="button ended-action" id="layoutGateAction" type="button">Show anyway</button><button class="button ended-action layout-gate-bypass" id="layoutGateBypass" type="button" hidden>Show anyway</button></div></div>
-<div class="ended-overlay" id="endedOverlay" hidden><div class="ended-card"><div class="ended-title">Session ended.<br>Return to your agent to continue.</div><p class="ended-copy">${escapeHtml(session.file)}</p></div></div>
-<div class="whiteboard-overlay" id="whiteboardOverlay" hidden><div class="whiteboard-shell"><div class="whiteboard-error" id="whiteboardError" hidden></div><button class="whiteboard-close" id="whiteboardClose" type="button" aria-label="Close whiteboard"><svg width="14" height="14" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button><iframe id="whiteboardFrame" title="Excalidraw whiteboard" sandbox="allow-scripts allow-popups"></iframe></div></div>
+<header class="bar topbar"><div class="brand"><img src="/assets/goblin-app.png" width="48" height="48" alt=""><h1 class="brand-mark">${escapeHtml(brand)}</h1></div><div class="panel-pill mode-switch" role="group" aria-label="Mode"><button id="annotation" type="button" aria-pressed="true" title="${escapeHtml(modeToggleHint)}">${chromeIcons.comment}<span>Annotate</span></button><button id="explore" type="button" aria-pressed="false" title="${escapeHtml(modeToggleHint)}">${chromeIcons.pointer}<span>Explore</span></button></div><div class="topbar-controls"><div class="warnings-wrap" id="warningsWrap" hidden><button class="warnings-button icon-button raised" id="warningsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="warningsDrawer">${chromeIcons.warning}<span class="warnings-count count-badge" id="warningsCount">0</span></button><div class="menu warnings-drawer" id="warningsDrawer" role="dialog" aria-labelledby="warningsTitle" aria-describedby="warningsSummary" hidden><div class="warnings-head"><h2 class="warnings-title" id="warningsTitle">Layout issues</h2><p class="warnings-summary" id="warningsSummary"></p></div><div class="warnings-toolbar"><label class="warnings-selectall"><input type="checkbox" id="warningsSelectAll"><span>Select all</span></label><span class="warnings-selected" id="warningsSelected" role="status" aria-live="polite"></span></div><div class="warnings-list" id="warningsList"></div><div class="warnings-foot"><p class="warnings-note">Queueing sends a repair request with your next feedback. An issue is marked resolved only after a newer artifact load and a complete check at the same viewport no longer finds it.</p><button class="button primary" id="warningsQueueButton" type="button" disabled>Queue selected fixes</button></div></div></div><div class="revisions-wrap" id="revisionsWrap" hidden><button class="revisions-button icon-button raised pill-link" id="revisionsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="revisionsDrawer">${chromeIcons.clock}<span class="revisions-button-text">Revisions</span><span class="revisions-count count-pill" id="revisionsCount">0</span></button><div class="menu revisions-drawer" id="revisionsDrawer" role="dialog" aria-labelledby="revisionsTitle" aria-describedby="revisionsSummary" hidden><div class="revisions-head"><h2 class="revisions-title" id="revisionsTitle">Revisions</h2><p class="revisions-summary" id="revisionsSummary"></p></div><div class="revisions-list" id="revisionsList"></div><div class="revisions-foot"><p class="revisions-note">The agent declares these in the artifact itself. Reveal flashes the next block it marked for that revision; nothing about the page is restyled, so the saved file still looks the way it does here.</p></div></div></div><div class="more-wrap" id="moreWrap"><button class="more-button icon-button raised" id="moreButton" type="button" aria-label="More" data-tip="More" data-tip-align="end" aria-haspopup="menu" aria-expanded="false">${chromeIcons.more}</button><div class="menu more-menu" id="moreMenu" hidden><div class="menu-head"><div class="menu-label">Editing</div><button class="menu-file" id="copyPath" type="button" title="Copy path · ${escapeHtml(session.file)}">${chromeIcons.file}<span class="menu-file-text"><span class="path-head">${escapeHtml(pathHead)}</span><span class="path-tail">${escapeHtml(pathTail)}</span></span><span class="copy-hint" id="copyHint"><span class="icon-copy">${chromeIcons.copy}</span><span class="icon-check">${chromeIcons.check}</span><span id="copyHintText">Copy</span></span></button></div><div class="menu-rule"></div><button class="menu-item" id="reloadArtifact" type="button">${chromeIcons.refresh}<span>Reload artifact</span></button><button class="menu-item" id="copySnapshot" type="button">${chromeIcons.camera}<span>Copy DOM snapshot</span></button><button class="menu-item" id="exportArtifact" type="button">${chromeIcons.download}<span>Export standalone HTML</span></button><button class="menu-item" id="shareArtifact" type="button">${chromeIcons.external}<span>Publish link</span></button><div class="menu-rule"></div><button class="menu-item danger" id="end" type="button">${chromeIcons.exit}<span>End session</span></button></div></div></div></header>
+<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" data-artifact-src="/artifact/${session.key}/index.html"></iframe></div><div class="panel-scrim" id="panelScrim"></div><aside class="panel" id="panel"><div class="panel-head" id="panelHead"><span class="panel-handle" aria-hidden="true"></span><div class="panel-head-row panel-header compact"><span class="goblin-avatar" aria-hidden="true"></span><div class="panel-identity"><h2>Conversation</h2><span class="panel-summary" id="panelSummary" role="status" aria-live="polite"></span></div><button class="panel-toggle" id="panelToggle" type="button" aria-expanded="false" aria-controls="panel" aria-label="Show conversation">${chromeIcons.chevronUp}</button></div></div><div class="panel-scroll" id="panelScroll"><div class="chat" id="chatLog"></div><div class="chat chat-queued" id="queuedLog"></div></div><div class="composer" id="chatComposer"><div class="presence-banner handoff-banner update-banner" id="handoffBanner" hidden><span>This review is open in another ${safeProduct} tab.</span><button class="handoff-takeover primary" id="handoffTakeover" type="button">Take over here</button></div><div class="presence-banner handoff-banner update-banner" id="outdatedBanner" hidden><span id="outdatedText">The ${safeProduct} server this page was connected to is no longer running. Reloading will work once it is running again.</span><span class="outdated-actions"><button class="handoff-takeover primary" id="outdatedReload" type="button">Check and reload</button><button class="handoff-takeover" id="outdatedDismiss" type="button">Dismiss</button></span></div><div class="presence-banner connection-banner" id="presenceBanner" hidden>Your agent is not listening. If this persists, ask your agent to poll for updates from ${safeProduct}.</div><textarea id="chatInput" placeholder="Write a message for the agent..."></textarea><div class="chat-attachments" id="chatAttachments"></div><div class="chat-attachment-toolbar voice-dock"><button class="chat-voice voice-bubble" id="chatVoice" type="button" aria-label="Voice input" aria-pressed="false">${chromeIcons.mic}<span class="chat-voice-dot voice-dot" aria-hidden="true"></span><span class="chat-voice-bars voice-bars" id="chatVoiceBars" aria-hidden="true">${"<span></span>".repeat(9)}</span></button><button class="chat-attach" id="chatAttach" type="button">${chromeIcons.images}<span>Attach images</span></button><input id="chatAttachInput" type="file" accept="${escapeHtml(acceptedMime.join(","))}" multiple hidden><span class="chat-attachment-notice" id="chatAttachmentNotice" role="status"></span></div><div class="chat-voice-note" id="chatVoiceNote" role="status"></div><div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first.</div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">${chromeIcons.exit}<span>Send &amp; End</span></button><button class="button primary send-decision" id="send">${chromeIcons.send}<span>Send to Agent</span></button></div></div></aside></div>
+<div class="share-overlay" id="shareDialog" role="dialog" aria-modal="true" aria-labelledby="shareTitleText" hidden><form class="share-card" id="shareForm"><header class="command-center-heading share-head"><span class="goblin-avatar" aria-hidden="true"></span><h2 id="shareTitleText">Publish artifact<span class="share-kicker">to <a class="share-link" href="https://ht-ml.app" target="_blank" rel="noopener noreferrer">ht-ml.app</a></span></h2><button class="share-close icon-button" id="shareClose" type="button" aria-label="Close publish dialog" data-tip="Close" data-tip-align="end">${chromeIcons.close}</button></header><p class="share-note">ht-ml.app is a separate, third-party hosting service, not part of ${safeProduct}. Publishing sends this artifact to its servers.</p><p class="share-copy">This uploads this artifact to ht-ml.app with local assets inlined. Without a password, the page is PUBLIC and anyone with the link can open it. With a password, the page is PRIVATE and viewers must supply the password to view.</p><p class="share-note">Do not publish secrets. The ${safeProduct} annotation SDK is not included.</p><div class="share-grid"><label class="share-check"><input id="shareGenerate" type="checkbox"><span>Generate a password (makes this page private)</span></label><label>Password (optional)<input id="sharePassword" name="password" type="password" autocomplete="new-password" placeholder="Leave blank for a public page"></label></div><div class="share-status" id="shareStatus" role="status"></div><div class="share-result" id="shareResult" hidden><label id="shareUrlResult">Share URL<div class="share-copy-row"><input id="shareUrl" readonly><button class="share-copy-btn" id="copyShareUrl" type="button">Copy URL</button></div></label><label id="sharePasswordResult" hidden>Password (shared secret)<div class="share-copy-row"><input id="sharePasswordOut" readonly><button class="share-copy-btn" id="copySharePassword" type="button">Copy password</button></div></label><label id="shareSiteIdResult" hidden>Site ID<div class="share-copy-row"><input id="shareSiteId" readonly><button class="share-copy-btn" id="copyShareSiteId" type="button">Copy site ID</button></div></label><label id="shareUpdateKeyResult">Update key (secret)<div class="share-copy-row"><input id="shareUpdateKey" readonly><button class="share-copy-btn" id="copyUpdateKey" type="button">Copy key</button></div></label><p class="share-note" id="shareUpdateKeyNote">Keep the update key private. ht-ml.app returns it once and it is the only way to update this page later; the service has no delete. Republish this page&#39;s HTML with <code>lavish-axi share &lt;file&gt; --site &lt;site id&gt; --update-key &lt;key&gt;</code>, and add <code>--private</code> to also lock it behind a new generated password.</p></div><div class="share-actions"><button class="share-cancel" id="shareCancel" type="button">Cancel</button><button class="button primary" id="sharePublish" type="submit">Publish</button></div></form></div>
+<div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"${layoutGateHidden}><div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"></span><h3 class="ended-title" id="layoutGateTitle">Checking layout.<br>One moment.</h3><p class="ended-copy" id="layoutGateCopy">${safeProduct} is waiting for fonts and final geometry before revealing this artifact.</p><button class="button ended-action" id="layoutGateAction" type="button">Show anyway</button><button class="button ended-action layout-gate-bypass" id="layoutGateBypass" type="button" hidden>Show anyway</button></div></div>
+<div class="ended-overlay" id="endedOverlay" hidden><div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"></span><h3 class="ended-title">Session ended.<br>Return to your agent to continue.</h3><p class="ended-copy">${escapeHtml(session.file)}</p></div></div>
+<div class="whiteboard-overlay" id="whiteboardOverlay" hidden><div class="whiteboard-shell"><div class="whiteboard-error" id="whiteboardError" hidden></div><button class="whiteboard-close icon-button raised" id="whiteboardClose" type="button" aria-label="Close whiteboard">${chromeIcons.close}</button><iframe id="whiteboardFrame" title="Excalidraw whiteboard" sandbox="allow-scripts allow-popups"></iframe></div></div>
 <script id="lavish-session" type="application/json">${sessionJson}</script>
 <script>${chromeBootFailsafeJs(product)}</script>
 <script src="/chrome-client.js" onerror="window.__lavishChromeBootFailed()"></script>
@@ -3089,6 +3175,7 @@ export function createSdkJs(
     maxAttachmentCount: Number.isFinite(maxAttachmentCount) ? maxAttachmentCount : undefined,
     maxAttachmentBytes: Number.isFinite(maxAttachmentBytes) ? maxAttachmentBytes : undefined,
     acceptedImageMime: acceptedImageMime.map(String),
+    board: SDK_BOARD,
   };
   return `(() => {
 const key=${JSON.stringify(key)};

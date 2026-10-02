@@ -240,7 +240,7 @@ function bootSdk({
     cards() {
       return documentElement.children
         .flatMap((child) => child.shadowRoot?.children || [])
-        .filter((child) => child.className === "lavish-annotation-card");
+        .filter((child) => String(child.className).split(" ").includes("lavish-annotation-card"));
     },
     card() {
       const card = this.cards().at(-1);

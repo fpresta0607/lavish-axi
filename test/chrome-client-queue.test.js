@@ -64,6 +64,15 @@ function identicalProjectionNote(offset) {
   };
 }
 
+// An agent entry is the board's dialogue box: its name on the tab, its portrait, then its words.
+const AGENT_BUBBLE_OPEN =
+  '<span class="dialogue-tab">Agent</span><div class="dialogue-box"><span class="dialogue-portrait"><span class="goblin-avatar"></span></span>';
+// A sent note carries the board's two checks; a note on its way carries one.
+const DELIVERED_MARK =
+  '<span class="delivery succeeded" role="img" aria-label="Delivered"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5"/></svg></span>';
+const SENDING_MARK =
+  '<span class="delivery" role="img" aria-label="Sending"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5 9.5 17 19 7.5"/></svg></span>';
+
 async function createChromeHarness({
   fetchImpl = /** @type {(url?: any, init?: any) => Promise<any>} */ (
     async () => ({ ok: true, json: async () => ({}) })
@@ -682,7 +691,10 @@ test("a reconnect's stale initial sync cannot erase a newer reply", async () => 
   const bubbles = chrome.element("chatLog").children;
   assert.equal(bubbles.length, 2);
   assert.match(bubbles[0].innerHTML, /Sent note/);
-  assert.equal(bubbles[1].innerHTML, '<small>Agent</small><div class="chat-md"><p>New reply</p></div>');
+  assert.equal(
+    bubbles[1].innerHTML,
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>New reply</p></div></div>',
+  );
 });
 
 test("a reconnect cannot settle an identical note this tab never submitted", async () => {
@@ -7327,7 +7339,7 @@ test("a sent batch settles in place: notes read Sending until the server's trans
   // Pressing Send commits the batch: both notes read Sending, nothing is in the transcript yet,
   // and a committed note cannot be removed.
   const inFlight = chrome.element("queuedLog").innerHTML;
-  assert.equal((inFlight.match(/<small>Sending… /g) || []).length, 2);
+  assert.equal(inFlight.split("<small>" + SENDING_MARK + "Sending… ").length - 1, 2);
   assert.doesNotMatch(inFlight, /<small>Queued /);
   assert.equal(chrome.element("chatLog").children.length, 0);
   const [removeButton] = chrome.element("queuedLog").querySelectorAll(".queued-remove");
@@ -7342,12 +7354,13 @@ test("a sent batch settles in place: notes read Sending until the server's trans
   assert.deepEqual(chrome.queued(), []);
   const bubbles = chrome.element("chatLog").children;
   assert.equal(bubbles.length, 2);
-  assert.match(
-    bubbles[0].innerHTML,
-    /^<small>You<\/small><div class="anchor" [^>]*><span class="anchor-kind">&lt;h2&gt;<\/span>/,
-  );
+  assert.ok(bubbles[0].innerHTML.startsWith("<small>" + DELIVERED_MARK + 'You</small><div class="anchor" '));
+  assert.match(bubbles[0].innerHTML, /<div class="anchor" [^>]*><span class="anchor-kind">&lt;h2&gt;<\/span>/);
   assert.match(bubbles[0].innerHTML, /<div class="bubble-text">Rename this<\/div>/);
-  assert.equal(bubbles[1].innerHTML, '<small>You</small><div class="bubble-text">Keep the table</div>');
+  assert.equal(
+    bubbles[1].innerHTML,
+    "<small>" + DELIVERED_MARK + 'You</small><div class="bubble-text">Keep the table</div>',
+  );
 });
 
 test("an accepted note merges before live entries that arrived before its response", async () => {
@@ -7384,8 +7397,16 @@ test("an accepted note merges before live entries that arrived before its respon
 
     const bubbles = chrome.element("chatLog").children;
     assert.equal(bubbles.length, 2, eventName);
-    assert.equal(bubbles[0].innerHTML, '<small>You</small><div class="bubble-text">Sent note</div>', eventName);
-    assert.equal(bubbles[1].innerHTML, '<small>Agent</small><div class="chat-md"><p>Newer reply</p></div>', eventName);
+    assert.equal(
+      bubbles[0].innerHTML,
+      "<small>" + DELIVERED_MARK + 'You</small><div class="bubble-text">Sent note</div>',
+      eventName,
+    );
+    assert.equal(
+      bubbles[1].innerHTML,
+      AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>Newer reply</p></div></div>',
+      eventName,
+    );
     assert.equal(chrome.element("queuedLog").innerHTML, "", eventName);
   }
 });
@@ -7888,7 +7909,7 @@ test("an older live sync does not hide the transcript accepted by the prompts re
   assert.equal(chrome.element("chatLog").children.length, 1);
   assert.equal(
     chrome.element("chatLog").children[0].innerHTML,
-    '<small>You</small><div class="bubble-text">Sent note</div>',
+    "<small>" + DELIVERED_MARK + 'You</small><div class="bubble-text">Sent note</div>',
   );
 });
 
@@ -7934,7 +7955,10 @@ test("a stale live sync cannot remove a newer agent reply", async () => {
   const bubbles = chrome.element("chatLog").children;
   assert.equal(bubbles.length, 2);
   assert.match(bubbles[0].innerHTML, /Sent note/);
-  assert.equal(bubbles[1].innerHTML, '<small>Agent</small><div class="chat-md"><p>New reply</p></div>');
+  assert.equal(
+    bubbles[1].innerHTML,
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>New reply</p></div></div>',
+  );
 });
 
 test("a transcript sync accepts updated rendering for the same stored agent entry", async () => {
@@ -7956,7 +7980,7 @@ test("a transcript sync accepts updated rendering for the same stored agent entr
 
   assert.equal(
     chrome.element("chatLog").lastAppendedChild.innerHTML,
-    '<small>Agent</small><div class="chat-md"><p><strong>New rendering</strong></p></div>',
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p><strong>New rendering</strong></p></div></div>',
   );
 });
 
@@ -8009,7 +8033,7 @@ test("a failed send returns its notes to Queued with the remove control back", a
   });
   chrome.element("chatInput").value = "Do not lose this";
   chrome.element("send").click();
-  assert.match(chrome.element("queuedLog").innerHTML, /<small>Sending… /);
+  assert.ok(chrome.element("queuedLog").innerHTML.includes("<small>" + SENDING_MARK + "Sending… "));
 
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
@@ -8033,13 +8057,13 @@ test("an agent reply renders the server's html and a text-only reply stays escap
   });
   assert.equal(
     chrome.element("chatLog").lastAppendedChild.innerHTML,
-    '<small>Agent</small><div class="chat-md"><p>Done.</p><ul><li>one</li></ul></div>',
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>Done.</p><ul><li>one</li></ul></div></div>',
   );
 
   chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify({ text: "<img src=x onerror=alert(1)>" }) });
   assert.equal(
     chrome.element("chatLog").lastAppendedChild.innerHTML,
-    '<small>Agent</small><div class="bubble-text">&lt;img src=x onerror=alert(1)&gt;</div>',
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text bubble-text">&lt;img src=x onerror=alert(1)&gt;</div></div>',
   );
 });
 
@@ -8087,14 +8111,17 @@ test("a synced transcript renders sent notes with anchors and thumbnails and nev
     }),
   });
   const [message, note, reply] = chrome.element("chatLog").children;
-  assert.equal(message.innerHTML, '<small>You</small><div class="bubble-text">&lt;b&gt;bold&lt;/b&gt;</div>');
+  assert.equal(
+    message.innerHTML,
+    "<small>" + DELIVERED_MARK + 'You</small><div class="bubble-text">&lt;b&gt;bold&lt;/b&gt;</div>',
+  );
   assert.match(
     note.innerHTML,
     /<span class="anchor-kind">text<\/span><span class="anchor-excerpt text">“&lt;i&gt;sel&lt;\/i&gt;”<\/span>/,
   );
   assert.equal(note.innerHTML.match(/class="bubble-attachment"/g)?.length, 4);
   assert.match(note.innerHTML, /class="bubble-attachment-more"[^>]*>\+2</);
-  assert.equal(reply.innerHTML, '<small>Agent</small><div class="chat-md"><p>ok</p></div>');
+  assert.equal(reply.innerHTML, AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>ok</p></div></div>');
 });
 
 test("a queued note settles from a compact ack after its transcript entry is evicted", async () => {

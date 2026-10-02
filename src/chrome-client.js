@@ -127,6 +127,7 @@ const panelScrim = /** @type {HTMLDivElement} */ (document.getElementById("panel
 const sendButton = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
 const sendAndEndButton = /** @type {HTMLButtonElement} */ (document.getElementById("sendAndEnd"));
 const annotationSwitch = /** @type {HTMLButtonElement} */ (document.getElementById("annotation"));
+const exploreSwitch = /** @type {HTMLButtonElement} */ (document.getElementById("explore"));
 const moreWrap = /** @type {HTMLDivElement} */ (document.getElementById("moreWrap"));
 const moreButton = /** @type {HTMLButtonElement} */ (document.getElementById("moreButton"));
 const moreMenu = /** @type {HTMLDivElement} */ (document.getElementById("moreMenu"));
@@ -485,8 +486,19 @@ function persistTerminalReservation(reserved) {
   }
 }
 
-const REMOVE_ICON_SVG =
-  '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+// The board's line icons (code-goblins frontend/src/Icon.tsx), drawn by its `.icon` rule.
+function boardIconSvg(path) {
+  return '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
+}
+const REMOVE_ICON_SVG = boardIconSvg("M6 6l12 12M18 6 6 18");
+// A note's delivery reads as the board's comment chip does: one check while it is on its way,
+// two once the transcript carries it.
+const SENDING_MARK_HTML =
+  '<span class="delivery" role="img" aria-label="Sending">' + boardIconSvg("M5 12.5 9.5 17 19 7.5") + "</span>";
+const DELIVERED_MARK_HTML =
+  '<span class="delivery succeeded" role="img" aria-label="Delivered">' +
+  boardIconSvg("M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5") +
+  "</span>";
 const ANCHOR_EXCERPT_MAX = 120;
 const ANCHOR_SELECTOR_MAX = 512;
 const ANCHOR_LABEL_MAX = 40;
@@ -594,7 +606,7 @@ function queuedBubbleHtml(prompt, index) {
   const sending = isPromptSending(prompt);
   return (
     '<div class="bubble user queued"><small>' +
-    (sending ? "Sending\u2026" : "Queued") +
+    (sending ? SENDING_MARK_HTML + "Sending\u2026" : "Queued") +
     ' <button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
     index +
     '">' +
@@ -647,6 +659,7 @@ function updateSendState() {
   sendButton.disabled = ended || terminalReserved;
   sendAndEndButton.disabled = ended || Boolean(terminalSubmission?.inFlight);
   annotationSwitch.disabled = ended || terminalReserved;
+  exploreSwitch.disabled = ended || terminalReserved;
   chatInput.disabled = ended || terminalReserved;
   chatAttachButton.disabled = ended || terminalReserved;
   if (chatInput.disabled) voiceDictation.dispose();
@@ -835,15 +848,19 @@ async function copyText(text) {
 // user entry is always escaped text, with its anchor line and thumbnails when it carries them.
 function chatBubbleHtml(entry) {
   if (entry.role === "agent") {
+    // The agent speaks in the board's dialogue box: its name on the tab, its portrait, its words.
     return (
-      "<small>Agent</small>" +
+      '<span class="dialogue-tab">Agent</span><div class="dialogue-box"><span class="dialogue-portrait"><span class="goblin-avatar"></span></span>' +
       (typeof entry.html === "string" && entry.html
-        ? '<div class="chat-md">' + entry.html + "</div>"
-        : '<div class="bubble-text">' + escapeHtml(entry.text) + "</div>")
+        ? '<div class="dialogue-text chat-md">' + entry.html + "</div>"
+        : '<div class="dialogue-text bubble-text">' + escapeHtml(entry.text) + "</div>") +
+      "</div>"
     );
   }
   return (
-    "<small>You</small>" +
+    "<small>" +
+    DELIVERED_MARK_HTML +
+    "You</small>" +
     anchorHtml(entry.anchor) +
     userBubbleTextHtml(entry, entry.text) +
     bubbleAttachmentsHtml(entry)
@@ -857,7 +874,7 @@ function addChat(entry, shouldScroll = true) {
   if (!text && !(role === "agent" ? entry.html : attachmentCount(entry) || entry.anchor)) return;
 
   const el = document.createElement("div");
-  el.className = "bubble " + role;
+  el.className = role === "agent" ? "bubble agent dialogue" : "bubble user";
   el.innerHTML = chatBubbleHtml({ ...entry, role, text });
   chatLog.appendChild(el);
   if (shouldScroll) scrollElementIntoView(el);
@@ -3143,6 +3160,7 @@ function markSessionEnded() {
   renderRevisionLegend();
   closeWhiteboard();
   annotationSwitch.disabled = true;
+  exploreSwitch.disabled = true;
   moreButton.disabled = true;
   chatInput.disabled = true;
   updateSendState();
@@ -4441,10 +4459,17 @@ function toggleAnnotationMode() {
   if (ended || terminalSubmission) return;
   annotation = !annotation;
   annotationSwitch.setAttribute("aria-pressed", String(annotation));
+  exploreSwitch.setAttribute("aria-pressed", String(!annotation));
   postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation });
 }
 
-annotationSwitch.onclick = toggleAnnotationMode;
+// The mode pill's two halves each choose their mode; the half already chosen does nothing.
+annotationSwitch.onclick = () => {
+  if (!annotation) toggleAnnotationMode();
+};
+exploreSwitch.onclick = () => {
+  if (annotation) toggleAnnotationMode();
+};
 
 sendButton.onclick = () => sendQueued(false);
 sendAndEndButton.onclick = () => sendQueued(true);

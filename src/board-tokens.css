@@ -1,0 +1,63 @@
+/* The Code Goblins board's token block, copied by value from code-goblins
+   frontend/src/styles.css: its font faces, its :root rule and the rules that only
+   declare tokens. Never edit a value here. When the board changes, run
+   `node scripts/sync-board-tokens.js`; test/board-tokens.test.js fails while the
+   two differ. */
+@font-face { font-family: "Pixelify Sans"; src: url("/assets/fonts/pixelify-sans.woff2") format("woff2"); font-weight: 400; font-display: swap; }
+@font-face { font-family: "Nunito"; src: url("/assets/fonts/nunito.woff2") format("woff2"); font-weight: 400 800; font-display: swap; }
+@font-face { font-family: "JetBrains Mono"; src: url("/assets/fonts/jetbrains-mono.woff2") format("woff2"); font-weight: 400 700; font-display: swap; }
+:root {
+  color-scheme: dark;
+  font-family: var(--font-body);
+  font-weight: 500;
+  color: #edf4f3;
+  background: radial-gradient(ellipse at 0 0, rgba(0, 229, 155, 0.06), transparent 45%), radial-gradient(ellipse at 100% 0, rgba(0, 140, 255, 0.05), transparent 45%), var(--body-bg);
+  font-size: 16px;
+  line-height: 1.5;
+  font-synthesis: none;
+  /* Recommended badge: dark ink on mint, about 8:1 contrast. */
+  --recommend-ink: #143729;
+  --recommend-fill: #92dfb8;
+  --font-display: "Pixelify Sans", "Nunito", ui-sans-serif, system-ui, sans-serif;
+  --font-body: "Nunito", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono", "Cascadia Mono", Consolas, monospace;
+  /* SIQstack's brand system, from SIQshift packages/shared/styles/brand.css:
+     the base, the accents and the chromatic glass every panel and card wears. */
+  --body-bg: #03050a;
+  --hero-surface: #04060a;
+  --accent-green: #00e59b;
+  --accent-green-deep: #00c97f;
+  --accent-blue: #008cff;
+  --mint: #6ee7b7;
+  --muted: #a3b3c2;
+  --glass-bg: linear-gradient(135deg, rgba(0, 229, 155, 0.05) 0%, rgba(3, 5, 10, 0.80) 50%, rgba(0, 140, 255, 0.03) 100%);
+  --glass-bg-hover: linear-gradient(135deg, rgba(0, 229, 155, 0.09) 0%, rgba(3, 5, 10, 0.75) 50%, rgba(0, 140, 255, 0.06) 100%);
+  --glass-border: rgba(0, 229, 155, 0.13);
+  --glass-border-hover: rgba(0, 229, 155, 0.28);
+  --glass-shadow: 0 8px 32px rgba(0, 0, 0, 0.55), 0 1px 0 rgba(0, 229, 155, 0.09) inset;
+  --glass-shadow-hover: 0 12px 40px rgba(0, 0, 0, 0.6), 0 0 24px rgba(0, 229, 155, 0.08), 0 1px 0 rgba(0, 229, 155, 0.14) inset;
+  /* SIQshift's ghost button and field fills, and its divider hairline. */
+  --ghost-bg: rgba(3, 5, 10, 0.5);
+  --field-bg: rgba(3, 5, 10, 0.7);
+  --border: rgba(163, 179, 194, 0.12);
+  /* From SIQstack's site (SIQstack-cms src/app/brand.css): the wordmark
+     gradient, the electric ring and glow of an active tab, and the focus ring. */
+  --brand-gradient: linear-gradient(105deg, #6ee7b7 0%, #72beff 52%, #c59aff 100%);
+  --electric-ring: linear-gradient(105deg, #00e59b99, #008cffaa, #a855f7aa);
+  --electric-glow: 0 0 18px #008cff26, 0 0 30px #a855f71c;
+  --focus-ring: 3px solid var(--accent-blue);
+  --selected-glow: 0 0 0 1px var(--accent-green), 0 0 24px rgba(0, 229, 155, 0.2), var(--glass-shadow-hover);
+  --lift: translateY(-2px);
+  /* Status colors keep their meaning whatever the theme. */
+  --amber: #f3c578;
+  --red: #ef8e83;
+  --blue: #4aa3ff;
+  --purple: #b29ae9;
+  /* GitHub's own colors for a merged and a closed pull request. */
+  --merged: #ab7df8;
+  --closed: #f85149;
+  --radius: 0.625rem;
+}
+.dialogue, .voice-dock { --hide: #241C15; --soot: #0D0A07; --lantern: #F2B447; --moss: #86B36B; --ember: #D8664C; --bone: #EFE6D2; --edge: #5C4631; --bone-dim: #C4B79F; --pixel-corners: polygon(0 4px, 2px 4px, 2px 2px, 4px 2px, 4px 0, calc(100% - 4px) 0, calc(100% - 4px) 2px, calc(100% - 2px) 2px, calc(100% - 2px) 4px, 100% 4px, 100% calc(100% - 4px), calc(100% - 2px) calc(100% - 4px), calc(100% - 2px) calc(100% - 2px), calc(100% - 4px) calc(100% - 2px), calc(100% - 4px) 100%, 4px 100%, 4px calc(100% - 2px), 2px calc(100% - 2px), 2px calc(100% - 4px), 0 calc(100% - 4px)); }
+.dialogue.done { --tone: var(--moss); }
+.dialogue.failed { --tone: var(--ember); }
