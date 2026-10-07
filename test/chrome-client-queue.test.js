@@ -94,6 +94,9 @@ async function createChromeHarness({
   // getUserMedia for the waveform's microphone. Left off, the window has neither, which is a
   // browser without speech recognition.
   speech = null,
+  // Opt-in plain-http page: a window whose `isSecureContext` is false, as on an http link anywhere
+  // but localhost. Left off, the window does not say, as before.
+  insecure = false,
 } = {}) {
   const source = await readFile(sourceUrl, "utf8");
   // Seed sessionStorage before the client boots, to model a tab whose queue was
@@ -478,6 +481,7 @@ async function createChromeHarness({
     context.window.cancelAnimationFrame = () => {};
     if (speech.getUserMedia) context.navigator.mediaDevices = { getUserMedia: speech.getUserMedia };
   }
+  if (insecure) context.window.isSecureContext = false;
 
   vm.runInNewContext(source, context, { filename: "chrome-client.js" });
   await flushPromises();
@@ -9083,6 +9087,40 @@ test("voice input: clicking the microphone toggles listening, and stray key rele
 
   assert.equal(chrome.element("chatInput").value, "ship it");
   assert.equal(voice["aria-pressed"], "false");
+});
+
+// On a plain-http link (an old tailnet link, or no https proxy at all) the browser refuses the
+// microphone, and "allow it in the site settings" sent the reader looking for a setting that cannot
+// fix it: the link is what has to change.
+test("voice input: a plain-http page says voice needs a secure link and never listens", async () => {
+  FakeRecognizer.made = [];
+  let microphones = 0;
+  const chrome = await createChromeHarness({
+    speech: {
+      Recognition: FakeRecognizer,
+      getUserMedia: async () => {
+        microphones += 1;
+        throw Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });
+      },
+    },
+    insecure: true,
+  });
+  const voice = chrome.element("chatVoice");
+  const note = chrome.element("chatVoiceNote");
+
+  assert.equal(voice.title, "Voice input needs this page's https link");
+  voice.click();
+  await flushPromises();
+
+  assert.equal(FakeRecognizer.made.length, 0);
+  assert.equal(microphones, 0);
+  assert.equal(voice["aria-pressed"], "false");
+  assert.match(note.textContent, /Voice input needs this page's https link/);
+  assert.match(note.textContent, /plain http/);
+  assert.doesNotMatch(note.textContent, /site settings/);
+
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  assert.equal(FakeRecognizer.made.length, 0);
 });
 
 test("voice input: a denied microphone says so in plain words", async () => {

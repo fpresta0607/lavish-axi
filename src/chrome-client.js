@@ -1727,6 +1727,9 @@ const chatAttachmentController = createChatAttachmentsController();
 // listening. What was heard lands at the caret for the reviewer to read and send; it is never sent
 // by itself. Nothing is installed and the chrome makes no request of its own.
 const VOICE_UNSUPPORTED_COPY = "Voice input needs Chrome or Edge";
+// Browsers refuse the microphone to a plain-http page anywhere but localhost, so the page's link,
+// not a site setting, is what has to change.
+const VOICE_INSECURE_COPY = "Voice input needs this page's https link";
 const VOICE_IDLE_HINT = "Hold Ctrl+Shift+Space or click to dictate";
 const VOICE_HELD_HINT = "Listening · release Ctrl+Shift+Space to type";
 const VOICE_CLICKED_HINT = "Listening · click the microphone to type";
@@ -2015,7 +2018,13 @@ function renderVoice() {
   const supported = Boolean(speechRecognitionClass());
   const hint = voiceHeld ? VOICE_HELD_HINT : VOICE_CLICKED_HINT;
   chatVoiceButton.disabled = !supported || chatInput.disabled;
-  chatVoiceButton.title = supported ? (voiceListening ? hint : VOICE_IDLE_HINT) : VOICE_UNSUPPORTED_COPY;
+  chatVoiceButton.title = !supported
+    ? VOICE_UNSUPPORTED_COPY
+    : window.isSecureContext === false
+      ? VOICE_INSECURE_COPY
+      : voiceListening
+        ? hint
+        : VOICE_IDLE_HINT;
   chatVoiceButton.setAttribute("aria-pressed", String(voiceListening));
   chatComposer.classList.toggle("is-dictating", voiceListening);
   chatVoiceNote.textContent = voiceProblem || (voiceListening ? hint : "");
@@ -2032,6 +2041,10 @@ function renderVoice() {
 
 function startVoice(held) {
   if (chatInput.disabled) return;
+  if (window.isSecureContext === false) {
+    showVoiceProblem(VOICE_INSECURE_COPY + ": browsers refuse the microphone on plain http.");
+    return;
+  }
   voiceHeld = held;
   voiceDictation.start();
   renderVoice();

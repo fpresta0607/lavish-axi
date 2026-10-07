@@ -2469,6 +2469,69 @@ test("spawned poll with piped stderr banners once and leaves re-run guidance whe
   }
 });
 
+// A session keeps the link it was opened with. Pages opened before Tailscale served an https proxy
+// were listed with their plain-http link for good, and on the tailnet that page cannot use the
+// microphone.
+test("the session list gives each page the link the running server hands out now", async () => {
+  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-home-links-`);
+  const artifact = `${stateDir}/artifact.html`;
+  await writeFile(artifact, "<html><body>hello</body></html>", "utf8");
+  const tailnetName = "review.tailnet.ts.net";
+  let serveStatus = "{}";
+  const server = await serve({
+    port: 0,
+    stateFile: `${stateDir}/state.json`,
+    version: VERSION,
+    env: {},
+    detectTailscale: async () => ({ ipv4: "192.0.2.1", magicDnsName: tailnetName }),
+    readTailscaleServeStatus: async () => serveStatus,
+    log: () => {},
+    idleTimeoutMs: null,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const open = (file) =>
+    fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file }),
+    }).then((response) => response.json());
+  try {
+    const before = await open(artifact);
+    assert.equal(before.url, `${base}/session/${before.key}`);
+
+    serveStatus = JSON.stringify({
+      TCP: { 4388: { HTTPS: true } },
+      Web: { [`${tailnetName}:4388`]: { Handlers: { "/": { Proxy: base } } } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const second = `${stateDir}/second.html`;
+    await writeFile(second, "<html><body>second</body></html>", "utf8");
+    await open(second);
+
+    const child = spawn(process.execPath, [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      env: {
+        ...process.env,
+        LAVISH_AXI_STATE_DIR: stateDir,
+        LAVISH_AXI_PORT: String(server.port),
+        LAVISH_AXI_TELEMETRY: "0",
+      },
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    const [code] = await once(child, "close");
+
+    assert.equal(code, 0);
+    assert.match(stdout, new RegExp(`https://${tailnetName.replaceAll(".", "\\.")}:4388/session/${before.key}`));
+    assert.doesNotMatch(stdout, /http:\/\/127\.0\.0\.1/);
+  } finally {
+    await server.close();
+    await rm(stateDir, { force: true, recursive: true });
+  }
+});
+
 test("browser-disconnected poll output asks before reopening or ending the resumable session", () => {
   const output = createPollOutput({
     file: "/tmp/report.html",
