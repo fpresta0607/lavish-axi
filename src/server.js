@@ -72,6 +72,7 @@ import {
   hostForUrl,
   IPV6_LOOPBACK_HOST,
   isWildcardHost,
+  linkUrlOrigin,
   LOOPBACK_HOST,
   resolveConcreteListenHosts,
   resolveLinkHost,
@@ -79,7 +80,7 @@ import {
   sanitizeListenHosts,
   stateId,
 } from "./paths.js";
-import { detectTailscale } from "./tailscale.js";
+import { detectTailscale, readTailscaleServeStatus, tailscaleHttpsProxyOrigin } from "./tailscale.js";
 import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
 import { AsyncMutex } from "./async-mutex.js";
 import { generateSharePassword } from "./share-password.js";
@@ -353,6 +354,7 @@ export async function serve({
   linkHost: linkHostName,
   allowedHosts,
   detectTailscale: detectTailscaleFn,
+  readTailscaleServeStatus: readTailscaleServeStatusFn,
   lookupHost,
   extraListenHosts = [],
   bindRecoveryDelaysMs = BIND_RECOVERY_DELAYS_MS,
@@ -364,6 +366,9 @@ export async function serve({
   const envHost = env.LAVISH_AXI_HOST?.trim();
   const autoTailscale = !envHost;
   const detect = detectTailscaleFn === undefined ? detectTailscale : detectTailscaleFn;
+  const readServeStatus =
+    readTailscaleServeStatusFn === undefined ? readTailscaleServeStatus : readTailscaleServeStatusFn;
+  const explicitLinkOrigin = linkUrlOrigin(env);
   const tailscale = !hosts?.length && autoTailscale && typeof detect === "function" ? await detect() : null;
   const requestedListenHosts = sanitizeListenHosts(
     hosts?.length
@@ -385,6 +390,9 @@ export async function serve({
   /** @type {Map<string, Error>} */
   const pendingBinds = new Map();
   let resolvedLinkHost = linkHostName ?? resolveLinkHost({ env, tailscale, fallbackHost: host });
+  // The https origin `tailscale serve` proxies to this server, if any, and when it was last read.
+  let httpsProxyOrigin = null;
+  let httpsProxyCheckedAt = 0;
   // Declared before anything listens: a live-event client or /shutdown can reach these handlers
   // the moment the first listener binds, while later addresses are still retrying. Declaring them
   // after the bind loop made that window a TDZ ReferenceError that crashed restarted servers.
@@ -521,7 +529,10 @@ export async function serve({
     const address = `${hostForUrl(listenHost)}:${publicPort || port}`;
     const reachable = `Lavish remains available on ${boundHosts.map((bound) => hostForUrl(bound)).join(", ") || "loopback"}`;
     if (listenHost === tailscale?.ipv4) {
-      return `Tailscale binding failed for ${address} (${why}); there is no phone access and tailnet review links do not load. ${reachable} and keeps retrying the tailnet address in the background.`;
+      const access = httpsProxyOrigin
+        ? `plain http tailnet links do not load, while ${httpsProxyOrigin} links through tailscale serve still load`
+        : "there is no phone access and tailnet review links do not load";
+      return `Tailscale binding failed for ${address} (${why}); ${access}. ${reachable} and keeps retrying the tailnet address in the background.`;
     }
     const fellBack = boundHosts.length > 0 && boundHosts.every((bound) => bound === LOOPBACK_HOST);
     return `Could not bind ${address} (${why}); ${fellBack ? "Lavish fell back to loopback and is" : "Lavish is"} not reachable at that address. ${reachable} and keeps retrying ${hostForUrl(listenHost)} in the background.`;
@@ -544,7 +555,22 @@ export async function serve({
   async function reconcileNetwork() {
     await retryPendingBinds();
     if (!(autoTailscale && typeof detect === "function")) return false;
-    return reconcileTailscaleNetwork();
+    const [stale] = await Promise.all([reconcileTailscaleNetwork(), refreshHttpsProxyOrigin()]);
+    return stale;
+  }
+
+  // `tailscale serve` adds and removes the https proxy while Lavish runs, so its status is re-read,
+  // at most once per NETWORK_RECONCILE_CACHE_MS, on every network reconcile and before a session
+  // link is minted. The CLI reconciles before it opens a session, so the open itself rarely waits.
+  async function refreshHttpsProxyOrigin() {
+    if (explicitLinkOrigin || !tailscale?.magicDnsName || typeof readServeStatus !== "function") return;
+    if (Date.now() - httpsProxyCheckedAt < NETWORK_RECONCILE_CACHE_MS) return;
+    const status = await readServeStatus();
+    httpsProxyCheckedAt = Date.now();
+    const origin = tailscaleHttpsProxyOrigin(status, { magicDnsName: tailscale.magicDnsName, port: boundPort });
+    if (origin === httpsProxyOrigin) return;
+    httpsProxyOrigin = origin;
+    applyNetworkState();
   }
 
   async function reconcileTailscaleNetwork() {
@@ -652,7 +678,10 @@ export async function serve({
   // Loopback names are always accepted. Binding to a concrete interface
   // (LAVISH_AXI_HOST) or naming a link host (LAVISH_AXI_LINK_HOST) adds that host,
   // so an operator who intentionally exposes the server on a specific interface
-  // keeps rebinding protection while their chosen hostname works. Additional
+  // keeps rebinding protection while their chosen hostname works. The host of a
+  // link origin (LAVISH_AXI_LINK_URL, or the https proxy Tailscale serves to this
+  // server) is added the same way, because its proxy reaches Lavish on loopback
+  // carrying that name. Additional
   // names (a reverse-proxy hostname, extra interfaces) are an explicit opt-in via
   // LAVISH_AXI_ALLOWED_HOSTS; a lone "*" there disables the guard for operators
   // who front the server with their own authentication. When a reverse proxy sits
@@ -663,14 +692,26 @@ export async function serve({
   // The mutating-route origin/Referer guard is installed immediately after.
   const allowedHostnames = buildAllowedHostnames({
     host: requestedListenHosts[0],
-    hosts: [...requestedListenHosts, ...listenHosts],
+    hosts: [...requestedListenHosts, ...listenHosts, ...linkOriginHostnames()],
     linkHost: resolvedLinkHost,
     allowedHosts: extraHosts,
   });
   const allowAnyHostname = allowsAllHosts(extraHosts);
 
+  function linkOriginHostnames() {
+    return [explicitLinkOrigin, httpsProxyOrigin]
+      .filter((origin) => origin !== null)
+      .map((origin) => hostnameFromHostHeader(new URL(origin).host));
+  }
+
+  // Where every link this server reports points: LAVISH_AXI_LINK_URL, else the https proxy
+  // Tailscale serves to this server, else plain http on the link host.
+  function linkOrigin() {
+    return explicitLinkOrigin ?? httpsProxyOrigin ?? `http://${hostForUrl(resolvedLinkHost)}:${publicPort}`;
+  }
+
   function workingUrlFor(req, { includeSessionPath = true } = {}) {
-    const origin = `http://${hostForUrl(resolvedLinkHost)}:${publicPort}`;
+    const origin = linkOrigin();
     if (includeSessionPath && typeof req.path === "string" && req.path.startsWith("/session/")) {
       return `${origin}${req.path}`;
     }
@@ -713,9 +754,10 @@ export async function serve({
         status: 403,
         error: "forbidden host",
         title: "Wrong address",
-        message: tailscalePhoneReady
-          ? `This ${brandTitleSuffix(brandName())} review server does not accept that host. Open the working URL below on this computer or your phone through Tailscale.`
-          : `This ${brandTitleSuffix(brandName())} review server does not accept that host. Open the working URL below on this computer. Phone access is unavailable.`,
+        message:
+          tailscalePhoneReady || httpsProxyOrigin
+            ? `This ${brandTitleSuffix(brandName())} review server does not accept that host. Open the working URL below on this computer or your phone through Tailscale.`
+            : `This ${brandTitleSuffix(brandName())} review server does not accept that host. Open the working URL below on this computer. Phone access is unavailable.`,
       });
     });
   }
@@ -818,7 +860,8 @@ export async function serve({
       const key = sessionKey(file);
       const reopen = Boolean(req.body.reopen);
       const existing = await store.findByKey(key);
-      const sessionUrl = `http://${hostForUrl(resolvedLinkHost)}:${publicPort}/session/${key}`;
+      await refreshHttpsProxyOrigin();
+      const sessionUrl = `${linkOrigin()}/session/${key}`;
       // A user-initiated end (ending or send-and-ending from the browser) means the human
       // deliberately closed the review surface. Silently reopening it on the next
       // `lavish-axi <file>` is the exact behavior this route exists to prevent - require an
@@ -2111,7 +2154,12 @@ export async function serve({
     const servesHost = (candidate) => candidate !== tailscale?.ipv4 || tailscalePhoneReady;
     const nextAllowedHostnames = buildAllowedHostnames({
       host: requestedListenHosts[0],
-      hosts: [...requestedListenHosts.filter(servesHost), ...listenHosts.filter(servesHost), ...boundHosts],
+      hosts: [
+        ...requestedListenHosts.filter(servesHost),
+        ...listenHosts.filter(servesHost),
+        ...boundHosts,
+        ...linkOriginHostnames(),
+      ],
       linkHost: resolvedLinkHost,
       allowedHosts: extraHosts,
     });

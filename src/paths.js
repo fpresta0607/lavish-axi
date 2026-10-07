@@ -122,6 +122,29 @@ export function linkHost(env = process.env) {
   return env.LAVISH_AXI_LINK_HOST?.trim() || clientHost(env);
 }
 
+// Origin written into session URLs ahead of every detected link (LAVISH_AXI_LINK_URL), for an https
+// or reverse proxy that fronts the server. Only a bare origin is accepted, because every Lavish
+// route is root-absolute. Null when unset; throws on any other value.
+export function linkUrlOrigin(env = process.env) {
+  const value = env.LAVISH_AXI_LINK_URL?.trim();
+  if (!value) return null;
+  const url = URL.canParse(value) ? new URL(value) : null;
+  if (
+    !url ||
+    (url.protocol !== "http:" && url.protocol !== "https:") ||
+    url.username ||
+    url.password ||
+    url.pathname !== "/" ||
+    url.search ||
+    url.hash
+  ) {
+    throw new Error(
+      `LAVISH_AXI_LINK_URL must be an http or https origin such as https://review.example.ts.net:8443, not ${value}`,
+    );
+  }
+  return url.origin;
+}
+
 // Extra Host header values the server's DNS-rebinding guard accepts beyond the
 // loopback names and the resolved bind/link host, set via LAVISH_AXI_ALLOWED_HOSTS
 // (whitespace-separated). A lone "*" disables the guard entirely - an explicit
