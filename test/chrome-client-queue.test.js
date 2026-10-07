@@ -5958,6 +5958,123 @@ test("chrome boots read-only when the session already ended before this page loa
   assert.equal(chrome.element("endedOverlay").hidden, false);
 });
 
+// The ended overlay covers the conversation, so a goblin that answered and then retired (or had
+// its page ended for it) left its answer unreadable behind "Session ended". The card carries what
+// the agent said that the reader has not answered.
+function userEntry(text) {
+  return { role: "user", kind: "message", text, at: "2026-10-07T16:00:00.000Z" };
+}
+
+function agentEntry(text) {
+  return { role: "agent", text, html: `<p>${text}</p>`, at: "2026-10-07T16:01:00.000Z" };
+}
+
+function endedCardReplies(chrome) {
+  return chrome
+    .element("endedReplies")
+    .children.map((bubble) => bubble.innerHTML.match(/<p>(.*?)<\/p>/)?.[1])
+    .filter(Boolean);
+}
+
+function endLive(chrome) {
+  chrome.eventSource().listeners.get("ended")({ data: JSON.stringify({ ended_by: "agent" }) });
+}
+
+for (const { name, chat, replies } of [
+  {
+    name: "the reply to the user's last message",
+    chat: [userEntry("Which layout on my phone?"), agentEntry("Use the indented list.")],
+    replies: ["Use the indented list."],
+  },
+  {
+    name: "every reply sent after the user's last message",
+    chat: [
+      agentEntry("Here are two layouts."),
+      userEntry("Which layout on my phone?"),
+      agentEntry("Use the indented list."),
+      agentEntry("Both are in PR 412."),
+    ],
+    replies: ["Use the indented list.", "Both are in PR 412."],
+  },
+  {
+    name: "the last reply when the user spoke last",
+    chat: [agentEntry("Here are two layouts."), agentEntry("Use the indented list."), userEntry("Approved as shown.")],
+    replies: ["Use the indented list."],
+  },
+  {
+    name: "every reply when the user never wrote",
+    chat: [agentEntry("Here are two layouts."), agentEntry("Use the indented list.")],
+    replies: ["Here are two layouts.", "Use the indented list."],
+  },
+]) {
+  test(`a page that loads ended shows ${name} on the ended card`, async () => {
+    const chrome = await createChromeHarness({
+      sessionData: { ...defaultSessionData, initialChat: chat, initialEnded: true, initialEndedBy: "agent" },
+    });
+
+    assert.equal(chrome.element("endedOverlay").hidden, false);
+    assert.equal(chrome.element("endedReplies").hidden, false);
+    assert.deepEqual(endedCardReplies(chrome), replies);
+    assert.match(chrome.element("endedReplies").children[0].innerHTML, /^<span class="dialogue-tab">Agent<\/span>/);
+  });
+
+  test(`a page that ends while open shows ${name} on the ended card`, async () => {
+    const chrome = await createChromeHarness({
+      sessionData: { ...defaultSessionData, initialChat: chat },
+    });
+
+    endLive(chrome);
+
+    assert.equal(chrome.element("endedOverlay").hidden, false);
+    assert.equal(chrome.element("endedReplies").hidden, false);
+    assert.deepEqual(endedCardReplies(chrome), replies);
+  });
+}
+
+for (const chat of [[], [userEntry("Approved as shown.")]]) {
+  test(`an ended page with no agent reply keeps the ended card unchanged (${chat.length} entries)`, async () => {
+    const chrome = await createChromeHarness({
+      sessionData: { ...defaultSessionData, initialChat: chat, initialEnded: true, initialEndedBy: "user" },
+    });
+
+    assert.equal(chrome.element("endedOverlay").hidden, false);
+    assert.equal(chrome.element("endedReplies").hidden, true);
+    assert.deepEqual(chrome.element("endedReplies").children, []);
+  });
+}
+
+test("a reply the agent sends after the session ended lands on the ended card", async () => {
+  const question = userEntry("Which layout on my phone?");
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, initialChat: [question] },
+  });
+  endLive(chrome);
+  assert.equal(chrome.element("endedReplies").hidden, true);
+
+  const answer = agentEntry("Use the indented list.");
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify(answer) });
+
+  assert.equal(chrome.element("endedReplies").hidden, false);
+  assert.deepEqual(endedCardReplies(chrome), ["Use the indented list."]);
+
+  const followUp = agentEntry("Both are in PR 412.");
+  chrome.eventSource().listeners.get("chat-sync")({
+    data: JSON.stringify({ chat: [question, answer, followUp], chat_revision: 3 }),
+  });
+
+  assert.deepEqual(endedCardReplies(chrome), ["Use the indented list.", "Both are in PR 412."]);
+});
+
+test("an open page never fills the ended card", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, initialChat: [agentEntry("Use the indented list.")] },
+  });
+
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify(agentEntry("Both are in PR 412.")) });
+
+  assert.deepEqual(chrome.element("endedReplies").children, []);
+});
+
 // #171: a race between this tab's own in-flight Send and a session end elsewhere must not leave
 // the queue looking sent when the server actually refused it.
 test("a queued Send refused because the session already ended marks the chrome read-only (#171)", async () => {

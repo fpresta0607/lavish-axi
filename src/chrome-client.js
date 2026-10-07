@@ -175,6 +175,7 @@ const outdatedText = /** @type {HTMLSpanElement} */ (document.getElementById("ou
 const outdatedReloadButton = /** @type {HTMLButtonElement} */ (document.getElementById("outdatedReload"));
 const outdatedDismissButton = /** @type {HTMLButtonElement} */ (document.getElementById("outdatedDismiss"));
 const endedOverlay = /** @type {HTMLDivElement} */ (document.getElementById("endedOverlay"));
+const endedReplies = /** @type {HTMLDivElement} */ (document.getElementById("endedReplies"));
 const layoutGateOverlay = /** @type {HTMLDivElement} */ (document.getElementById("layoutGateOverlay"));
 const layoutGateTitle = /** @type {HTMLDivElement} */ (document.getElementById("layoutGateTitle"));
 const layoutGateCopy = /** @type {HTMLParagraphElement} */ (document.getElementById("layoutGateCopy"));
@@ -889,7 +890,7 @@ function chatBubbleHtml(entry) {
   );
 }
 
-function addChat(entry, shouldScroll = true) {
+function chatBubble(entry) {
   if (!entry || typeof entry !== "object") return;
   const role = entry.role === "agent" ? "agent" : "user";
   const text = String(entry.text || "");
@@ -898,9 +899,29 @@ function addChat(entry, shouldScroll = true) {
   const el = document.createElement("div");
   el.className = role === "agent" ? "bubble agent dialogue" : "bubble user";
   el.innerHTML = chatBubbleHtml({ ...entry, role, text });
+  return el;
+}
+
+function addChat(entry, shouldScroll = true) {
+  const el = chatBubble(entry);
+  if (!el) return;
   chatLog.appendChild(el);
   if (shouldScroll) scrollElementIntoView(el);
   return el;
+}
+
+// The ended overlay covers the conversation, so its card carries what the agent said that the
+// reader has not answered: every reply after their last message, or the last reply when they
+// spoke last. A goblin that answered and then retired otherwise left its answer unreadable.
+function renderEndedReplies() {
+  if (!ended) return;
+  const lastUserIndex = displayedChat.findLastIndex((entry) => entry?.role !== "agent");
+  const unanswered = displayedChat.slice(lastUserIndex + 1);
+  const lastReply = displayedChat.findLast((entry) => entry?.role === "agent");
+  const replies = unanswered.length ? unanswered : lastReply ? [lastReply] : [];
+  const bubbles = replies.map(chatBubble).filter(Boolean);
+  endedReplies.replaceChildren(...bubbles);
+  endedReplies.hidden = bubbles.length === 0;
 }
 
 function chatEntryDisplayKey(entry) {
@@ -1034,6 +1055,7 @@ function syncChat(chat, revision) {
   for (const note of retiredDraftNodes) chatLog.appendChild(note);
   const anchor = retiredDraftNodes[retiredDraftNodes.length - 1] || workingBubble || lastChatBubble;
   if (anchor) scrollElementIntoView(anchor);
+  renderEndedReplies();
   return true;
 }
 
@@ -3200,6 +3222,7 @@ function markSessionEnded() {
   revealLayoutGate();
   layoutGateEscape?.end?.();
   postToFrame({ type: "lavish:setAnnotationMode", enabled: false });
+  renderEndedReplies();
   endedOverlay.hidden = false;
 }
 
@@ -4768,6 +4791,7 @@ events.set("agent-reply", (data) => {
     ...(data.at ? { at: String(data.at) } : {}),
   };
   if (addChat(entry)) displayedChat.push(entry);
+  renderEndedReplies();
   noteAgentReply(entry.text);
 });
 events.set("chat-sync", (data) => {

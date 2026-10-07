@@ -6625,8 +6625,21 @@ test("ended session shows an overlay card over the dimmed chrome", async () => {
   assert.match(html, /Return to your agent to continue\./);
   assert.match(html, /class="ended-copy">\/tmp\/artifact\.html</);
   assert.doesNotMatch(html, /The agent polling loop can stop\./);
+  // The card carries the agent's unanswered replies, which the overlay would otherwise cover. It
+  // starts hidden, so an ended page with no reply shows the card exactly as before.
+  assert.match(
+    html,
+    /Return to your agent to continue\.<\/h3><div class="ended-replies" id="endedReplies" role="region" aria-label="Latest from your agent" hidden><\/div><p class="ended-copy">/,
+  );
   assert.match(css, /\.ended-overlay\{[^}]*inset:var\(--shell-top\) var\(--shell-pad\) var\(--shell-pad\)/);
   assert.match(css, /\.ended-overlay\{[^}]*background:var\(--scrim\)/);
+  // A card taller than the screen (a long reply, a phone on its side) scrolls inside the overlay
+  // instead of running off it.
+  assert.match(css, /\.ended-overlay\{[^}]*overflow-y:auto/);
+  assert.match(css, /\.ended-card\{[^}]*margin:auto/);
+  // The card's own avatar rule must not reach the portrait in a reply's dialogue box.
+  assert.match(css, /\.ended-card > \.goblin-avatar\{[^}]*width:96px/);
+  assert.doesNotMatch(css, /\.ended-card \.goblin-avatar\{/);
   assert.match(css, /\.ended-title\{[^}]*font-family:var\(--font-display\)/);
   assert.match(js, /endedOverlay\.hidden = false/);
   assert.match(js, /annotationSwitch\.disabled = true/);
@@ -6645,7 +6658,14 @@ test("layout gate curtain reuses the ended overlay card styling", async () => {
     /<iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" data-artifact-src="\/artifact\/abc\/index\.html"><\/iframe>/,
   );
   assert.doesNotMatch(html, /<iframe id="artifact"[^>]* src=/);
-  assert.match(html, /class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"/);
+  // The curtain concerns the artifact alone: it lives in the frame and covers only the frame, so
+  // the conversation beside it (or the phone's sheet over it) stays readable while it is up.
+  assert.match(
+    html,
+    /<div class="frame"><iframe id="artifact"[^>]*><\/iframe><div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay">/,
+  );
+  assert.match(css, /\.frame\{[^}]*position:relative;isolation:isolate/);
+  assert.match(css, /\.ended-overlay\.layout-gate-overlay\{position:absolute;inset:0;\}/);
   assert.match(
     html,
     /<div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"><\/span><h3 class="ended-title" id="layoutGateTitle">Checking layout/,
