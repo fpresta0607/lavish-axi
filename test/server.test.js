@@ -1872,6 +1872,140 @@ test("a Tailscale https proxy added while Lavish runs reaches the next session l
   }
 });
 
+// A Tailscale https proxy is a standing promise that the link answers: once the server idled out,
+// every link the Overlord held (on the board, in a message) answered a bare 502 from the proxy,
+// and nothing of Lavish was running to start itself or say why.
+test("a server Tailscale serves an https proxy to outlives its idle timeout, and stops once the proxy is gone", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-idle-"));
+  let serveStatus = "{}";
+  const server = await serve({
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    env: {},
+    detectTailscale: async () => ({ ipv4: "192.0.2.1", magicDnsName: TAILNET_NAME }),
+    readTailscaleServeStatus: async () => serveStatus,
+    log: () => {},
+    idleTimeoutMs: 150,
+  });
+  serveStatus = tailscaleHttpsServe(4388, `http://127.0.0.1:${server.port}`);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const health = await fetch(`http://127.0.0.1:${server.port}/health`);
+    assert.equal(health.status, 200);
+
+    serveStatus = "{}";
+    await expectDoneWithin(server, 3000);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("ending the last open session does not stop a server Tailscale serves an https proxy to", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-last-end-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let lavishPort = 0;
+  const server = await serveBehindTailnet(dir, {
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, `http://127.0.0.1:${lavishPort}`),
+  });
+  lavishPort = server.port;
+  try {
+    const opened = await openSession(server.port, artifact);
+    const ended = await fetch(`http://127.0.0.1:${server.port}/api/${opened.key}/end`, { method: "POST" });
+    assert.equal(ended.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // The ended page still answers through its link: it shows the agent's last words.
+    const page = await rawRequest(server.port, `/session/${opened.key}`, {
+      host: TAILNET_PROXIED.host,
+      headers: { ...TAILNET_PROXIED.headers, accept: "text/html" },
+    });
+    assert.equal(page.status, 200);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Links handed out before the https proxy existed (or by an older Lavish) are plain http on the
+// tailnet, where the page is not a secure context and the browser refuses the microphone. Such a
+// request reaches Lavish directly on a non-loopback address; the proxy and localhost reach it over
+// loopback, so only the stale link is sent on to the https one.
+test("a plain-http page link that reaches a non-loopback address goes to the https link", async (t) => {
+  const concrete = availableConcreteIpv4();
+  if (!concrete) {
+    t.skip("no non-loopback IPv4 address on this machine");
+    return;
+  }
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-upgrade-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let serveStatus = "{}";
+  const server = await serve({
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    env: {},
+    detectTailscale: async () => ({ ipv4: "192.0.2.1", magicDnsName: TAILNET_NAME }),
+    readTailscaleServeStatus: async () => serveStatus,
+    extraListenHosts: [concrete],
+    log: () => {},
+    idleTimeoutMs: null,
+  });
+  try {
+    const opened = await openSession(server.port, artifact);
+    const direct = { address: concrete, host: `${concrete}:${server.port}`, headers: { accept: "text/html" } };
+
+    // No https link to send it to: the page loads where it is.
+    const withoutProxy = await rawRequest(server.port, `/session/${opened.key}?gate=0`, direct);
+    assert.equal(withoutProxy.status, 200);
+
+    serveStatus = tailscaleHttpsServe(4388, `http://127.0.0.1:${server.port}`);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const upgraded = await rawRequest(server.port, `/session/${opened.key}?gate=0`, direct);
+    assert.equal(upgraded.status, 307);
+    assert.equal(upgraded.headers.location, `${TAILNET_HTTPS_ORIGIN}/session/${opened.key}?gate=0`);
+
+    const proxied = await rawRequest(server.port, `/session/${opened.key}`, {
+      host: TAILNET_PROXIED.host,
+      headers: { ...TAILNET_PROXIED.headers, accept: "text/html" },
+    });
+    assert.equal(proxied.status, 200);
+    const local = await rawRequest(server.port, `/session/${opened.key}`, {
+      host: `127.0.0.1:${server.port}`,
+      headers: { accept: "text/html" },
+    });
+    assert.equal(local.status, 200);
+    // Only the page moves: the API on the same address keeps answering in place.
+    const health = await rawRequest(server.port, "/health", { address: concrete, host: `${concrete}:${server.port}` });
+    assert.equal(health.status, 200);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("health reports the origin every link points at", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-health-origin-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let lavishPort = 0;
+  const server = await serveBehindTailnet(dir, {
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, `http://127.0.0.1:${lavishPort}`),
+  });
+  lavishPort = server.port;
+  try {
+    await openSession(server.port, artifact);
+    const health = await fetch(`http://127.0.0.1:${server.port}/health`).then((response) => response.json());
+    assert.equal(health.link_origin, TAILNET_HTTPS_ORIGIN);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("session URLs can disable the layout gate for one open", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
@@ -1899,20 +2033,20 @@ test("session URLs can disable the layout gate for one open", async () => {
 // Issue a raw HTTP request so we can forge the Host header - browser `fetch`
 // treats Host as a forbidden header and won't let us override it, but a DNS
 // rebinding attack is exactly a real browser sending a foreign Host to this
-// loopback port. Connect to 127.0.0.1 while presenting an arbitrary Host.
+// loopback port. Connect to 127.0.0.1 (or `address`) while presenting an arbitrary Host.
 /**
  * @param {number} port
  * @param {string} pathname
- * @param {{ method?: string, host?: string, headers?: Record<string, string>, body?: string }} [options]
+ * @param {{ method?: string, host?: string, headers?: Record<string, string>, body?: string, address?: string }} [options]
  */
-function rawRequest(port, pathname, { method = "GET", host, headers = {}, body } = {}) {
+function rawRequest(port, pathname, { method = "GET", host, headers = {}, body, address = "127.0.0.1" } = {}) {
   return new Promise((resolve, reject) => {
     const finalHeaders = { ...headers };
     if (host !== undefined) finalHeaders.host = host;
     if (body !== undefined && finalHeaders["content-type"] === undefined) {
       finalHeaders["content-type"] = "application/json";
     }
-    const req = httpRequest({ host: "127.0.0.1", port, path: pathname, method, headers: finalHeaders }, (res) => {
+    const req = httpRequest({ host: address, port, path: pathname, method, headers: finalHeaders }, (res) => {
       let data = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => (data += chunk));

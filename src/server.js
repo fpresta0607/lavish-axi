@@ -173,6 +173,8 @@ const designAssetUrls = {
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WHITEBOARD_CHANNEL_TOKEN_TTL_MS = 5 * 60_000;
 const NETWORK_RECONCILE_CACHE_MS = 1_000;
+// A socket's local address on the loopback interface, IPv4, IPv6 or IPv4-mapped.
+const LOOPBACK_ADDRESS_PATTERN = /^(127\.|::1$|::ffff:127\.)/;
 // Every concrete address gets this retry budget, not just the Tailscale one: an interface that is
 // still coming up fails the same way whichever host names it, and the single-pinned-host case has
 // no second listener to fall back on.
@@ -560,11 +562,12 @@ export async function serve({
   }
 
   // `tailscale serve` adds and removes the https proxy while Lavish runs, so its status is re-read,
-  // at most once per NETWORK_RECONCILE_CACHE_MS, on every network reconcile and before a session
-  // link is minted. The CLI reconciles before it opens a session, so the open itself rarely waits.
-  async function refreshHttpsProxyOrigin() {
+  // at most once per NETWORK_RECONCILE_CACHE_MS, on every network reconcile, before a session
+  // link is minted, and before a page is sent on to it. The CLI reconciles before it opens a
+  // session, so the open itself rarely waits. Before the server stops on its own it reads afresh.
+  async function refreshHttpsProxyOrigin({ fresh = false } = {}) {
     if (explicitLinkOrigin || !tailscale?.magicDnsName || typeof readServeStatus !== "function") return;
-    if (Date.now() - httpsProxyCheckedAt < NETWORK_RECONCILE_CACHE_MS) return;
+    if (!fresh && Date.now() - httpsProxyCheckedAt < NETWORK_RECONCILE_CACHE_MS) return;
     const status = await readServeStatus();
     httpsProxyCheckedAt = Date.now();
     const origin = tailscaleHttpsProxyOrigin(status, { magicDnsName: tailscale.magicDnsName, port: boundPort });
@@ -828,6 +831,9 @@ export async function serve({
       // Configured names sit beside the addresses they resolved to, so a CLI that resolves the same
       // name finds it served whichever form it compares.
       requested_hosts: [...new Set([...listenHosts, ...requestedListenHosts])],
+      // Where every link this server hands out points now. A session keeps the link it was opened
+      // with, so the CLI's session list builds each link from this instead.
+      link_origin: linkOrigin(),
       ...(networkStale ? { network_stale: true } : {}),
       ...(networkWarning ? { network_warning: networkWarning } : {}),
       listeners: [...activePolls].map(([key, holder]) => ({
@@ -1494,6 +1500,18 @@ export async function serve({
 
   app.get("/session/:key", async (req, res, next) => {
     try {
+      // A plain-http link handed out before Tailscale served an https proxy (or by an older Lavish)
+      // reaches this page directly on a tailnet or LAN address, where the browser refuses the
+      // microphone. It goes on to the https link. The proxy itself, and localhost, arrive over
+      // loopback and are served in place, so this can never loop.
+      const localAddress = req.socket.localAddress;
+      if (localAddress && !LOOPBACK_ADDRESS_PATTERN.test(localAddress)) {
+        await refreshHttpsProxyOrigin();
+        if (httpsProxyOrigin) {
+          res.redirect(307, `${httpsProxyOrigin}${req.originalUrl}`);
+          return;
+        }
+      }
       const chromeLoad = await store.issueReviewerHandoff(req.params.key);
       if (!chromeLoad) {
         sendSessionNotFound(req, res);
@@ -2335,7 +2353,10 @@ export async function serve({
   }
 
   // Idle self-shutdown: the timer only runs while nothing is connected. Any live event chrome or
-  // active long-poll cancels it; losing the last connection (re)arms it.
+  // active long-poll cancels it; losing the last connection (re)arms it. A Tailscale https proxy to
+  // this server is a standing promise that its links answer: stopped, every link the reader holds
+  // gets a bare 502 from the proxy, and nothing of Lavish runs to start itself or say why. So
+  // while one points here, the timer only re-arms.
   function refreshIdleTimer() {
     if (idleTimer) {
       clearTimeout(idleTimer);
@@ -2343,8 +2364,13 @@ export async function serve({
     }
     if (shuttingDown || idleTimeoutMs == null) return;
     if (liveEventClients.size > 0 || activePolls.size > 0) return;
-    idleTimer = setTimeout(() => {
+    idleTimer = setTimeout(async () => {
       idleTimer = null;
+      await refreshHttpsProxyOrigin({ fresh: true });
+      if (httpsProxyOrigin) {
+        refreshIdleTimer();
+        return;
+      }
       if (!shuttingDown && liveEventClients.size === 0 && activePolls.size === 0) {
         shutdown("", "", `idle-timeout after ${idleTimeoutMs}ms with no connections`);
       }
@@ -2355,13 +2381,16 @@ export async function serve({
   // When the final open session ends with nothing connected, there is nothing left to serve,
   // so step down immediately rather than waiting out the idle timeout. If a browser chrome or
   // poll is still attached (e.g. the user is about to reopen), leave the server up and let the
-  // idle timer reap it once those connections drop. Best-effort: never let a read failure
-  // block the end response.
+  // idle timer reap it once those connections drop. A Tailscale https proxy keeps it up for the
+  // same reason as the idle timer: the links the reader holds, ended pages included, still answer.
+  // Best-effort: never let a read failure block the end response.
   async function shutdownIfNoLiveSessions() {
     if (liveEventClients.size > 0 || activePolls.size > 0) return;
     try {
       const sessions = await store.listSessions();
       if (sessions.every((session) => session.status === "ended")) {
+        await refreshHttpsProxyOrigin({ fresh: true });
+        if (httpsProxyOrigin) return;
         setImmediate(() => shutdown("", "", "last open session ended with no live connections"));
       }
     } catch {
