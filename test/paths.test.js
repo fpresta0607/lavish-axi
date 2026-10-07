@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { bindHost, clientHost, extraAllowedHosts, hostForUrl, LOOPBACK_HOST, linkHost } from "../src/paths.js";
+import {
+  bindHost,
+  clientHost,
+  extraAllowedHosts,
+  hostForUrl,
+  LOOPBACK_HOST,
+  linkHost,
+  linkUrlOrigin,
+} from "../src/paths.js";
 
 test("bindHost defaults to loopback and honors LAVISH_AXI_HOST", () => {
   assert.equal(bindHost({}), LOOPBACK_HOST);
@@ -53,3 +61,32 @@ test("hostForUrl brackets IPv6 literals but leaves IPv4 and hostnames alone", ()
   assert.equal(hostForUrl("::1"), "[::1]");
   assert.equal(hostForUrl("[::1]"), "[::1]");
 });
+
+for (const { value, expected } of [
+  { value: undefined, expected: null },
+  { value: "  ", expected: null },
+  { value: "https://review.example.ts.net:8443", expected: "https://review.example.ts.net:8443" },
+  { value: " https://Review.Example/ ", expected: "https://review.example" },
+  { value: "http://127.0.0.1:4387", expected: "http://127.0.0.1:4387" },
+  { value: "https://[fd7a:115c:a1e0::1]:8443", expected: "https://[fd7a:115c:a1e0::1]:8443" },
+]) {
+  test(`linkUrlOrigin reads ${JSON.stringify(value)} as ${expected}`, () => {
+    assert.equal(linkUrlOrigin({ LAVISH_AXI_LINK_URL: value }), expected);
+  });
+}
+
+for (const value of [
+  "review.example",
+  "ftp://review.example",
+  "https://review.example/scrawl",
+  "https://review.example/?session=1",
+  "https://review.example/#top",
+  "https://user:secret@review.example",
+]) {
+  test(`linkUrlOrigin refuses ${value}`, () => {
+    assert.throws(
+      () => linkUrlOrigin({ LAVISH_AXI_LINK_URL: value }),
+      /LAVISH_AXI_LINK_URL must be an http or https origin/,
+    );
+  });
+}

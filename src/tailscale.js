@@ -120,3 +120,79 @@ function isIncompleteRunningTailscaleStatus(raw) {
   ];
   return addresses.some((address) => typeof address === "string" && isIP(address.trim()) === 4);
 }
+
+/**
+ * Raw `tailscale serve status --json`, or null when no Tailscale command answers. Never throws.
+ * @param {{ execFile?: typeof execFileAsync, timeoutMs?: number, commands?: string[], now?: () => number }} [options]
+ * @returns {Promise<string | null>}
+ */
+export async function readTailscaleServeStatus({
+  execFile = execFileAsync,
+  timeoutMs = 2000,
+  commands = tailscaleCommandCandidates(),
+  now = Date.now,
+} = {}) {
+  const deadline = now() + timeoutMs;
+  for (const command of commands) {
+    const remainingMs = deadline - now();
+    if (remainingMs <= 0) break;
+    try {
+      const { stdout } = await execFile(command, ["serve", "status", "--json"], {
+        timeout: remainingMs,
+        maxBuffer: 2_000_000,
+        encoding: "utf8",
+      });
+      return String(stdout || "");
+    } catch {
+      continue;
+    }
+  }
+  return null;
+}
+
+// `tailscale serve <port>` proxies to 127.0.0.1; a target written as localhost reaches the same
+// listener. Lavish never listens on ::1, so a proxy to it would not reach Lavish.
+const LOOPBACK_PROXY_HOSTNAMES = new Set(["127.0.0.1", "localhost"]);
+
+/**
+ * The https origin `tailscale serve` proxies to the Lavish server on `port`, from the output of
+ * `tailscale serve status --json`, or null. Only a TLS listener on this node's MagicDNS name whose
+ * root handler proxies to plain http on loopback at that port qualifies, because every Lavish
+ * route is root-absolute. Several qualifying listeners resolve to the lowest port. Never throws.
+ * @param {string | null} raw
+ * @param {{ magicDnsName: string | null | undefined, port: number }} target
+ * @returns {string | null}
+ */
+export function tailscaleHttpsProxyOrigin(raw, { magicDnsName, port }) {
+  if (!raw || !magicDnsName) return null;
+  let status;
+  try {
+    status = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!status || typeof status !== "object") return null;
+  const listenPorts = [];
+  for (const config of [status, ...Object.values(status.Foreground || {})]) {
+    for (const [hostPort, web] of Object.entries(config?.Web || {})) {
+      const separator = hostPort.lastIndexOf(":");
+      const listenPort = Number(hostPort.slice(separator + 1));
+      if (hostPort.slice(0, separator).toLowerCase() !== magicDnsName) continue;
+      if (config.TCP?.[listenPort]?.HTTPS !== true) continue;
+      if (proxiesToLoopbackPort(web?.Handlers?.["/"]?.Proxy, port)) listenPorts.push(listenPort);
+    }
+  }
+  if (listenPorts.length === 0) return null;
+  return new URL(`https://${magicDnsName}:${Math.min(...listenPorts)}`).origin;
+}
+
+function proxiesToLoopbackPort(proxy, port) {
+  if (typeof proxy !== "string" || !URL.canParse(proxy)) return false;
+  const url = new URL(proxy);
+  return (
+    url.protocol === "http:" &&
+    LOOPBACK_PROXY_HOSTNAMES.has(url.hostname) &&
+    Number(url.port || 80) === port &&
+    url.pathname === "/"
+  );
+}

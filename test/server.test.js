@@ -1683,6 +1683,195 @@ test("session URLs use the configured linkHost while binding to loopback", async
   }
 });
 
+const TAILNET_NAME = "review.tailnet.ts.net";
+const TAILNET_HTTPS_ORIGIN = `https://${TAILNET_NAME}:4388`;
+// What `tailscale serve` sends: the browser's Host, repeated as X-Forwarded-Host, and the scheme.
+const TAILNET_PROXIED = {
+  host: `${TAILNET_NAME}:4388`,
+  headers: { "x-forwarded-host": `${TAILNET_NAME}:4388`, "x-forwarded-proto": "https" },
+};
+
+function tailscaleHttpsServe(listenPort, proxy) {
+  return JSON.stringify({
+    TCP: { [listenPort]: { HTTPS: true } },
+    Web: { [`${TAILNET_NAME}:${listenPort}`]: { Handlers: { "/": { Proxy: proxy } } } },
+  });
+}
+
+// The tailnet listener at 192.0.2.1 never binds, so only a proxy that reaches Lavish over loopback
+// can make the MagicDNS name an allowed host.
+async function serveBehindTailnet(dir, { env = {}, readTailscaleServeStatus }) {
+  return serve({
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    env,
+    detectTailscale: async () => ({ ipv4: "192.0.2.1", magicDnsName: TAILNET_NAME }),
+    readTailscaleServeStatus,
+    log: () => {},
+    idleTimeoutMs: null,
+  });
+}
+
+async function openSession(port, artifact) {
+  const opened = await rawRequest(port, "/api/sessions", { method: "POST", body: JSON.stringify({ file: artifact }) });
+  return JSON.parse(opened.body);
+}
+
+test("session links use the https origin Tailscale serves to this port, and the proxied page stays live", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-https-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let lavishPort = 0;
+  const server = await serveBehindTailnet(dir, {
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, `http://127.0.0.1:${lavishPort}`),
+  });
+  lavishPort = server.port;
+  let socket;
+  try {
+    const opened = await openSession(server.port, artifact);
+    assert.equal(opened.url, `${TAILNET_HTTPS_ORIGIN}/session/${opened.key}`);
+    assert.match(
+      opened.network_warning,
+      /https:\/\/review\.tailnet\.ts\.net:4388 links through tailscale serve still load/,
+    );
+
+    const page = await rawRequest(server.port, `/session/${opened.key}`, {
+      host: TAILNET_PROXIED.host,
+      headers: { ...TAILNET_PROXIED.headers, accept: "text/html" },
+    });
+    assert.equal(page.status, 200);
+
+    socket = new WebSocket(`ws://127.0.0.1:${server.port}/events/${opened.key}`, {
+      origin: TAILNET_HTTPS_ORIGIN,
+      headers: { host: TAILNET_PROXIED.host, ...TAILNET_PROXIED.headers },
+    });
+    const messages = on(socket, "message");
+    const nextMessage = async () => JSON.parse(String((await messages.next()).value[0]));
+    await once(socket, "open");
+    assert.equal((await nextMessage()).type, "chat-sync");
+
+    const queued = await rawRequest(server.port, `/api/${opened.key}/prompts`, {
+      method: "POST",
+      host: TAILNET_PROXIED.host,
+      headers: { ...TAILNET_PROXIED.headers, origin: TAILNET_HTTPS_ORIGIN },
+      body: JSON.stringify({ prompts: [{ prompt: "sent from the phone", tag: "message" }] }),
+    });
+    assert.equal(queued.status, 200);
+    const delivered = await fetch(
+      `http://127.0.0.1:${server.port}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`,
+    ).then((response) => response.json());
+    assert.deepEqual(
+      delivered.prompts.map((prompt) => prompt.prompt),
+      ["sent from the phone"],
+    );
+    const reply = await fetch(`http://127.0.0.1:${server.port}/api/${opened.key}/agent-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "reply over the proxy" }),
+    });
+    assert.equal(reply.status, 200);
+    let event = await nextMessage();
+    while (event.type !== "agent-reply") event = await nextMessage();
+    assert.equal(event.data.text, "reply over the proxy");
+    await messages.return();
+
+    const refused = await rawRequest(server.port, "/health", {
+      host: `attacker.example:${server.port}`,
+      headers: { accept: "text/html" },
+    });
+    assert.equal(refused.status, 403);
+    assert.match(refused.body, new RegExp(`${TAILNET_HTTPS_ORIGIN}/`));
+    assert.match(refused.body, /phone through Tailscale/);
+  } finally {
+    socket?.close();
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("session links keep the http link when Tailscale serves no https proxy to this port", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-no-https-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  const server = await serveBehindTailnet(dir, {
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, "http://127.0.0.1:5173"),
+  });
+  try {
+    const opened = await openSession(server.port, artifact);
+    assert.equal(opened.url, `http://127.0.0.1:${server.port}/session/${opened.key}`);
+    const proxied = await rawRequest(server.port, "/health", TAILNET_PROXIED);
+    assert.equal(proxied.status, 403);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("LAVISH_AXI_LINK_URL overrides the Tailscale https proxy and is an allowed host", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-link-url-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let lavishPort = 0;
+  const server = await serveBehindTailnet(dir, {
+    env: { LAVISH_AXI_LINK_URL: "https://review.example:8443/" },
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, `http://127.0.0.1:${lavishPort}`),
+  });
+  lavishPort = server.port;
+  try {
+    const opened = await openSession(server.port, artifact);
+    assert.equal(opened.url, `https://review.example:8443/session/${opened.key}`);
+    const named = await rawRequest(server.port, "/health", {
+      host: "review.example:8443",
+      headers: { "x-forwarded-host": "review.example:8443", "x-forwarded-proto": "https" },
+    });
+    assert.equal(named.status, 200);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an invalid LAVISH_AXI_LINK_URL stops the server from starting", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-link-url-invalid-"));
+  try {
+    const starting = serve({
+      port: 0,
+      stateFile: path.join(dir, "state.json"),
+      version: "9.9.9-test",
+      env: { LAVISH_AXI_HOST: "127.0.0.1", LAVISH_AXI_LINK_URL: "https://review.example/scrawl" },
+      idleTimeoutMs: null,
+    });
+    await assert.rejects(
+      starting.then((server) => server.close()),
+      /LAVISH_AXI_LINK_URL must be an http or https origin/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Tailscale https proxy added while Lavish runs reaches the next session link", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-https-added-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let serveStatus = "{}";
+  const server = await serveBehindTailnet(dir, { readTailscaleServeStatus: async () => serveStatus });
+  try {
+    const before = await openSession(server.port, artifact);
+    assert.equal(before.url, `http://127.0.0.1:${server.port}/session/${before.key}`);
+
+    serveStatus = tailscaleHttpsServe(4388, `http://127.0.0.1:${server.port}`);
+    // Past the one-second window in which a serve status read is reused.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const after = await openSession(server.port, artifact);
+    assert.equal(after.url, `${TAILNET_HTTPS_ORIGIN}/session/${after.key}`);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("session URLs can disable the layout gate for one open", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");

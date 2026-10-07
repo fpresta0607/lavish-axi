@@ -1051,6 +1051,41 @@ test("export command writes a portable HTML file next to the artifact", async ()
   }
 });
 
+test("open refuses an invalid LAVISH_AXI_LINK_URL before starting a server", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-link-url-test-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+  const probe = createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", () => resolve(undefined)));
+  const address = probe.address();
+  const port = address && typeof address === "object" ? address.port : 0;
+  await new Promise((resolve) => probe.close(() => resolve(undefined)));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), artifact, "--no-open"],
+      {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        env: {
+          ...process.env,
+          LAVISH_AXI_STATE_DIR: dir,
+          LAVISH_AXI_PORT: String(port),
+          LAVISH_AXI_TELEMETRY: "0",
+          LAVISH_AXI_LINK_URL: "https://review.example/scrawl",
+        },
+        encoding: "utf8",
+      },
+    );
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /VALIDATION_ERROR/);
+    assert.match(result.stdout, /LAVISH_AXI_LINK_URL must be an http or https origin/);
+    assert.equal(existsSync(`${dir}/server.log`), false);
+  } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
 test("export command treats --out value as an option operand, not the source file", async () => {
   const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-export-test-`);
   const artifact = `${dir}/report.html`;
