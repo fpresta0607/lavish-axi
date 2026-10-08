@@ -81,7 +81,7 @@ import {
   stateId,
 } from "./paths.js";
 import { detectTailscale, readTailscaleServeStatus, tailscaleHttpsProxyOrigin } from "./tailscale.js";
-import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
+import { canonicalFile, canonicalSessionFile, SessionStore, sessionKey } from "./session-store.js";
 import { AsyncMutex } from "./async-mutex.js";
 import { generateSharePassword } from "./share-password.js";
 import {
@@ -958,7 +958,7 @@ export async function serve({
     const detachRequestClose = () => req.off("close", onRequestClose);
     req.on("close", onRequestClose);
     try {
-      const file = await canonicalFile(String(req.query.file || ""));
+      const file = await canonicalSessionFile(String(req.query.file || ""));
       const key = sessionKey(file);
       const ownerValue = typeof req.query.owner === "string" ? req.query.owner.trim() : "";
       if (ownerValue.toLowerCase() === "none" || ownerValue.startsWith("-")) {
@@ -1486,12 +1486,26 @@ export async function serve({
 
   app.post("/api/end", async (req, res, next) => {
     try {
-      const file = await canonicalFile(req.body.file);
+      const file = await canonicalSessionFile(req.body.file);
       const key = sessionKey(file);
       const session = await store.endSession(key, "agent");
       clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
       events.emit("ended", key, session?.ended_by);
       res.json({ status: "ended" });
+      await shutdownIfNoLiveSessions();
+    } catch (error) {
+      next(error);
+    }
+  });
+
+  app.post("/api/end-gone", async (_req, res, next) => {
+    try {
+      const { ended, pending } = await store.endGoneSessions();
+      for (const session of ended) {
+        clearFeedbackDelivery(session.key, activePolls, deliveredFeedback, events);
+        events.emit("ended", session.key, session.ended_by);
+      }
+      res.json({ ended: ended.map((session) => session.file), pending: pending.map((session) => session.file) });
       await shutdownIfNoLiveSessions();
     } catch (error) {
       next(error);

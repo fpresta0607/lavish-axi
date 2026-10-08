@@ -1,11 +1,13 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 
 import {
   ATTACHMENT_DELIVERY_GRACE_MS,
+  canonicalFile,
+  canonicalSessionFile,
   MAX_DELIVERED_ATTACHMENTS,
   MAX_REQUEST_ATTACHMENT_REFS,
   SessionStore,
@@ -2576,4 +2578,73 @@ test("an oversized agent reply preserves evicted prompt acks without exceeding t
     const afterRetry = await store.findByKey(session.key);
     assert.equal(afterRetry.prompts.length, 1, "the evicted note must not be delivered twice");
   });
+});
+
+// A retired worktree takes its review page with it while the session stays in state.json.
+for (const removal of ["the page file", "the page's whole directory tree"]) {
+  test(`a session's path still resolves to its key after ${removal} is deleted`, async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+    try {
+      const pageDir = path.join(dir, "worktree", ".lavish");
+      const page = path.join(pageDir, "page.html");
+      await mkdir(pageDir, { recursive: true });
+      await writeFile(page, "<h1>Hello</h1>");
+      const opened = await canonicalFile(page);
+
+      await rm(removal === "the page file" ? page : path.join(dir, "worktree"), { recursive: true });
+
+      assert.equal(await canonicalSessionFile(page), opened);
+      await assert.rejects(canonicalFile(page), { code: "ENOENT" });
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+}
+
+test("ending gone sessions ends only quiet sessions whose page is gone", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-store-"));
+  try {
+    const store = new SessionStore(path.join(dir, "state.json"));
+    const open = async (name) => {
+      const file = path.join(dir, name);
+      await writeFile(file, "<h1>Hello</h1>");
+      return store.upsertSession(file, `http://localhost:4387/session/${name}`);
+    };
+    const goneQuiet = await open("gone-quiet.html");
+    const goneWithNote = await open("gone-with-note.html");
+    const goneWithFailure = await open("gone-with-failure.html");
+    const goneEnded = await open("gone-ended.html");
+    const present = await open("present.html");
+    await store.queuePrompts(goneWithNote.key, { prompts: [{ prompt: "Keep this note", tag: "message" }] });
+    const load = await beginArtifactLoad(store, goneWithFailure.key);
+    await store.recordArtifactFailures(goneWithFailure.key, {
+      ...diagnosticPayload(load, 1),
+      failures: [{ kind: "artifact-asset-unavailable", detail: "<img> could not load /artifact/x/logo.png" }],
+    });
+    await store.endSession(goneEnded.key, "user");
+    for (const session of [goneQuiet, goneWithNote, goneWithFailure, goneEnded]) await rm(session.file);
+
+    const result = await store.endGoneSessions();
+
+    assert.deepEqual(
+      result.ended.map((session) => session.key),
+      [goneQuiet.key],
+    );
+    assert.deepEqual(
+      result.pending.map((session) => session.key),
+      [goneWithNote.key, goneWithFailure.key],
+    );
+    assert.equal((await store.findByKey(goneQuiet.key)).status, "ended");
+    assert.equal((await store.findByKey(goneQuiet.key)).ended_by, "agent");
+    assert.equal((await store.findByKey(goneEnded.key)).ended_by, "user");
+    for (const session of [goneWithNote, goneWithFailure, present]) {
+      assert.notEqual((await store.findByKey(session.key)).status, "ended");
+    }
+    assert.deepEqual(
+      feedbackResult(await store.takeFeedback(goneWithNote.key)).prompts.map((prompt) => prompt.prompt),
+      ["Keep this note"],
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
