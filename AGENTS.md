@@ -35,7 +35,7 @@ Seven-tab pool regression: `LAVISH_AXI_BROWSER_E2E=1 node --test test/event-tran
 - Human-authored PRs to `main` go through [no-mistakes](https://github.com/kunchenguid/no-mistakes) >= 1.46.0. [CONTRIBUTING.md](CONTRIBUTING.md) owns the gate, the attestation contract, and the workflow-pin rules.
 - Tests that start the server set `LAVISH_AXI_STATE_DIR` and use an ephemeral port.
 - `run()` returns on `--version` / `-v` / `-V` before `ensureStateDir` and telemetry (`test/cli-version.test.js`). New startup work goes after that short-circuit.
-- `canonicalFile` runs `realpath`. Two paths to the same file are one session.
+- `canonicalFile` runs `realpath`. Two paths to the same file are one session. Finding an existing session by path goes through `canonicalSessionFile`, never `realpath` of a page that may be gone ([Things to know when editing](docs/invariants.md#things-to-know-when-editing)).
 - `normalizeArgv` must let AXI `RESERVED_COMMANDS` (including `update`) pass through. A bare `lavish-axi update` must not become `open update`.
 
 ## Safety and correctness
