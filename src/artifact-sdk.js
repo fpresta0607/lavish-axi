@@ -474,8 +474,8 @@ export function createArtifactSdk(
     '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
   const SEND_ICON = boardIcon("M20.5 3.5 10.5 13.5M20.5 3.5l-6.5 17-3.5-7-7-3.5Z");
   const CLOSE_ICON = boardIcon("M6 6l12 12M18 6 6 18");
-  const IMAGES_ICON = boardIcon(
-    "M7.5 3.5h12a1 1 0 0 1 1 1v12a1 1 0 0 1-1 1h-12a1 1 0 0 1-1-1v-12a1 1 0 0 1 1-1ZM3.5 7.5v12a1 1 0 0 0 1 1h12M6.5 14l4-4 3 3 2-2 5 5M15 7.5h.01",
+  const PAPERCLIP_ICON = boardIcon(
+    "M19.24 12.32L12.88 18.69A4.75 4.75 0 0 1 6.16 11.97L13.23 4.9A3.25 3.25 0 0 1 17.83 9.49L11.11 16.21A1.75 1.75 0 0 1 8.64 13.74L14.29 8.08",
   );
   const COMMENT_ICON = boardIcon(
     "M5 4.5h14A1.5 1.5 0 0 1 20.5 6v9a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V6A1.5 1.5 0 0 1 5 4.5Z",
@@ -2307,7 +2307,7 @@ export function createArtifactSdk(
     style.textContent =
       ":host{all:initial;position:fixed;z-index:2147483647;left:0;top:0}" +
       board.shadowCss +
-      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating,.lavish-annotation-chip.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.comment-mark.lavish-pin{position:fixed;opacity:1;pointer-events:none}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-attach{display:inline-flex;align-items:center;gap:8px;min-height:36px;padding:4px 12px;font-size:.9375rem}.lavish-attach .icon{width:18px;height:18px}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
+      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating,.lavish-annotation-chip.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.comment-mark.lavish-pin{position:fixed;opacity:1;pointer-events:none}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-field{display:grid;min-width:0;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg)}.lavish-field:has(textarea:focus-visible){outline:var(--focus-ring);outline-offset:3px}.lavish-field textarea{min-height:60px;border:0;background:transparent;resize:none;field-sizing:content}.lavish-field textarea:focus-visible{outline:none}.lavish-field-tools{display:flex;align-items:center;padding:0 6px 6px}.lavish-attach{width:40px;height:40px;min-height:40px;color:var(--muted)}.lavish-attach:hover:not(:disabled){color:inherit}.lavish-attach .icon{width:20px;height:20px}.lavish-attach[data-tip]::after{top:auto;bottom:calc(100% + 8px);transform:translateY(4px)}.lavish-attach[data-tip]:hover::after,.lavish-attach[data-tip]:focus-visible::after{transform:none}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
     shadow.appendChild(style);
     return shadow;
   }
@@ -2497,15 +2497,14 @@ export function createArtifactSdk(
     card.innerHTML =
       '<header><strong class="lavish-heading">' +
       heading +
-      '</strong></header><textarea rows="3" placeholder="' +
+      '</strong></header><div class="lavish-field"><textarea rows="3" placeholder="' +
       placeholder +
-      '"></textarea><div class="lavish-attachments" data-attachments hidden></div>' +
-      '<div class="lavish-attach-row"><button class="lavish-attach" type="button">' +
-      IMAGES_ICON +
-      "<span>Attach image</span></button>" +
-      '<input class="lavish-attach-input" type="file" accept="' +
+      '"></textarea><div class="lavish-field-tools"><button class="icon-button lavish-attach" type="button"' +
+      ' aria-label="Attach image" data-tip="Attach image" data-tip-align="start">' +
+      PAPERCLIP_ICON +
+      '</button><input class="lavish-attach-input" type="file" accept="' +
       ATTACHMENT_IMAGE_TYPES.accept +
-      '" multiple hidden></div>' +
+      '" multiple hidden></div></div><div class="lavish-attachments" data-attachments hidden></div>' +
       '<footer><span class="muted lavish-hint">Enter sends &middot; Shift+Enter new line &middot; Esc cancels' +
       '</span><button class="icon-button send lavish-send" type="button" aria-label="Send to the agent" data-tip="Send. ' +
       sendNowHint +

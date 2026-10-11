@@ -9028,7 +9028,7 @@ test("voice input: a browser without speech recognition disables the microphone 
 
   assert.equal(voice.disabled, true);
   assert.equal(voice["aria-label"], "Voice input needs Chrome or Edge");
-  assert.equal(voice.title, "Voice input needs Chrome or Edge");
+  assert.equal(voice["data-tip"], "Voice input needs Chrome or Edge");
   const down = chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
   assert.equal(down.defaultPrevented, true, "the shortcut never types a space");
   assert.match(chrome.element("chatVoiceNote").textContent, /Voice input needs Chrome or Edge/);
@@ -9041,7 +9041,7 @@ test("voice input: holding Ctrl+Shift+Space dictates into the message box at the
   input.setSelectionRange(7, 7);
 
   assert.equal(voice.disabled, false);
-  assert.match(voice.title, /Hold Ctrl\+Shift\+Space/);
+  assert.match(voice["data-tip"], /Hold Ctrl\+Shift\+Space/);
   const down = chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
   assert.equal(down.defaultPrevented, true, "the held space never types into the message box");
   const recognizer = FakeRecognizer.made[0];
@@ -9108,7 +9108,7 @@ test("voice input: a plain-http page says voice needs a secure link and never li
   const voice = chrome.element("chatVoice");
   const note = chrome.element("chatVoiceNote");
 
-  assert.equal(voice.title, "Voice input needs this page's https link");
+  assert.equal(voice["data-tip"], "Voice input needs this page's https link");
   voice.click();
   await flushPromises();
 
