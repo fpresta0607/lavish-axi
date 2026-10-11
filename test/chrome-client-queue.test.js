@@ -97,6 +97,11 @@ async function createChromeHarness({
   // Opt-in plain-http page: a window whose `isSecureContext` is false, as on an http link anywhere
   // but localhost. Left off, the window does not say, as before.
   insecure = false,
+  // The browser's localStorage, which outlives the page: pass one Map to two harnesses to model a
+  // reload of the same browser.
+  localStore = new Map(),
+  // Opt-out clipboard: a page served over plain http has no navigator.clipboard.
+  clipboard = true,
 } = {}) {
   const source = await readFile(sourceUrl, "utf8");
   // Seed sessionStorage before the client boots, to model a tab whose queue was
@@ -448,6 +453,17 @@ async function createChromeHarness({
         storage.delete(key);
       },
     },
+    localStorage: {
+      getItem(key) {
+        return localStore.has(key) ? localStore.get(key) : null;
+      },
+      setItem(key, value) {
+        localStore.set(key, String(value));
+      },
+      removeItem(key) {
+        localStore.delete(key);
+      },
+    },
     window: {
       clearTimeout: fakeClearTimeout,
       setTimeout: fakeSetTimeout,
@@ -482,6 +498,7 @@ async function createChromeHarness({
     if (speech.getUserMedia) context.navigator.mediaDevices = { getUserMedia: speech.getUserMedia };
   }
   if (insecure) context.window.isSecureContext = false;
+  if (!clipboard) delete context.navigator.clipboard;
 
   vm.runInNewContext(source, context, { filename: "chrome-client.js" });
   await flushPromises();
@@ -8737,7 +8754,8 @@ async function voiceHelpers() {
   return /** @type {any} */ (chrome.context);
 }
 
-async function voiceHarness({ getUserMedia = undefined } = {}) {
+/** @param {Parameters<typeof createChromeHarness>[0] & { getUserMedia?: any }} [options] */
+async function voiceHarness({ getUserMedia = undefined, ...options } = {}) {
   FakeRecognizer.made = [];
   const posts = [];
   const chrome = await createChromeHarness({
@@ -8746,9 +8764,29 @@ async function voiceHarness({ getUserMedia = undefined } = {}) {
       posts.push(String(url));
       return { ok: true, json: async () => ({}) };
     },
+    ...options,
   });
   return { chrome, posts, voice: chrome.element("chatVoice"), note: chrome.element("chatVoiceNote") };
 }
+
+// One dictation by the held key: what the recognizer hears lands in the message box.
+function dictate(chrome, phrase) {
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  FakeRecognizer.made.at(-1).hear(phrase);
+  chrome.dispatchDocumentEvent("keyup", voiceKey("keyup", "Space"));
+}
+
+// The recent dictations as the card lists them: each entry's time, words and buttons.
+function recentEntries(chrome) {
+  const part = (item, className) => item.children.find((child) => child.className === className);
+  return chrome.element("chatVoiceRecentList").children.map((item) => ({
+    time: part(item, "voice-meta")?.textContent,
+    text: part(item, "voice-text").textContent,
+    buttons: part(item, "voice-actions").children,
+  }));
+}
+
+const buttonNames = (entry) => entry.buttons.map((button) => button["aria-label"]);
 
 test("voice input: holding Ctrl+Shift+Space starts once and releasing any of its keys stops", async () => {
   const helpers = await voiceHelpers();
@@ -9046,7 +9084,7 @@ test("voice input: holding Ctrl+Shift+Space dictates into the message box at the
   assert.equal(down.defaultPrevented, true, "the held space never types into the message box");
   const recognizer = FakeRecognizer.made[0];
   assert.equal(recognizer.started, true);
-  assert.equal(voice["aria-pressed"], "true");
+  assert.equal(voice.classList.contains("recording"), true);
   assert.equal(chrome.element("chatComposer").classList.contains("is-dictating"), true);
   assert.equal(note.textContent, "Listening · release Ctrl+Shift+Space to type");
   chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space", { repeat: true }));
@@ -9059,7 +9097,7 @@ test("voice input: holding Ctrl+Shift+Space dictates into the message box at the
   assert.equal(input.value, "Tighten the spacing on the cards");
   assert.deepEqual([input.selectionStart, input.selectionEnd], [26, 26]);
   assert.equal(input.focused, true);
-  assert.equal(voice["aria-pressed"], "false");
+  assert.equal(voice.classList.contains("recording"), false);
   assert.equal(chrome.element("chatComposer").classList.contains("is-dictating"), false);
   assert.equal(note.textContent, "");
   await flushPromises();
@@ -9071,22 +9109,227 @@ test("voice input: holding Ctrl+Shift+Space dictates into the message box at the
   assert.deepEqual(chrome.queued(), []);
 });
 
-test("voice input: clicking the microphone toggles listening, and stray key releases leave it running", async () => {
-  const { chrome, voice, note } = await voiceHarness();
+// The microphone is the board's voice bubble: a click opens the recent dictations, each with Copy
+// and Paste into this box, and only the held key listens.
+test("voice input: listening, the voice bubble records and is named Listening", async () => {
+  const { chrome, voice } = await voiceHarness();
+
+  assert.equal(voice["aria-label"], "Recent dictations");
+  assert.equal(voice["data-tip"], "Hold Ctrl+Shift+Space to dictate");
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+
+  assert.equal(voice.classList.contains("recording"), true);
+  assert.equal(voice["aria-label"], "Listening");
+  assert.equal(voice["data-tip"], "Listening · release Ctrl+Shift+Space to type");
+
+  chrome.dispatchDocumentEvent("keyup", voiceKey("keyup", "Space"));
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.equal(voice["aria-label"], "Recent dictations");
+});
+
+test("voice input: a click on the voice bubble opens the recent dictations, newest first, and never listens", async () => {
+  const { chrome, voice } = await voiceHarness();
+  const card = chrome.element("chatVoiceRecent");
+  dictate(chrome, "make the header sticky");
+  dictate(chrome, "tighten the cards");
+  assert.equal(card.hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
 
   voice.click();
-  const recognizer = FakeRecognizer.made[0];
-  assert.equal(recognizer.started, true);
-  assert.equal(voice["aria-pressed"], "true");
-  assert.equal(note.textContent, "Listening · click the microphone to type");
-  chrome.dispatchDocumentEvent("keyup", voiceKey("keyup", "ShiftLeft", { key: "Shift", shiftKey: false }));
-  assert.equal(voice["aria-pressed"], "true", "a Shift release does not stop a clicked dictation");
 
-  recognizer.hear("ship it");
+  assert.equal(FakeRecognizer.made.length, 2, "a click never starts listening");
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.equal(card.hidden, false);
+  assert.equal(voice["aria-expanded"], "true");
+  const entries = recentEntries(chrome);
+  assert.deepEqual(
+    entries.map((entry) => entry.text),
+    ["tighten the cards", "make the header sticky"],
+  );
+  assert.deepEqual(buttonNames(entries[0]), ["Copy: tighten the cards", "Paste into this box: tighten the cards"]);
+  assert.deepEqual(
+    entries[0].buttons.map((button) => button["data-tip"]),
+    ["Copy", "Paste into this box"],
+  );
+  assert.match(entries[0].time, /\d/, "each dictation shows when it was said");
+  assert.equal(chrome.element("chatVoiceRecentEmpty").hidden, true);
+
+  voice.click();
+  assert.equal(card.hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+});
+
+test("voice input: Paste puts a recent dictation into the message box at the caret and closes the list", async () => {
+  const { chrome, voice, posts } = await voiceHarness();
+  const input = chrome.element("chatInput");
+  dictate(chrome, "the spacing on the");
+  input.value = "Tighten cards";
+  input.setSelectionRange(7, 7);
+  input.focused = false;
+
+  voice.click();
+  recentEntries(chrome)[0].buttons[1].click();
+
+  assert.equal(input.value, "Tighten the spacing on the cards");
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [26, 26]);
+  assert.equal(input.focused, true);
+  assert.equal(chrome.element("chatVoiceRecent").hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+  await flushPromises();
+  assert.deepEqual(
+    posts.filter((url) => url.endsWith("/prompts")),
+    [],
+    "a paste never sends by itself",
+  );
+});
+
+test("voice input: Copy puts a recent dictation on the clipboard and says so for a moment", async () => {
+  const { chrome, voice } = await voiceHarness();
+  dictate(chrome, "ship it");
   voice.click();
 
-  assert.equal(chrome.element("chatInput").value, "ship it");
-  assert.equal(voice["aria-pressed"], "false");
+  recentEntries(chrome)[0].buttons[0].click();
+  await flushPromises();
+
+  assert.deepEqual(chrome.clipboardWrites, ["ship it"]);
+  let copy = recentEntries(chrome)[0].buttons[0];
+  assert.equal(copy["data-tip"], "Copied");
+  assert.equal(copy["aria-label"], "Copy: ship it");
+  assert.equal(chrome.element("chatVoiceRecent").hidden, false, "Copy leaves the list open");
+
+  chrome.runTimers(1400);
+  copy = recentEntries(chrome)[0].buttons[0];
+  assert.equal(copy["data-tip"], "Copy");
+});
+
+test("voice input: a page without a clipboard offers Paste alone", async () => {
+  const { chrome, voice } = await voiceHarness({ clipboard: false });
+  dictate(chrome, "ship it");
+
+  voice.click();
+
+  assert.deepEqual(buttonNames(recentEntries(chrome)[0]), ["Paste into this box: ship it"]);
+});
+
+test("voice input: with nothing dictated the list says so", async () => {
+  const { chrome, voice } = await voiceHarness();
+
+  voice.click();
+
+  assert.equal(chrome.element("chatVoiceRecent").hidden, false);
+  assert.equal(chrome.element("chatVoiceRecentEmpty").hidden, false);
+  assert.equal(chrome.element("chatVoiceRecentList").hidden, true);
+  assert.deepEqual(recentEntries(chrome), []);
+});
+
+test("voice input: Escape or the close button closes the recent dictations and puts the keyboard on the bubble", async () => {
+  const { chrome, voice } = await voiceHarness();
+  const card = chrome.element("chatVoiceRecent");
+  let stopped = false;
+
+  voice.click();
+  voice.focused = false;
+  chrome.element("chatVoiceDock").dispatch("keydown", {
+    key: "Escape",
+    stopPropagation() {
+      stopped = true;
+    },
+  });
+
+  assert.equal(card.hidden, true);
+  assert.equal(voice.focused, true);
+  assert.equal(stopped, true, "the Escape that closes the list closes nothing else");
+
+  voice.click();
+  voice.focused = false;
+  chrome.element("chatVoiceRecentClose").click();
+  assert.equal(card.hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+  assert.equal(voice.focused, true);
+});
+
+test("voice input: the list shows this review's five newest dictations and the browser keeps ten", async () => {
+  const localStore = new Map();
+  const phrases = Array.from({ length: 12 }, (_, index) => `note ${index + 1}`);
+  const first = await voiceHarness({ localStore });
+  for (const phrase of phrases) dictate(first.chrome, phrase);
+
+  first.voice.click();
+  assert.deepEqual(
+    recentEntries(first.chrome).map((entry) => entry.text),
+    ["note 12", "note 11", "note 10", "note 9", "note 8"],
+  );
+  const kept = JSON.parse(localStore.get("lavish-axi:dictations")).abc;
+  assert.deepEqual(
+    kept.map((entry) => entry.text),
+    phrases.slice(2).reverse(),
+  );
+
+  const reloaded = await voiceHarness({ localStore });
+  reloaded.voice.click();
+  assert.deepEqual(
+    recentEntries(reloaded.chrome).map((entry) => entry.text),
+    ["note 12", "note 11", "note 10", "note 9", "note 8"],
+    "a reload lists the same dictations",
+  );
+
+  const other = await voiceHarness({ localStore, sessionData: { ...defaultSessionData, key: "other" } });
+  other.voice.click();
+  assert.deepEqual(recentEntries(other.chrome), [], "another review lists only its own");
+});
+
+test("voice input: the browser keeps dictations for the twenty reviews used most recently", async () => {
+  const localStore = new Map();
+  const older = Object.fromEntries(
+    Array.from({ length: 20 }, (_, index) => [`review-${index}`, [{ text: `old ${index}`, at: 1000 + index }]]),
+  );
+  localStore.set("lavish-axi:dictations", JSON.stringify(older));
+  const { chrome } = await voiceHarness({ localStore });
+
+  dictate(chrome, "newest");
+
+  const kept = JSON.parse(localStore.get("lavish-axi:dictations"));
+  assert.equal(Object.keys(kept).length, 20);
+  assert.equal(kept.abc[0].text, "newest");
+  assert.equal(kept["review-0"], undefined, "the review used longest ago gives way");
+  assert.deepEqual(kept["review-19"], [{ text: "old 19", at: 1019 }]);
+});
+
+test("voice input: a broken dictation record reads as none and the next dictation is kept", async () => {
+  const localStore = new Map([["lavish-axi:dictations", "not json"]]);
+  const { chrome, voice } = await voiceHarness({ localStore });
+
+  voice.click();
+  assert.deepEqual(recentEntries(chrome), []);
+  voice.click();
+  dictate(chrome, "ship it");
+
+  assert.deepEqual(
+    JSON.parse(localStore.get("lavish-axi:dictations")).abc.map((entry) => entry.text),
+    ["ship it"],
+  );
+
+  localStore.set(
+    "lavish-axi:dictations",
+    JSON.stringify({ abc: [{ text: "kept", at: 5 }, { text: 7, at: 6 }, { text: "no time" }, null] }),
+  );
+  const reloaded = await voiceHarness({ localStore });
+  reloaded.voice.click();
+  assert.deepEqual(
+    recentEntries(reloaded.chrome).map((entry) => entry.text),
+    ["kept"],
+  );
+});
+
+test("voice input: ending the session closes the recent dictations", async () => {
+  const { chrome, voice } = await voiceHarness();
+  voice.click();
+
+  chrome.eventSource().listeners.get("ended")({ data: JSON.stringify({ ended_by: "agent" }) });
+
+  assert.equal(voice.disabled, true);
+  assert.equal(chrome.element("chatVoiceRecent").hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
 });
 
 // On a plain-http link (an old tailnet link, or no https proxy at all) the browser refuses the
@@ -9109,18 +9352,15 @@ test("voice input: a plain-http page says voice needs a secure link and never li
   const note = chrome.element("chatVoiceNote");
 
   assert.equal(voice["data-tip"], "Voice input needs this page's https link");
-  voice.click();
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
   await flushPromises();
 
   assert.equal(FakeRecognizer.made.length, 0);
   assert.equal(microphones, 0);
-  assert.equal(voice["aria-pressed"], "false");
+  assert.equal(voice.classList.contains("recording"), false);
   assert.match(note.textContent, /Voice input needs this page's https link/);
   assert.match(note.textContent, /plain http/);
   assert.doesNotMatch(note.textContent, /site settings/);
-
-  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
-  assert.equal(FakeRecognizer.made.length, 0);
 });
 
 test("voice input: a denied microphone says so in plain words", async () => {
@@ -9130,11 +9370,11 @@ test("voice input: a denied microphone says so in plain words", async () => {
     },
   });
 
-  voice.click();
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
   await flushPromises();
 
   assert.equal(FakeRecognizer.made[0].started, false);
-  assert.equal(voice["aria-pressed"], "false");
+  assert.equal(voice.classList.contains("recording"), false);
   assert.match(note.textContent, /The microphone is blocked for this page/);
   assert.equal(note.classList.contains("is-problem"), true);
   chrome.runTimers(6000);
@@ -9144,7 +9384,7 @@ test("voice input: a denied microphone says so in plain words", async () => {
 test("voice input: ending the session while listening drops the dictation and disables the microphone", async () => {
   const { chrome, voice } = await voiceHarness();
 
-  voice.click();
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
   const recognizer = FakeRecognizer.made[0];
   recognizer.hear("half a thought");
   chrome.eventSource().listeners.get("ended")({ data: JSON.stringify({ ended_by: "agent" }) });
@@ -9152,5 +9392,10 @@ test("voice input: ending the session while listening drops the dictation and di
   assert.equal(recognizer.aborted, true);
   assert.equal(chrome.element("chatInput").value, "");
   assert.equal(voice.disabled, true);
-  assert.equal(voice["aria-pressed"], "false");
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.deepEqual(
+    JSON.parse(chrome.context.localStorage.getItem("lavish-axi:dictations") || "{}"),
+    {},
+    "a dropped dictation is never kept",
+  );
 });
