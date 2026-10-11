@@ -57,7 +57,9 @@
   --merged: #ab7df8;
   --closed: #f85149;
   --radius: 0.625rem;
+  /* A tip's own surface: solid, a step lighter than the cards it floats
+     over, with a mint edge. */
+  --tip-surface: #10222a;
+  --tip-edge: #2f7d66;
 }
-.dialogue, .voice-dock { --hide: #241C15; --soot: #0D0A07; --lantern: #F2B447; --moss: #86B36B; --ember: #D8664C; --bone: #EFE6D2; --edge: #5C4631; --bone-dim: #C4B79F; --pixel-corners: polygon(0 4px, 2px 4px, 2px 2px, 4px 2px, 4px 0, calc(100% - 4px) 0, calc(100% - 4px) 2px, calc(100% - 2px) 2px, calc(100% - 2px) 4px, 100% 4px, 100% calc(100% - 4px), calc(100% - 2px) calc(100% - 4px), calc(100% - 2px) calc(100% - 2px), calc(100% - 4px) calc(100% - 2px), calc(100% - 4px) 100%, 4px 100%, 4px calc(100% - 2px), 2px calc(100% - 2px), 2px calc(100% - 4px), 0 calc(100% - 4px)); }
-.dialogue.done { --tone: var(--moss); }
-.dialogue.failed { --tone: var(--ember); }
+:root { --hide: #0c1219; --soot: #03050a; --lantern: #65efcd; --moss: #86B36B; --bone: #edf4f3; --edge: #2f7d66; --bone-dim: #a3b3c2; --lantern-fill: linear-gradient(110deg, #00e59b, #63f3d0); --lantern-shade: #00a874; --lantern-light: #b9f4df; --lantern-hover: #89f9dc; --pixel-corners: polygon(0 4px, 2px 4px, 2px 2px, 4px 2px, 4px 0, calc(100% - 4px) 0, calc(100% - 4px) 2px, calc(100% - 2px) 2px, calc(100% - 2px) 4px, 100% 4px, 100% calc(100% - 4px), calc(100% - 2px) calc(100% - 4px), calc(100% - 2px) calc(100% - 2px), calc(100% - 4px) calc(100% - 2px), calc(100% - 4px) 100%, 4px 100%, 4px calc(100% - 2px), 2px calc(100% - 2px), 2px calc(100% - 4px), 0 calc(100% - 4px)); }

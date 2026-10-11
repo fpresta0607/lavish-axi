@@ -854,7 +854,7 @@ test("chrome declares the board's tokens and its own layout measures", async () 
   assert.match(css, /--font-display:"Pixelify Sans"/);
   assert.match(css, /--font-body:"Nunito"/);
   assert.match(css, /--font-mono:"JetBrains Mono"/);
-  assert.match(css, /--lantern:#F2B447/);
+  assert.match(css, /--lantern:#65efcd/);
   assert.match(css, /--radius:.625rem/);
   assert.match(css, /--ease:cubic-bezier\(.2,.6,.2,1\)/);
   assert.match(css, /--dur-slow:320ms/);
