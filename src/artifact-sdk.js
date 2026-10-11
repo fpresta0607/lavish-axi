@@ -421,6 +421,28 @@ export function planClipboardPaste(clipboardData, acceptedMime) {
  * @param {{ parentWindow?: unknown, nonce?: string }} context this document's upload identity
  * @returns {boolean}
  */
+// A list rebuilt while the keyboard is on one of its controls puts the keyboard back on the control
+// that replaced it, the one with the same data-focus-key. Without this the browser drops focus onto
+// the page body, where Escape and Tab start over. The list's own root says what has focus, so this
+// holds inside the annotation card's shadow root. The chrome carries the same helper.
+/**
+ * @param {HTMLElement} container
+ * @param {() => void} rebuild
+ */
+export function rebuildKeepingFocus(container, rebuild) {
+  const focused = /** @type {HTMLElement | null} */ (
+    /** @type {Document | ShadowRoot} */ (container.getRootNode()).activeElement
+  );
+  const focusKey = focused && container.contains(focused) ? focused.dataset.focusKey : undefined;
+  rebuild();
+  if (!focusKey) return;
+  for (const control of container.querySelectorAll("[data-focus-key]")) {
+    if (/** @type {HTMLElement} */ (control).dataset.focusKey !== focusKey) continue;
+    /** @type {HTMLElement} */ (control).focus();
+    return;
+  }
+}
+
 export function isTrustedAttachmentResult(event, context = {}) {
   if (!event || !context.parentWindow || event.source !== context.parentWindow) return false;
   const expected = context.nonce;
@@ -564,7 +586,11 @@ export function createArtifactSdk(
     // Only a real (retryable) upload gets a Retry button; a rejected non-image has no file.
     const retry =
       item.status === "error" && item.file
-        ? '<button type="button" class="lavish-attachment-retry" data-attachment-retry="' + index + '">Retry</button>'
+        ? '<button type="button" class="lavish-attachment-retry" data-attachment-retry="' +
+          index +
+          '" data-focus-key="retry:' +
+          item.localId +
+          '">Retry</button>'
         : "";
     return (
       '<div class="lavish-attachment-chip' +
@@ -581,6 +607,8 @@ export function createArtifactSdk(
       retry +
       '<button type="button" class="lavish-attachment-remove" data-attachment-remove="' +
       index +
+      '" data-focus-key="remove:' +
+      item.localId +
       '" aria-label="Remove image" title="Remove">' +
       CLOSE_ICON +
       "</button></div>"
@@ -612,7 +640,9 @@ export function createArtifactSdk(
           hasErrors: hasErrors(),
         }),
       );
-      listEl.innerHTML = items.map((item, index) => attachmentChipHtml(item, index)).join("");
+      rebuildKeepingFocus(listEl, () => {
+        listEl.innerHTML = items.map((item, index) => attachmentChipHtml(item, index)).join("");
+      });
       listEl.hidden = items.length === 0;
       for (const button of listEl.querySelectorAll("[data-attachment-remove]")) {
         button.addEventListener("click", () => removeAt(Number(button.getAttribute("data-attachment-remove"))));

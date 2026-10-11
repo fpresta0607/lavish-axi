@@ -118,6 +118,7 @@ const queuedLog = /** @type {HTMLDivElement} */ (document.getElementById("queued
 const chatLog = /** @type {HTMLDivElement} */ (document.getElementById("chatLog"));
 const chatComposer = /** @type {HTMLDivElement} */ (document.getElementById("chatComposer"));
 const chatInput = /** @type {HTMLTextAreaElement} */ (document.getElementById("chatInput"));
+const chatField = /** @type {HTMLDivElement} */ (document.getElementById("chatField"));
 const chatAttachments = /** @type {HTMLDivElement} */ (document.getElementById("chatAttachments"));
 const chatAttachButton = /** @type {HTMLButtonElement} */ (document.getElementById("chatAttach"));
 const chatAttachInput = /** @type {HTMLInputElement} */ (document.getElementById("chatAttachInput"));
@@ -125,6 +126,11 @@ const chatAttachmentNotice = /** @type {HTMLSpanElement} */ (document.getElement
 const chatVoiceButton = /** @type {HTMLButtonElement} */ (document.getElementById("chatVoice"));
 const chatVoiceBars = /** @type {HTMLSpanElement} */ (document.getElementById("chatVoiceBars"));
 const chatVoiceNote = /** @type {HTMLDivElement} */ (document.getElementById("chatVoiceNote"));
+const chatVoiceDock = /** @type {HTMLDivElement} */ (document.getElementById("chatVoiceDock"));
+const chatVoiceRecent = /** @type {HTMLElement} */ (document.getElementById("chatVoiceRecent"));
+const chatVoiceRecentList = /** @type {HTMLUListElement} */ (document.getElementById("chatVoiceRecentList"));
+const chatVoiceRecentEmpty = /** @type {HTMLParagraphElement} */ (document.getElementById("chatVoiceRecentEmpty"));
+const chatVoiceRecentClose = /** @type {HTMLButtonElement} */ (document.getElementById("chatVoiceRecentClose"));
 const panel = /** @type {HTMLElement} */ (document.getElementById("panel"));
 const panelHead = /** @type {HTMLDivElement} */ (document.getElementById("panelHead"));
 const panelSummary = /** @type {HTMLSpanElement} */ (document.getElementById("panelSummary"));
@@ -493,11 +499,34 @@ function persistTerminalReservation(reserved) {
   }
 }
 
+// A list rebuilt while the keyboard is on one of its controls puts the keyboard back on the control
+// that replaced it, the one with the same data-focus-key. Without this the browser drops focus onto
+// the page body, where Escape and Tab start over. The SDK carries the same helper for the
+// annotation card (artifact-sdk.js), which is why the list's own root says what has focus.
+function rebuildKeepingFocus(container, rebuild) {
+  const focused = /** @type {HTMLElement | null} */ (
+    /** @type {Document | ShadowRoot} */ (container.getRootNode()).activeElement
+  );
+  const focusKey = focused && container.contains(focused) ? focused.dataset.focusKey : undefined;
+  rebuild();
+  if (!focusKey) return;
+  for (const control of container.querySelectorAll("[data-focus-key]")) {
+    if (/** @type {HTMLElement} */ (control).dataset.focusKey !== focusKey) continue;
+    /** @type {HTMLElement} */ (control).focus();
+    return;
+  }
+}
+
 // The board's line icons (code-goblins frontend/src/Icon.tsx), drawn by its `.icon` rule.
 function boardIconSvg(path) {
   return '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
 }
 const REMOVE_ICON_SVG = boardIconSvg("M6 6l12 12M18 6 6 18");
+const COPY_ICON_SVG = boardIconSvg("M9 9h10v11H9ZM5 15V4h10");
+const CHECK_ICON_SVG = boardIconSvg("M5 12.5 9.5 17 19 7.5");
+const PASTE_ICON_SVG = boardIconSvg(
+  "M8.5 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5h-2M9 3.5h6v3H9ZM12 10v7M9 14l3 3 3-3",
+);
 // A note's delivery reads as the board's comment chip does: one check while it is on its way,
 // two once the transcript carries it.
 const SENDING_MARK_HTML =
@@ -616,6 +645,8 @@ function queuedBubbleHtml(prompt, index) {
     (sending ? SENDING_MARK_HTML + "Sending\u2026" : "Queued") +
     ' <button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
     index +
+    '" data-focus-key="remove:' +
+    escapeHtml(promptIdentity(prompt)) +
     '">' +
     REMOVE_ICON_SVG +
     "</button></small>" +
@@ -659,7 +690,9 @@ function reportNoteStatus(prompt, status) {
 }
 
 function render() {
-  queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
+  rebuildKeepingFocus(queuedLog, () => {
+    queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
+  });
   for (const prompt of queued) reportNoteStatus(prompt, isPromptSending(prompt) ? "sending" : "queued");
 
   for (const button of queuedLog.querySelectorAll(".queued-remove")) {
@@ -1535,44 +1568,52 @@ function createChatAttachmentsController() {
   }
 
   function renderAttachments() {
-    chatAttachments.innerHTML = items
-      .map((item) => {
-        const status = item.status === "uploading" ? "Uploading…" : item.status === "error" ? item.error : "";
-        const preview = item.preview
-          ? '<img class="chat-attachment-thumb" src="' + escapeHtml(item.preview) + '" alt="">'
-          : "";
-        const retry =
-          item.status === "error" && item.file
-            ? '<button type="button" aria-label="Retry ' +
-              escapeHtml(item.name) +
-              '" data-chat-attachment-retry="' +
-              item.localId +
-              '">Retry</button>'
+    rebuildKeepingFocus(chatAttachments, () => {
+      chatAttachments.innerHTML = items
+        .map((item) => {
+          const status = item.status === "uploading" ? "Uploading…" : item.status === "error" ? item.error : "";
+          const preview = item.preview
+            ? '<img class="chat-attachment-thumb" src="' + escapeHtml(item.preview) + '" alt="">'
             : "";
-        const errorData = item.errorCode ? ' data-error="' + escapeHtml(item.errorCode) + '"' : "";
-        return (
-          '<div class="chat-attachment-chip chat-attachment-' +
-          item.status +
-          '"' +
-          errorData +
-          ">" +
-          preview +
-          '<span class="chat-attachment-copy"><strong>' +
-          escapeHtml(item.name) +
-          "</strong>" +
-          (status ? '<span class="chat-attachment-status" aria-live="polite">' + escapeHtml(status) + "</span>" : "") +
-          "</span>" +
-          retry +
-          '<button type="button" aria-label="Remove ' +
-          escapeHtml(item.name) +
-          '" title="Remove ' +
-          escapeHtml(item.name) +
-          '" data-chat-attachment-remove="' +
-          item.localId +
-          '">×</button></div>'
-        );
-      })
-      .join("");
+          const retry =
+            item.status === "error" && item.file
+              ? '<button type="button" aria-label="Retry ' +
+                escapeHtml(item.name) +
+                '" data-chat-attachment-retry="' +
+                item.localId +
+                '" data-focus-key="retry:' +
+                item.localId +
+                '">Retry</button>'
+              : "";
+          const errorData = item.errorCode ? ' data-error="' + escapeHtml(item.errorCode) + '"' : "";
+          return (
+            '<div class="chat-attachment-chip chat-attachment-' +
+            item.status +
+            '"' +
+            errorData +
+            ">" +
+            preview +
+            '<span class="chat-attachment-copy"><strong>' +
+            escapeHtml(item.name) +
+            "</strong>" +
+            (status
+              ? '<span class="chat-attachment-status" aria-live="polite">' + escapeHtml(status) + "</span>"
+              : "") +
+            "</span>" +
+            retry +
+            '<button type="button" aria-label="Remove ' +
+            escapeHtml(item.name) +
+            '" title="Remove ' +
+            escapeHtml(item.name) +
+            '" data-chat-attachment-remove="' +
+            item.localId +
+            '" data-focus-key="remove:' +
+            item.localId +
+            '">×</button></div>'
+          );
+        })
+        .join("");
+    });
     syncNotice();
   }
 
@@ -1723,16 +1764,29 @@ function createChatAttachmentsController() {
 const chatAttachmentController = createChatAttachmentsController();
 
 // Voice input: the browser's own speech recognition dictates into the message box. Holding
-// Ctrl+Shift+Space listens until one of those keys is released, and the microphone button toggles
-// listening. What was heard lands at the caret for the reviewer to read and send; it is never sent
-// by itself. Nothing is installed and the chrome makes no request of its own.
+// Ctrl+Shift+Space listens until one of those keys is released. What was heard lands at the caret
+// for the reviewer to read and send; it is never sent by itself. Nothing is installed and the
+// chrome makes no request of its own. The microphone is the board's voice bubble: a click opens
+// this review's recent dictations, each with Copy and Paste into this box.
 const VOICE_UNSUPPORTED_COPY = "Voice input needs Chrome or Edge";
 // Browsers refuse the microphone to a plain-http page anywhere but localhost, so the page's link,
 // not a site setting, is what has to change.
 const VOICE_INSECURE_COPY = "Voice input needs this page's https link";
-const VOICE_IDLE_HINT = "Hold Ctrl+Shift+Space or click to dictate";
+const VOICE_IDLE_HINT = "Hold Ctrl+Shift+Space to dictate";
 const VOICE_HELD_HINT = "Listening · release Ctrl+Shift+Space to type";
-const VOICE_CLICKED_HINT = "Listening · click the microphone to type";
+const VOICE_RECENT_LABEL = "Recent dictations";
+// The board's voice bubble keeps each box's own dictations in this browser only: the newest
+// KEPT_DICTATIONS of each of the KEPT_DICTATION_REVIEWS reviews used most recently, so reviews that
+// come and go never grow what it keeps. Its list shows LISTED_DICTATIONS of them.
+const DICTATIONS_STORAGE_KEY = "lavish-axi:dictations";
+const KEPT_DICTATIONS = 10;
+const KEPT_DICTATION_REVIEWS = 20;
+const LISTED_DICTATIONS = 5;
+// A copied dictation says so this long.
+const VOICE_COPIED_MS = 1400;
+// The card opens 8px above the box, as the board's rule places it, and keeps as much again clear of
+// the top of the panel.
+const VOICE_CARD_CLEARANCE = 16;
 // A voice problem stays under the composer this long.
 const VOICE_NOTE_MS = 6000;
 // While listening, the waveform takes the microphone's level this often.
@@ -1954,10 +2008,41 @@ function createDictation(events, recognition, lang, microphone) {
   return { start, stop, dispose, level: () => (capture ? capture.level() : 0) };
 }
 
+// A review whose record is broken reads as none, leaving the other reviews be.
+function keptDictations(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries
+    .filter((entry) => typeof entry?.text === "string" && entry.text && Number.isFinite(entry.at))
+    .map((entry) => ({ text: entry.text, at: entry.at }))
+    .slice(0, KEPT_DICTATIONS);
+}
+
+function readKeptDictations() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DICTATIONS_STORAGE_KEY) || "{}");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+    return Object.fromEntries(Object.entries(saved).map(([review, entries]) => [review, keptDictations(entries)]));
+  } catch {
+    return {};
+  }
+}
+
+// This review's dictations with this one first. The list is the one this visit shows, so a browser
+// that refuses to keep it still lists every dictation of the visit.
+function rememberDictation(text, at) {
+  const dictations = [{ text, at }, ...voiceDictations].slice(0, KEPT_DICTATIONS);
+  const reviews = Object.entries({ ...readKeptDictations(), [key]: dictations })
+    .sort(([, a], [, b]) => (b[0]?.at ?? 0) - (a[0]?.at ?? 0))
+    .slice(0, KEPT_DICTATION_REVIEWS);
+  try {
+    localStorage.setItem(DICTATIONS_STORAGE_KEY, JSON.stringify(Object.fromEntries(reviews)));
+  } catch {
+    // The list shows them for this visit only.
+  }
+  return dictations;
+}
+
 let voiceListening = false;
-// Whether Ctrl+Shift+Space started this dictation, so releasing it stops listening; a click-started
-// dictation runs until the next click.
-let voiceHeld = false;
 let voiceProblem = "";
 let voiceProblemTimer;
 let voiceFrame = 0;
@@ -1965,12 +2050,20 @@ let voiceSampledAt = 0;
 const voiceBars = /** @type {HTMLElement[]} */ (Array.from(chatVoiceBars.children));
 // One recent level per bar, newest on the right.
 const voiceLevels = voiceBars.map(() => 0);
+let voiceDictations = readKeptDictations()[key] || [];
+let voiceRecentOpen = false;
+// The entry whose Copy just worked, which shows a check for a moment.
+let voiceCopied = "";
+let voiceCopiedTimer;
 const voiceDictation = createDictation(
   {
-    heard: insertDictatedText,
+    heard(text) {
+      voiceDictations = rememberDictation(text, Date.now());
+      insertDictatedText(text);
+      renderVoiceRecent();
+    },
     listening(on) {
       voiceListening = on;
-      if (!on) voiceHeld = false;
       renderVoice();
     },
     problem: showVoiceProblem,
@@ -2016,8 +2109,11 @@ function drawVoiceLevel(now) {
 // render; the waveform runs only while listening.
 function renderVoice() {
   const supported = Boolean(speechRecognitionClass());
-  const hint = voiceHeld ? VOICE_HELD_HINT : VOICE_CLICKED_HINT;
   chatVoiceButton.disabled = !supported || chatInput.disabled;
+  chatVoiceButton.setAttribute(
+    "aria-label",
+    !supported ? VOICE_UNSUPPORTED_COPY : voiceListening ? "Listening" : VOICE_RECENT_LABEL,
+  );
   chatVoiceButton.setAttribute(
     "data-tip",
     !supported
@@ -2025,12 +2121,12 @@ function renderVoice() {
       : window.isSecureContext === false
         ? VOICE_INSECURE_COPY
         : voiceListening
-          ? hint
+          ? VOICE_HELD_HINT
           : VOICE_IDLE_HINT,
   );
-  chatVoiceButton.setAttribute("aria-pressed", String(voiceListening));
+  chatVoiceButton.classList.toggle("recording", voiceListening);
   chatComposer.classList.toggle("is-dictating", voiceListening);
-  chatVoiceNote.textContent = voiceProblem || (voiceListening ? hint : "");
+  chatVoiceNote.textContent = voiceProblem || (voiceListening ? VOICE_HELD_HINT : "");
   chatVoiceNote.classList.toggle("is-problem", Boolean(voiceProblem));
   if (voiceListening && !voiceFrame) {
     voiceLevels.fill(0);
@@ -2040,15 +2136,117 @@ function renderVoice() {
     window.cancelAnimationFrame(voiceFrame);
     voiceFrame = 0;
   }
+  // A box that can no longer take text has no dictations to paste.
+  if (chatVoiceButton.disabled && voiceRecentOpen) setVoiceRecentOpen(false);
 }
 
-function startVoice(held) {
+function setVoiceRecentOpen(open) {
+  voiceRecentOpen = open;
+  chatVoiceRecent.hidden = !open;
+  chatVoiceButton.setAttribute("aria-expanded", String(open));
+  renderVoiceRecent();
+}
+
+// The recent dictations card, as the board's voice bubble draws it: the newest first, each with
+// when it was said, its words, Copy where the page has a clipboard, and Paste into this box.
+function renderVoiceRecent() {
+  if (!voiceRecentOpen) return;
+  fitVoiceRecent();
+  const listed = voiceDictations.slice(0, LISTED_DICTATIONS);
+  chatVoiceRecentList.hidden = listed.length === 0;
+  chatVoiceRecentEmpty.hidden = listed.length > 0;
+  rebuildKeepingFocus(chatVoiceRecentList, () =>
+    chatVoiceRecentList.replaceChildren(...listed.map(recentDictationItem)),
+  );
+}
+
+// The room above the box, down from the top of the panel, which clips anything past it.
+function fitVoiceRecent() {
+  const room = chatField.getBoundingClientRect().top - panel.getBoundingClientRect().top - VOICE_CARD_CLEARANCE;
+  chatVoiceRecent.style.maxHeight = room + "px";
+}
+
+function recentDictationItem(dictation, index) {
+  const entry = dictation.at + ":" + index;
+  const item = document.createElement("li");
+  if (dictation.at > 0) {
+    const said = document.createElement("span");
+    said.className = "voice-meta";
+    said.textContent = new Date(dictation.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+    item.appendChild(said);
+  }
+  const words = document.createElement("p");
+  words.className = "voice-text";
+  words.textContent = dictation.text;
+  item.appendChild(words);
+  const actions = document.createElement("span");
+  actions.className = "voice-actions";
+  // A page served over plain http, such as an old tailnet link, has no clipboard.
+  if (navigator.clipboard) {
+    const copied = voiceCopied === entry;
+    actions.appendChild(
+      voiceAction(
+        "copy:" + entry,
+        "Copy: " + dictation.text,
+        copied ? "Copied" : "Copy",
+        copied ? CHECK_ICON_SVG : COPY_ICON_SVG,
+        () => copyDictation(dictation.text, entry),
+      ),
+    );
+  }
+  actions.appendChild(
+    voiceAction("paste:" + entry, "Paste into this box: " + dictation.text, "Paste into this box", PASTE_ICON_SVG, () =>
+      pasteDictation(dictation.text),
+    ),
+  );
+  item.appendChild(actions);
+  return item;
+}
+
+function voiceAction(focusKey, label, tip, icon, act) {
+  const button = document.createElement("button");
+  button.type = "button";
+  button.className = "icon-button pixel-icon";
+  button.dataset.focusKey = focusKey;
+  button.setAttribute("aria-label", label);
+  button.setAttribute("data-tip", tip);
+  button.innerHTML = icon;
+  button.onclick = act;
+  return button;
+}
+
+// A copy the browser refuses shows no check.
+function copyDictation(text, entry) {
+  navigator.clipboard.writeText(text).then(
+    () => {
+      voiceCopied = entry;
+      clearTimeout(voiceCopiedTimer);
+      voiceCopiedTimer = setTimeout(() => {
+        voiceCopied = "";
+        renderVoiceRecent();
+      }, VOICE_COPIED_MS);
+      renderVoiceRecent();
+    },
+    () => {},
+  );
+}
+
+function pasteDictation(text) {
+  insertDictatedText(text);
+  setVoiceRecentOpen(false);
+}
+
+function closeVoiceRecent() {
+  setVoiceRecentOpen(false);
+  chatVoiceButton.focus();
+}
+
+function startVoice() {
   if (chatInput.disabled) return;
   if (window.isSecureContext === false) {
     showVoiceProblem(VOICE_INSECURE_COPY + ": browsers refuse the microphone on plain http.");
     return;
   }
-  voiceHeld = held;
   voiceDictation.start();
   renderVoice();
 }
@@ -2057,8 +2255,8 @@ function handleVoiceKey(event) {
   const meaning = dictationKey(event);
   if (!meaning) return;
   if (meaning.swallow) event.preventDefault();
-  if (meaning.action === "start") startVoice(true);
-  if (meaning.action === "stop" && voiceHeld) voiceDictation.stop();
+  if (meaning.action === "start") startVoice();
+  if (meaning.action === "stop") voiceDictation.stop();
 }
 
 function sendQueued(endAfter) {
@@ -2703,6 +2901,7 @@ function createWarningRow(warning) {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.className = "warning-select";
+  checkbox.dataset.focusKey = "select:" + warning.id;
   checkbox.checked = selectable && selectedWarningIds.has(warning.id);
   checkbox.disabled = !selectable;
   checkbox.setAttribute(
@@ -2752,6 +2951,7 @@ function createWarningRow(warning) {
     const reveal = document.createElement("button");
     reveal.type = "button";
     reveal.className = "warning-action";
+    reveal.dataset.focusKey = "reveal:" + warning.id;
     reveal.textContent = "Reveal";
     reveal.setAttribute("aria-label", "Reveal " + warning.title + " in the artifact");
     reveal.addEventListener("click", () => revealWarning(warning));
@@ -2760,6 +2960,7 @@ function createWarningRow(warning) {
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "warning-action";
+  dismiss.dataset.focusKey = "dismiss:" + warning.id;
   dismiss.textContent = "Dismiss";
   dismiss.disabled = !selectable;
   dismiss.setAttribute(
@@ -2803,15 +3004,17 @@ function renderWarnings() {
     (count === 1 ? "1 unresolved issue" : count + " unresolved issues") +
     (outstanding > 0 ? " · " + outstanding + " already queued for a fix" : "");
 
-  warningsList.replaceChildren();
-  if (count === 0) {
-    const empty = document.createElement("p");
-    empty.className = "warnings-empty";
-    empty.textContent = "No unresolved layout issues.";
-    warningsList.appendChild(empty);
-  } else {
-    for (const warning of active) warningsList.appendChild(createWarningRow(warning));
-  }
+  rebuildKeepingFocus(warningsList, () => {
+    warningsList.replaceChildren();
+    if (count === 0) {
+      const empty = document.createElement("p");
+      empty.className = "warnings-empty";
+      empty.textContent = "No unresolved layout issues.";
+      warningsList.appendChild(empty);
+    } else {
+      for (const warning of active) warningsList.appendChild(createWarningRow(warning));
+    }
+  });
   updateWarningSelectionState();
 }
 
@@ -3066,6 +3269,7 @@ function buildRevisionRow(entry) {
     const reveal = document.createElement("button");
     reveal.type = "button";
     reveal.className = "revision-reveal";
+    reveal.dataset.focusKey = "reveal:" + entry.id;
     const position = (revisionRevealCursor.get(entry.id) || 0) % entry.marks.length;
     reveal.textContent = entry.marks.length === 1 ? "Reveal" : "Reveal " + (position + 1) + "/" + entry.marks.length;
     reveal.setAttribute("aria-label", "Reveal the next block changed in " + entry.label);
@@ -3094,7 +3298,7 @@ function renderRevisionLegend() {
     " · " +
     (revisionMarks.length === 1 ? "1 marked block" : revisionMarks.length + " marked blocks");
 
-  revisionsList.replaceChildren(...revisionEntries.map(buildRevisionRow));
+  rebuildKeepingFocus(revisionsList, () => revisionsList.replaceChildren(...revisionEntries.map(buildRevisionRow)));
 }
 
 function setRevisionsDrawerOpen(open) {
@@ -4640,16 +4844,24 @@ chatInput.addEventListener("keydown", (event) => {
   }
 });
 chatInput.addEventListener("input", () => hideSendHint());
-if (!speechRecognitionClass()) chatVoiceButton.setAttribute("aria-label", VOICE_UNSUPPORTED_COPY);
-chatVoiceButton.onclick = () => (voiceListening ? voiceDictation.stop() : startVoice(false));
+chatVoiceButton.onclick = () => setVoiceRecentOpen(!voiceRecentOpen);
+chatVoiceRecentClose.onclick = closeVoiceRecent;
+window.addEventListener("resize", () => {
+  if (voiceRecentOpen) fitVoiceRecent();
+});
+// Escape from the bubble or from inside the list closes it, closes nothing else, and puts the
+// keyboard back on the bubble. Escape from anywhere else closes it too (see the keydown below).
+chatVoiceDock.addEventListener("keydown", (event) => {
+  if (!voiceRecentOpen || event.key !== "Escape") return;
+  event.stopPropagation();
+  closeVoiceRecent();
+});
 // Capture phase, like the mode hotkey, so the voice shortcut works wherever focus is in the chrome
 // and the held space never reaches the message box or a focused button.
 document.addEventListener("keydown", handleVoiceKey, true);
 document.addEventListener("keyup", handleVoiceKey, true);
 // The page may never see a held shortcut's release once it loses focus, so that stops listening.
-window.addEventListener("blur", () => {
-  if (voiceHeld) voiceDictation.stop();
-});
+window.addEventListener("blur", () => voiceDictation.stop());
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) voiceDictation.stop();
 });
@@ -4714,6 +4926,8 @@ document.addEventListener("keydown", (event) => {
       closeRevisionsDrawer({ restoreFocus: true });
     } else if (warningsDrawerOpen) {
       closeWarningsDrawer({ restoreFocus: true });
+    } else if (voiceRecentOpen) {
+      setVoiceRecentOpen(false);
     } else if (!moreMenu.hidden) {
       closeMenus();
     } else if (sheetOpen && isMobileSheet()) {

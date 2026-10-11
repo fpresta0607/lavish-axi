@@ -9,6 +9,7 @@ import {
   isTrustedAttachmentResult,
   partitionDroppedFiles,
   planClipboardPaste,
+  rebuildKeepingFocus,
 } from "../src/artifact-sdk.js";
 import { createSdkJs } from "../src/server.js";
 
@@ -50,6 +51,57 @@ test("the SDK bundle carries ready attachment refs on the queued prompt", () => 
   assert.match(sdk, /options\.attachments/);
   assert.match(sdk, /item\.attachments = attachments/);
   assert.match(sdk, /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, noteId \}\)/);
+});
+
+// A list in a shadow root, as the annotation card's chips are: its root says what has focus.
+function fakeList(keys) {
+  const root = { activeElement: null };
+  const control = (focusKey) => ({
+    dataset: { focusKey },
+    focus() {
+      root.activeElement = this;
+    },
+  });
+  const list = {
+    controls: keys.map(control),
+    getRootNode: () => root,
+    contains: (node) => list.controls.includes(node),
+    querySelectorAll: () => list.controls,
+    rebuild(next) {
+      if (list.controls.includes(root.activeElement)) root.activeElement = null;
+      list.controls = next.map(control);
+    },
+  };
+  // Only what rebuildKeepingFocus reads of an element.
+  return { root, list: /** @type {any} */ (list) };
+}
+
+test("rebuildKeepingFocus puts the keyboard back on the control that replaced the focused one", () => {
+  const { root, list } = fakeList(["retry:1", "remove:1", "remove:2"]);
+  list.controls[1].focus();
+
+  rebuildKeepingFocus(list, () => list.rebuild(["remove:1", "remove:2"]));
+
+  assert.equal(root.activeElement, list.controls[0]);
+});
+
+test("rebuildKeepingFocus leaves focus alone outside the list or with no successor", () => {
+  const { root, list } = fakeList(["remove:1"]);
+  const outside = { dataset: { focusKey: "remove:1" } };
+  root.activeElement = outside;
+  rebuildKeepingFocus(list, () => list.rebuild(["remove:1"]));
+  assert.equal(root.activeElement, outside);
+
+  list.controls[0].focus();
+  rebuildKeepingFocus(list, () => list.rebuild(["remove:2"]));
+  assert.equal(root.activeElement, null);
+});
+
+test("the SDK bundle rebuilds the card's chips keeping the keyboard on them", () => {
+  assert.match(sdk, /const rebuildKeepingFocus=/);
+  assert.match(sdk, /rebuildKeepingFocus\(listEl, \(\) => \{/);
+  assert.match(sdk, /data-focus-key="remove:' \+/);
+  assert.match(sdk, /data-focus-key="retry:' \+/);
 });
 
 test("acceptedImageTypes turns the server's list into the card's lookups", () => {

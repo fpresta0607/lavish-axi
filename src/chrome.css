@@ -938,9 +938,11 @@ body.lavish {
   gap: 8px;
 }
 /* The message box is one bordered field: the text, then a row inside the border with the paperclip
-   at the bottom left and the microphone at the bottom right. The text grows to its cap and then
-   scrolls in its own area above that row, so it never runs under either button. */
+   at the bottom left and the voice bubble at the bottom right. The text grows to its cap and then
+   scrolls in its own area above that row, so it never runs under either button. The board's voice
+   card opens above the field, so the field is what it is set against. */
 .composer-field {
+  position: relative;
   display: grid;
   min-width: 0;
   border: 1px solid var(--glass-border);
@@ -987,13 +989,16 @@ body.lavish {
   height: 20px;
 }
 /* The box sits at the foot of the window, so its tooltips open above the buttons. */
-.composer-tool[data-tip]::after {
+.composer-tool[data-tip]::after,
+.chat-voice[data-tip]::after {
   top: auto;
   bottom: calc(100% + 8px);
   transform: translateY(4px);
 }
 .composer-tool[data-tip]:hover::after,
-.composer-tool[data-tip]:focus-visible::after {
+.composer-tool[data-tip]:focus-visible::after,
+.chat-voice[data-tip]:hover::after,
+.chat-voice[data-tip]:focus-visible::after {
   transform: none;
 }
 .composer.is-dropping {
@@ -1062,27 +1067,30 @@ body.lavish {
 .chat-attachment-notice:empty {
   display: none;
 }
-/* The microphone stays still while idle. Listening widens it into a pill inside the box, a
-   recording dot and bars that move only with the microphone's level. */
-.chat-voice {
-  grid-auto-flow: column;
-  gap: 8px;
-}
+/* The microphone is the board's voice bubble, still while idle. Recording widens it, a recording
+   dot and bars that move only with the microphone's level. */
 .chat-voice:disabled {
   cursor: not-allowed;
 }
-.chat-voice[aria-pressed="true"] {
-  width: auto;
-  min-width: 112px;
-  padding: 0 14px;
-  border-color: var(--moss);
-  border-radius: 999px;
-  color: inherit;
-}
-.chat-voice[aria-pressed="true"] svg,
-.chat-voice:not([aria-pressed="true"]) .chat-voice-dot,
-.chat-voice:not([aria-pressed="true"]) .chat-voice-bars {
+.chat-voice.recording svg,
+.chat-voice:not(.recording) .chat-voice-dot,
+.chat-voice:not(.recording) .chat-voice-bars {
   display: none;
+}
+/* The recent dictations stop short of the top of the panel, which clips them (chrome-client.js
+   sets the max-height to the room above the box): the list scrolls between the card's title and
+   its foot instead. */
+.chat-voice-dock .voice-card {
+  display: flex;
+  flex-direction: column;
+}
+.chat-voice-dock .voice-card > * {
+  flex: none;
+}
+.chat-voice-dock .voice-recent ul {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
 }
 .composer.is-dictating .composer-field {
   border-color: var(--accent-green);
@@ -1408,6 +1416,11 @@ body.layout-gate-active iframe#artifact {
   }
   .chat-attachments {
     max-height: min(176px, 25dvh);
+  }
+  /* The recent dictations open above the box, out of the composer's own scroll. Opening them takes
+     the keyboard to the bubble, so the composer has nothing to scroll meanwhile. */
+  .composer:has(.voice-card:not([hidden])) {
+    overflow: visible;
   }
   .composer .actions {
     position: sticky;
