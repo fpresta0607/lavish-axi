@@ -160,6 +160,12 @@ const FAKE_VOICE = `() => {
   return "ok";
 }`;
 
+// Five dictations long enough to fill three lines each, more than the room above the box holds.
+const LONG_DICTATIONS = [1, 2, 3, 4, 5].map(
+  (n) =>
+    `Long note ${n} asks for the pricing cards to share one height, the plan names to sit on one line, and the yearly toggle to move above the cards`,
+);
+
 const voiceKey = (type) =>
   `() => { document.dispatchEvent(new KeyboardEvent("${type}", { code: "Space", key: " ", ctrlKey: true, shiftKey: true, bubbles: true })); return "ok"; }`;
 
@@ -207,6 +213,7 @@ const MEASURE_RECENT = `() => {
     expanded: bubble.getAttribute("aria-expanded"),
     value: textarea.value,
     focus: focused === bubble ? "bubble" : focused === textarea ? "box" : focused ? focused.id || focused.tagName : "",
+    focusLabel: focused?.getAttribute("aria-label") || "",
     box: rect(box),
     viewport: { width: innerWidth, height: innerHeight },
     sheet: document.body.classList.contains("sheet-open"),
@@ -426,6 +433,13 @@ test(
       click(/button "Recent dictations"/);
       await wait(400);
       assertRecentOpen(where, evaluate(MEASURE_RECENT), phrases);
+      run("chrome-devtools-axi", ["press", "Tab"], chromeEnv);
+      await wait(200);
+      assert.equal(
+        evaluate(MEASURE_RECENT).focusLabel,
+        "Close recent dictations",
+        `${where}: Tab goes from the bubble into the card`,
+      );
 
       click(new RegExp(`button "Paste into this box: ${phrases[0]}"`));
       await wait(400);
@@ -484,6 +498,30 @@ test(
       await t.test("the recent dictations on a phone", async () => {
         const closed = await useRecentDictations("phone", ["Tighten the card spacing", "Make the header sticky"]);
         assert.equal(closed.sheet, true, "Escape on the card leaves the conversation sheet raised");
+      });
+
+      // A full list of long dictations: the card stops at the top of the panel and its list
+      // scrolls, so its title and close button stay in sight.
+      await t.test("five long dictations fit above the box on a phone", async () => {
+        for (const phrase of LONG_DICTATIONS) {
+          evaluate(`() => { window.__voicePhrase = ${JSON.stringify(phrase)}; return "ok"; }`);
+          evaluate(voiceKey("keydown"));
+          await wait(300);
+          evaluate(voiceKey("keyup"));
+          await wait(200);
+        }
+        evaluate(
+          '() => { const box = document.getElementById("chatInput"); box.value = ""; box.dispatchEvent(new Event("input", { bubbles: true })); return "ok"; }',
+        );
+        click(/button "Recent dictations"/);
+        await wait(400);
+        assertRecentOpen("phone, five long", evaluate(MEASURE_RECENT), [...LONG_DICTATIONS].reverse());
+      });
+      await open(url, "1707x950x1.5");
+      await t.test("five long dictations fit above the box in his window", async () => {
+        click(/button "Recent dictations"/);
+        await wait(400);
+        assertRecentOpen("window, five long", evaluate(MEASURE_RECENT), [...LONG_DICTATIONS].reverse());
       });
     } finally {
       run(process.execPath, ["bin/lavish-axi.js", "stop", "--port", String(port)], lavishEnv, 15_000);

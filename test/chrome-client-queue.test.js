@@ -221,6 +221,8 @@ async function createChromeHarness({
                   (childClasses.includes("agent") && !childClasses.includes("agent-working")))
               )
                 matches.push(child);
+            } else if (selector === "[data-focus-key]") {
+              if (child.dataset?.focusKey !== undefined) matches.push(child);
             } else if (typeof selector === "string" && selector.startsWith(".")) {
               if (childClasses.includes(selector.slice(1))) matches.push(child);
             }
@@ -255,6 +257,8 @@ async function createChromeHarness({
         return child;
       },
       replaceChildren(...next) {
+        // The browser drops focus from a removed element onto the page body.
+        if (activeElement && activeElement !== this && this.contains(activeElement)) activeElement = null;
         for (const child of this.children) child.parentElement = null;
         this.children = [];
         for (const child of next) this.appendChild(child);
@@ -294,6 +298,10 @@ async function createChromeHarness({
       scrollIntoView(options) {
         this.scrolledIntoView = options;
       },
+      // No layout here: every box sits at the origin with no size.
+      getBoundingClientRect() {
+        return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+      },
       listeners,
     };
     elements.set(id, el);
@@ -330,6 +338,8 @@ async function createChromeHarness({
   element("moreMenu").hidden = true;
   element("warningsDrawer").hidden = true;
   element("revisionsDrawer").hidden = true;
+  element("chatVoiceRecent").hidden = true;
+  element("chatVoice")["aria-expanded"] = "false";
   const whiteboardFrame = element("whiteboardFrame");
   whiteboardFrame.contentWindow = {
     postMessage(message) {
@@ -9246,6 +9256,75 @@ test("voice input: Escape or the close button closes the recent dictations and p
   assert.equal(card.hidden, true);
   assert.equal(voice["aria-expanded"], "false");
   assert.equal(voice.focused, true);
+});
+
+test("voice input: Escape closes the recent dictations wherever the keyboard is, and only them", async () => {
+  const { chrome, voice } = await voiceHarness();
+  const card = chrome.element("chatVoiceRecent");
+  let stopped = false;
+  chrome.element("chatVoiceDock").dispatch("keydown", {
+    key: "Escape",
+    stopPropagation() {
+      stopped = true;
+    },
+  });
+  assert.equal(stopped, false, "a closed list leaves Escape to the rest of the page");
+
+  voice.click();
+  chrome.element("chatInput").focus();
+  chrome.dispatchDocumentEvent("keydown", { key: "Escape" });
+
+  assert.equal(card.hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+  assert.equal(chrome.context.document.activeElement, chrome.element("chatInput"), "the keyboard stays in the box");
+});
+
+test("voice input: a re-render keeps the keyboard on the recent dictation's button", async () => {
+  const { chrome, voice } = await voiceHarness();
+  const focusedLabel = () => chrome.context.document.activeElement?.["aria-label"];
+  dictate(chrome, "ship it");
+  voice.click();
+
+  recentEntries(chrome)[0].buttons[1].focus();
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "listening" }) });
+  assert.equal(focusedLabel(), "Paste into this box: ship it");
+
+  const copy = recentEntries(chrome)[0].buttons[0];
+  copy.focus();
+  copy.click();
+  await flushPromises();
+  assert.equal(recentEntries(chrome)[0].buttons[0]["data-tip"], "Copied");
+  assert.equal(focusedLabel(), "Copy: ship it");
+  chrome.runTimers(1400);
+  assert.equal(recentEntries(chrome)[0].buttons[0]["data-tip"], "Copy");
+  assert.equal(focusedLabel(), "Copy: ship it");
+});
+
+test("voice input: this visit's dictations stay listed when the browser refuses to keep them", async () => {
+  class RefusingStore extends Map {
+    /** @returns {never} */
+    set() {
+      throw new Error("QuotaExceededError");
+    }
+  }
+  const { chrome, voice } = await voiceHarness({ localStore: new RefusingStore() });
+  dictate(chrome, "first");
+  dictate(chrome, "second");
+
+  voice.click();
+
+  assert.deepEqual(
+    recentEntries(chrome).map((entry) => entry.text),
+    ["second", "first"],
+  );
+});
+
+test("voice input: the recent dictations follow the bubble in the page, so Tab goes from the bubble into them", () => {
+  const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
+  const bubble = html.search(/id="chatVoice"[\s>]/);
+  const card = html.indexOf('id="chatVoiceRecent"');
+
+  assert.ok(bubble > 0 && card > bubble, "the card comes after the bubble");
 });
 
 test("voice input: the list shows this review's five newest dictations and the browser keeps ten", async () => {

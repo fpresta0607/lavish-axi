@@ -118,6 +118,7 @@ const queuedLog = /** @type {HTMLDivElement} */ (document.getElementById("queued
 const chatLog = /** @type {HTMLDivElement} */ (document.getElementById("chatLog"));
 const chatComposer = /** @type {HTMLDivElement} */ (document.getElementById("chatComposer"));
 const chatInput = /** @type {HTMLTextAreaElement} */ (document.getElementById("chatInput"));
+const chatField = /** @type {HTMLDivElement} */ (document.getElementById("chatField"));
 const chatAttachments = /** @type {HTMLDivElement} */ (document.getElementById("chatAttachments"));
 const chatAttachButton = /** @type {HTMLButtonElement} */ (document.getElementById("chatAttach"));
 const chatAttachInput = /** @type {HTMLInputElement} */ (document.getElementById("chatAttachInput"));
@@ -495,6 +496,21 @@ function persistTerminalReservation(reserved) {
     else sessionStorage.removeItem(terminalStorageKey);
   } catch {
     // Session storage can be unavailable; the in-memory reservation still protects this page.
+  }
+}
+
+// A list rebuilt while the keyboard is on one of its controls puts the keyboard back on the control
+// that replaced it, the one with the same data-focus-key. Without this the browser drops focus onto
+// the page body, where Escape and Tab start over.
+function rebuildKeepingFocus(container, rebuild) {
+  const focused = /** @type {HTMLElement | null} */ (document.activeElement);
+  const focusKey = focused && container.contains(focused) ? focused.dataset.focusKey : undefined;
+  rebuild();
+  if (!focusKey) return;
+  for (const control of container.querySelectorAll("[data-focus-key]")) {
+    if (/** @type {HTMLElement} */ (control).dataset.focusKey !== focusKey) continue;
+    /** @type {HTMLElement} */ (control).focus();
+    return;
   }
 }
 
@@ -1753,6 +1769,9 @@ const KEPT_DICTATION_REVIEWS = 20;
 const LISTED_DICTATIONS = 5;
 // A copied dictation says so this long.
 const VOICE_COPIED_MS = 1400;
+// The card opens 8px above the box, as the board's rule places it, and keeps as much again clear of
+// the top of the panel.
+const VOICE_CARD_CLEARANCE = 16;
 // A voice problem stays under the composer this long.
 const VOICE_NOTE_MS = 6000;
 // While listening, the waveform takes the microphone's level this often.
@@ -1993,11 +2012,11 @@ function readKeptDictations() {
   }
 }
 
-// This review's dictations with this one first, even when the browser refuses to keep them.
+// This review's dictations with this one first. The list is the one this visit shows, so a browser
+// that refuses to keep it still lists every dictation of the visit.
 function rememberDictation(text, at) {
-  const kept = readKeptDictations();
-  const dictations = [{ text, at }, ...(kept[key] || [])].slice(0, KEPT_DICTATIONS);
-  const reviews = Object.entries({ ...kept, [key]: dictations })
+  const dictations = [{ text, at }, ...voiceDictations].slice(0, KEPT_DICTATIONS);
+  const reviews = Object.entries({ ...readKeptDictations(), [key]: dictations })
     .sort(([, a], [, b]) => (b[0]?.at ?? 0) - (a[0]?.at ?? 0))
     .slice(0, KEPT_DICTATION_REVIEWS);
   try {
@@ -2103,20 +2122,33 @@ function renderVoice() {
     voiceFrame = 0;
   }
   // A box that can no longer take text has no dictations to paste.
-  if (chatVoiceButton.disabled) voiceRecentOpen = false;
+  if (chatVoiceButton.disabled && voiceRecentOpen) setVoiceRecentOpen(false);
+}
+
+function setVoiceRecentOpen(open) {
+  voiceRecentOpen = open;
+  chatVoiceRecent.hidden = !open;
+  chatVoiceButton.setAttribute("aria-expanded", String(open));
   renderVoiceRecent();
 }
 
 // The recent dictations card, as the board's voice bubble draws it: the newest first, each with
 // when it was said, its words, Copy where the page has a clipboard, and Paste into this box.
 function renderVoiceRecent() {
-  chatVoiceRecent.hidden = !voiceRecentOpen;
-  chatVoiceButton.setAttribute("aria-expanded", String(voiceRecentOpen));
   if (!voiceRecentOpen) return;
+  fitVoiceRecent();
   const listed = voiceDictations.slice(0, LISTED_DICTATIONS);
   chatVoiceRecentList.hidden = listed.length === 0;
   chatVoiceRecentEmpty.hidden = listed.length > 0;
-  chatVoiceRecentList.replaceChildren(...listed.map(recentDictationItem));
+  rebuildKeepingFocus(chatVoiceRecentList, () =>
+    chatVoiceRecentList.replaceChildren(...listed.map(recentDictationItem)),
+  );
+}
+
+// The room above the box, down from the top of the panel, which clips anything past it.
+function fitVoiceRecent() {
+  const room = chatField.getBoundingClientRect().top - panel.getBoundingClientRect().top - VOICE_CARD_CLEARANCE;
+  chatVoiceRecent.style.maxHeight = room + "px";
 }
 
 function recentDictationItem(dictation, index) {
@@ -2138,13 +2170,17 @@ function recentDictationItem(dictation, index) {
   if (navigator.clipboard) {
     const copied = voiceCopied === entry;
     actions.appendChild(
-      voiceAction("Copy: " + dictation.text, copied ? "Copied" : "Copy", copied ? CHECK_ICON_SVG : COPY_ICON_SVG, () =>
-        copyDictation(dictation.text, entry),
+      voiceAction(
+        "copy:" + entry,
+        "Copy: " + dictation.text,
+        copied ? "Copied" : "Copy",
+        copied ? CHECK_ICON_SVG : COPY_ICON_SVG,
+        () => copyDictation(dictation.text, entry),
       ),
     );
   }
   actions.appendChild(
-    voiceAction("Paste into this box: " + dictation.text, "Paste into this box", PASTE_ICON_SVG, () =>
+    voiceAction("paste:" + entry, "Paste into this box: " + dictation.text, "Paste into this box", PASTE_ICON_SVG, () =>
       pasteDictation(dictation.text),
     ),
   );
@@ -2152,10 +2188,11 @@ function recentDictationItem(dictation, index) {
   return item;
 }
 
-function voiceAction(label, tip, icon, act) {
+function voiceAction(focusKey, label, tip, icon, act) {
   const button = document.createElement("button");
   button.type = "button";
   button.className = "icon-button pixel-icon";
+  button.dataset.focusKey = focusKey;
   button.setAttribute("aria-label", label);
   button.setAttribute("data-tip", tip);
   button.innerHTML = icon;
@@ -2181,13 +2218,11 @@ function copyDictation(text, entry) {
 
 function pasteDictation(text) {
   insertDictatedText(text);
-  voiceRecentOpen = false;
-  renderVoiceRecent();
+  setVoiceRecentOpen(false);
 }
 
 function closeVoiceRecent() {
-  voiceRecentOpen = false;
-  renderVoiceRecent();
+  setVoiceRecentOpen(false);
   chatVoiceButton.focus();
 }
 
@@ -4788,12 +4823,13 @@ chatInput.addEventListener("keydown", (event) => {
   }
 });
 chatInput.addEventListener("input", () => hideSendHint());
-chatVoiceButton.onclick = () => {
-  voiceRecentOpen = !voiceRecentOpen;
-  renderVoiceRecent();
-};
+chatVoiceButton.onclick = () => setVoiceRecentOpen(!voiceRecentOpen);
 chatVoiceRecentClose.onclick = closeVoiceRecent;
-// Escape closes the list from the bubble or from inside it, and closes nothing else.
+window.addEventListener("resize", () => {
+  if (voiceRecentOpen) fitVoiceRecent();
+});
+// Escape from the bubble or from inside the list closes it, closes nothing else, and puts the
+// keyboard back on the bubble. Escape from anywhere else closes it too (see the keydown below).
 chatVoiceDock.addEventListener("keydown", (event) => {
   if (!voiceRecentOpen || event.key !== "Escape") return;
   event.stopPropagation();
@@ -4869,6 +4905,8 @@ document.addEventListener("keydown", (event) => {
       closeRevisionsDrawer({ restoreFocus: true });
     } else if (warningsDrawerOpen) {
       closeWarningsDrawer({ restoreFocus: true });
+    } else if (voiceRecentOpen) {
+      setVoiceRecentOpen(false);
     } else if (!moreMenu.hidden) {
       closeMenus();
     } else if (sheetOpen && isMobileSheet()) {
