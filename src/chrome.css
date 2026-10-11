@@ -937,13 +937,64 @@ body.lavish {
   align-items: center;
   gap: 8px;
 }
+/* The message box is one bordered field: the text, then a row inside the border with the paperclip
+   at the bottom left and the microphone at the bottom right. The text grows to its cap and then
+   scrolls in its own area above that row, so it never runs under either button. */
+.composer-field {
+  display: grid;
+  min-width: 0;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--field-bg);
+}
+.composer-field:has(textarea:focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: 3px;
+}
 .composer textarea {
   width: 100%;
   max-width: 100%;
   min-width: 0;
-  min-height: 84px;
+  min-height: 60px;
   max-height: 240px;
   box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  resize: none;
+  field-sizing: content;
+}
+.composer textarea:focus-visible {
+  outline: none;
+}
+.composer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px 6px;
+}
+.composer-tool {
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  color: var(--muted);
+}
+.composer-tool:hover:not(:disabled) {
+  color: inherit;
+}
+.composer-tool .icon {
+  width: 20px;
+  height: 20px;
+}
+/* The box sits at the foot of the window, so its tooltips open above the buttons. */
+.composer-tool[data-tip]::after {
+  top: auto;
+  bottom: calc(100% + 8px);
+  transform: translateY(4px);
+}
+.composer-tool[data-tip]:hover::after,
+.composer-tool[data-tip]:focus-visible::after {
+  transform: none;
 }
 .composer.is-dropping {
   background: var(--glass-bg-hover);
@@ -1003,54 +1054,37 @@ body.lavish {
   color: var(--mint);
   font-weight: 700;
 }
-.chat-attachment-toolbar {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  min-width: 0;
-}
-.chat-attach {
-  display: inline-flex;
-  flex: none;
-  align-items: center;
-  gap: 8px;
-  min-height: 40px;
-  padding: 6px 14px;
-  font-size: 0.9375rem;
-}
-.chat-attach:hover:not(:disabled) {
-  border-color: var(--glass-border-hover);
-  background: #ffffff0f;
-}
-.chat-attach .icon {
-  width: 20px;
-  height: 20px;
-}
 .chat-attachment-notice {
   min-width: 0;
   color: var(--muted);
   font-size: 0.9375rem;
 }
-/* Voice input is the board's voice bubble. The microphone stays still while idle; listening
-   swaps it for a recording dot and bars that move only with the microphone's level. */
+.chat-attachment-notice:empty {
+  display: none;
+}
+/* The microphone stays still while idle. Listening widens it into a pill inside the box, a
+   recording dot and bars that move only with the microphone's level. */
 .chat-voice {
-  flex: none;
+  grid-auto-flow: column;
+  gap: 8px;
 }
 .chat-voice:disabled {
   cursor: not-allowed;
 }
 .chat-voice[aria-pressed="true"] {
+  width: auto;
   min-width: 112px;
-}
-.chat-voice[aria-pressed="true"]::before {
-  box-shadow: inset 0 0 0 2px var(--moss);
+  padding: 0 14px;
+  border-color: var(--moss);
+  border-radius: 999px;
+  color: inherit;
 }
 .chat-voice[aria-pressed="true"] svg,
 .chat-voice:not([aria-pressed="true"]) .chat-voice-dot,
 .chat-voice:not([aria-pressed="true"]) .chat-voice-bars {
   display: none;
 }
-.composer.is-dictating textarea {
+.composer.is-dictating .composer-field {
   border-color: var(--accent-green);
 }
 .chat-voice-note {

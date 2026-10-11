@@ -2018,13 +2018,16 @@ function renderVoice() {
   const supported = Boolean(speechRecognitionClass());
   const hint = voiceHeld ? VOICE_HELD_HINT : VOICE_CLICKED_HINT;
   chatVoiceButton.disabled = !supported || chatInput.disabled;
-  chatVoiceButton.title = !supported
-    ? VOICE_UNSUPPORTED_COPY
-    : window.isSecureContext === false
-      ? VOICE_INSECURE_COPY
-      : voiceListening
-        ? hint
-        : VOICE_IDLE_HINT;
+  chatVoiceButton.setAttribute(
+    "data-tip",
+    !supported
+      ? VOICE_UNSUPPORTED_COPY
+      : window.isSecureContext === false
+        ? VOICE_INSECURE_COPY
+        : voiceListening
+          ? hint
+          : VOICE_IDLE_HINT,
+  );
   chatVoiceButton.setAttribute("aria-pressed", String(voiceListening));
   chatComposer.classList.toggle("is-dictating", voiceListening);
   chatVoiceNote.textContent = voiceProblem || (voiceListening ? hint : "");
