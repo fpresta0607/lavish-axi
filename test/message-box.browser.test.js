@@ -401,6 +401,20 @@ test(
       run("chrome-devtools-axi", ["click", `@${line.trim().split(/\s+/)[0].replace(/^uid=/, "")}`], chromeEnv);
     }
 
+    // The bars take the microphone's level at the page's own pace, which a busy machine slows, so
+    // they get a few seconds to settle.
+    async function settledBars(isSettled) {
+      const read = () =>
+        evaluate(`() => { ${BUBBLE_LOOK} return JSON.stringify(bubbleLook(document.getElementById("chatVoice"))); }`);
+      const deadline = Date.now() + 8000;
+      let look = read();
+      while (!(look.bars && isSettled(look.bars)) && Date.now() < deadline) {
+        await wait(300);
+        look = read();
+      }
+      return look;
+    }
+
     // Holding Ctrl+Shift+Space while a tone plays: the bubble listens in the board's look and its
     // bars rise with the tone and fall back once it stops. Releasing the keys types the phrase.
     async function dictate(where, phrase) {
@@ -408,15 +422,11 @@ test(
       evaluate(`() => { window.__voicePhrase = ${JSON.stringify(phrase)}; return "ok"; }`);
       evaluate(voiceKey("keydown"));
       evaluate('() => { window.__voiceGain.gain.value = 1; return "ok"; }');
-      await wait(1500);
-      const speaking = evaluate(MEASURE_COMPOSER);
-      assertConversationBox(`${where}, listening`, speaking, true);
-      assert.ok(Math.min(...speaking.look.bars) > 0.5, `${where}: the bars rise with the voice: ${speaking.look.bars}`);
+      const risen = await settledBars((bars) => Math.min(...bars) > 0.5);
+      assert.ok(Math.min(...risen.bars) > 0.5, `${where}: the bars rise with the voice: ${risen.bars}`);
+      assertConversationBox(`${where}, listening`, evaluate(MEASURE_COMPOSER), true);
       evaluate('() => { window.__voiceGain.gain.value = 0; return "ok"; }');
-      await wait(1500);
-      const silent = evaluate(
-        `() => { ${BUBBLE_LOOK} return JSON.stringify(bubbleLook(document.getElementById("chatVoice"))); }`,
-      );
+      const silent = await settledBars((bars) => Math.max(...bars) <= 0.25);
       assert.ok(Math.max(...silent.bars) <= 0.25, `${where}: the bars fall back in silence: ${silent.bars}`);
       evaluate(voiceKey("keyup"));
       await wait(300);

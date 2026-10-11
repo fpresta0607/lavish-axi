@@ -301,7 +301,8 @@ test(
         timeout: 15_000,
       });
       assert.ifError(stopped.error);
-      await rm(temp, { recursive: true, force: true });
+      // Windows keeps the profile's lockfile a moment after Chrome exits.
+      await rm(temp, { recursive: true, force: true, maxRetries: 10 });
     }
   },
 );

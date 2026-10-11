@@ -59,7 +59,8 @@ async function headlessChromeState(chrome) {
             reason: `Chrome or Chromium could not launch headless (${result.signal || `exit ${result.status}`})`,
           };
   } finally {
-    await rm(root, { recursive: true, force: true });
+    // Windows keeps the profile's lockfile a moment after Chrome exits.
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
   }
   return chromeLaunchState;
 }
@@ -248,7 +249,8 @@ async function runBrowserScenario(t, scenario, fixture, options = {}) {
   } finally {
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
-    await rm(root, { recursive: true, force: true });
+    // Windows keeps the profile's lockfile a moment after Chrome exits.
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
   }
 }
 
