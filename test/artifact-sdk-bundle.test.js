@@ -93,6 +93,10 @@ function createElement(tag) {
     focus() {},
     click() {},
     scrollIntoView() {},
+    // Nothing in a stub's root holds the keyboard.
+    getRootNode() {
+      return { activeElement: null };
+    },
     attachShadow() {
       element.shadowRoot = createElement("shadow-root");
       return element.shadowRoot;

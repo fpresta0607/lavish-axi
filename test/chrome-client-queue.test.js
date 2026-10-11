@@ -304,6 +304,33 @@ async function createChromeHarness({
       },
       listeners,
     };
+    let markup = "";
+    let markupGeneration = 0;
+    Object.defineProperty(el, "innerHTML", {
+      enumerable: true,
+      get() {
+        return markup;
+      },
+      set(value) {
+        // As in the browser, rebuilding from markup removes the elements it held, and focus with them.
+        if (activeElement?.markupParent === el) activeElement = null;
+        markup = String(value);
+        markupGeneration += 1;
+      },
+    });
+    const querySelectorAll = el.querySelectorAll;
+    el.querySelectorAll = function (selector) {
+      if (selector !== "[data-focus-key]" || !markup.includes("data-focus-key"))
+        return querySelectorAll.call(this, selector);
+      return [...markup.matchAll(/data-focus-key="([^"]+)"/g)].map((match) => {
+        const control = element(`${id}@${markupGeneration}:${match[1]}`);
+        control.dataset.focusKey = match[1];
+        control.parentElement = el;
+        control.markupParent = el;
+        return control;
+      });
+    };
+    el.getRootNode = () => context.document;
     elements.set(id, el);
     return el;
   }
@@ -2173,6 +2200,23 @@ test("Conversation accepts an image-only paste and sends its attachment ref", as
   assert.equal(chrome.queued()[0].prompt, "");
 });
 
+test("a re-render keeps the keyboard on an image chip's control", async () => {
+  const chrome = await createChromeHarness();
+  const input = chrome.element("chatInput");
+  input.dispatch("paste", clipboardEvent(pastedImage("first.png")));
+  const remove = chrome
+    .element("chatAttachments")
+    .querySelectorAll("[data-focus-key]")
+    .find((control) => control.dataset.focusKey.startsWith("remove:"));
+  remove.focus();
+
+  input.dispatch("paste", clipboardEvent(pastedImage("second.png")));
+
+  const focused = chrome.context.document.activeElement;
+  assert.equal(focused?.dataset.focusKey, remove.dataset.focusKey);
+  assert.notEqual(focused, remove, "the chips were rebuilt");
+});
+
 test("Conversation attaches a screenshot exposed only through clipboard items", async () => {
   const id = "1".repeat(64) + ".png";
   const chrome = await createChromeHarness({
@@ -3016,6 +3060,21 @@ test("warning fixes stay queueable while the agent is working", async () => {
 
   await chrome.element("warningsQueueButton").onclick();
   assert.ok(posts.some((post) => post.url === "/api/abc/layout-warnings/queue"));
+});
+
+test("a layout issue update keeps the keyboard on the row's control", async () => {
+  const chrome = await createChromeHarness();
+  const update = () =>
+    chrome.eventSource().listeners.get("layout-warnings")({ data: JSON.stringify({ warnings: [warningPayload()] }) });
+  update();
+  const select = chrome.warningRows()[0].children[0];
+  select.focus();
+
+  update();
+
+  const replaced = chrome.warningRows()[0].children[0];
+  assert.notEqual(replaced, select, "the row was rebuilt");
+  assert.equal(chrome.context.document.activeElement, replaced);
 });
 
 test("queueing a selected subset produces exactly one ordinary prompt with only those warnings", async () => {
@@ -8704,6 +8763,24 @@ test("Reveal walks the marked blocks one at a time through the existing reveal p
   assert.equal(button().textContent, "Reveal 1/2");
 });
 
+test("Reveal keeps the keyboard on its button as it walks the marked blocks", async () => {
+  const chrome = await revisionHarness();
+  sendRevisions(chrome, {
+    revisions: [{ id: "r1", label: "Round 1" }],
+    marks: [
+      { revision_id: "r1", selector: "#first", tag: "p", excerpt: "one" },
+      { revision_id: "r1", selector: "#second", tag: "p", excerpt: "two" },
+    ],
+  });
+  const button = () => revisionRows(chrome)[0].querySelectorAll(".revision-reveal")[0];
+
+  button().focus();
+  button().click();
+
+  assert.equal(button().textContent, "Reveal 2/2");
+  assert.equal(chrome.context.document.activeElement, button());
+});
+
 test("a mark naming an undeclared revision never reaches the legend", async () => {
   const chrome = await revisionHarness();
 
@@ -9117,6 +9194,23 @@ test("voice input: holding Ctrl+Shift+Space dictates into the message box at the
     "dictation never sends by itself",
   );
   assert.deepEqual(chrome.queued(), []);
+});
+
+test("a re-render keeps the keyboard on a queued note's remove button", async () => {
+  const chrome = await createChromeHarness({
+    storedQueue: [{ uid: "", prompt: "Already queued", selector: "h1", tag: "element", text: "Heading" }],
+  });
+  const [remove] = chrome.element("queuedLog").querySelectorAll("[data-focus-key]");
+  remove.focus();
+
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Keep this for later", selector: "h2", tag: "annotation", text: "Later" },
+  });
+
+  const focused = chrome.context.document.activeElement;
+  assert.equal(focused?.dataset.focusKey, remove.dataset.focusKey);
+  assert.notEqual(focused, remove, "the queued notes were rebuilt");
 });
 
 // The microphone is the board's voice bubble: a click opens the recent dictations, each with Copy

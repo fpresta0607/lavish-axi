@@ -501,9 +501,12 @@ function persistTerminalReservation(reserved) {
 
 // A list rebuilt while the keyboard is on one of its controls puts the keyboard back on the control
 // that replaced it, the one with the same data-focus-key. Without this the browser drops focus onto
-// the page body, where Escape and Tab start over.
+// the page body, where Escape and Tab start over. The SDK carries the same helper for the
+// annotation card (artifact-sdk.js), which is why the list's own root says what has focus.
 function rebuildKeepingFocus(container, rebuild) {
-  const focused = /** @type {HTMLElement | null} */ (document.activeElement);
+  const focused = /** @type {HTMLElement | null} */ (
+    /** @type {Document | ShadowRoot} */ (container.getRootNode()).activeElement
+  );
   const focusKey = focused && container.contains(focused) ? focused.dataset.focusKey : undefined;
   rebuild();
   if (!focusKey) return;
@@ -642,6 +645,8 @@ function queuedBubbleHtml(prompt, index) {
     (sending ? SENDING_MARK_HTML + "Sending\u2026" : "Queued") +
     ' <button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
     index +
+    '" data-focus-key="remove:' +
+    escapeHtml(promptIdentity(prompt)) +
     '">' +
     REMOVE_ICON_SVG +
     "</button></small>" +
@@ -685,7 +690,9 @@ function reportNoteStatus(prompt, status) {
 }
 
 function render() {
-  queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
+  rebuildKeepingFocus(queuedLog, () => {
+    queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
+  });
   for (const prompt of queued) reportNoteStatus(prompt, isPromptSending(prompt) ? "sending" : "queued");
 
   for (const button of queuedLog.querySelectorAll(".queued-remove")) {
@@ -1561,44 +1568,52 @@ function createChatAttachmentsController() {
   }
 
   function renderAttachments() {
-    chatAttachments.innerHTML = items
-      .map((item) => {
-        const status = item.status === "uploading" ? "Uploading…" : item.status === "error" ? item.error : "";
-        const preview = item.preview
-          ? '<img class="chat-attachment-thumb" src="' + escapeHtml(item.preview) + '" alt="">'
-          : "";
-        const retry =
-          item.status === "error" && item.file
-            ? '<button type="button" aria-label="Retry ' +
-              escapeHtml(item.name) +
-              '" data-chat-attachment-retry="' +
-              item.localId +
-              '">Retry</button>'
+    rebuildKeepingFocus(chatAttachments, () => {
+      chatAttachments.innerHTML = items
+        .map((item) => {
+          const status = item.status === "uploading" ? "Uploading…" : item.status === "error" ? item.error : "";
+          const preview = item.preview
+            ? '<img class="chat-attachment-thumb" src="' + escapeHtml(item.preview) + '" alt="">'
             : "";
-        const errorData = item.errorCode ? ' data-error="' + escapeHtml(item.errorCode) + '"' : "";
-        return (
-          '<div class="chat-attachment-chip chat-attachment-' +
-          item.status +
-          '"' +
-          errorData +
-          ">" +
-          preview +
-          '<span class="chat-attachment-copy"><strong>' +
-          escapeHtml(item.name) +
-          "</strong>" +
-          (status ? '<span class="chat-attachment-status" aria-live="polite">' + escapeHtml(status) + "</span>" : "") +
-          "</span>" +
-          retry +
-          '<button type="button" aria-label="Remove ' +
-          escapeHtml(item.name) +
-          '" title="Remove ' +
-          escapeHtml(item.name) +
-          '" data-chat-attachment-remove="' +
-          item.localId +
-          '">×</button></div>'
-        );
-      })
-      .join("");
+          const retry =
+            item.status === "error" && item.file
+              ? '<button type="button" aria-label="Retry ' +
+                escapeHtml(item.name) +
+                '" data-chat-attachment-retry="' +
+                item.localId +
+                '" data-focus-key="retry:' +
+                item.localId +
+                '">Retry</button>'
+              : "";
+          const errorData = item.errorCode ? ' data-error="' + escapeHtml(item.errorCode) + '"' : "";
+          return (
+            '<div class="chat-attachment-chip chat-attachment-' +
+            item.status +
+            '"' +
+            errorData +
+            ">" +
+            preview +
+            '<span class="chat-attachment-copy"><strong>' +
+            escapeHtml(item.name) +
+            "</strong>" +
+            (status
+              ? '<span class="chat-attachment-status" aria-live="polite">' + escapeHtml(status) + "</span>"
+              : "") +
+            "</span>" +
+            retry +
+            '<button type="button" aria-label="Remove ' +
+            escapeHtml(item.name) +
+            '" title="Remove ' +
+            escapeHtml(item.name) +
+            '" data-chat-attachment-remove="' +
+            item.localId +
+            '" data-focus-key="remove:' +
+            item.localId +
+            '">×</button></div>'
+          );
+        })
+        .join("");
+    });
     syncNotice();
   }
 
@@ -2886,6 +2901,7 @@ function createWarningRow(warning) {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.className = "warning-select";
+  checkbox.dataset.focusKey = "select:" + warning.id;
   checkbox.checked = selectable && selectedWarningIds.has(warning.id);
   checkbox.disabled = !selectable;
   checkbox.setAttribute(
@@ -2935,6 +2951,7 @@ function createWarningRow(warning) {
     const reveal = document.createElement("button");
     reveal.type = "button";
     reveal.className = "warning-action";
+    reveal.dataset.focusKey = "reveal:" + warning.id;
     reveal.textContent = "Reveal";
     reveal.setAttribute("aria-label", "Reveal " + warning.title + " in the artifact");
     reveal.addEventListener("click", () => revealWarning(warning));
@@ -2943,6 +2960,7 @@ function createWarningRow(warning) {
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "warning-action";
+  dismiss.dataset.focusKey = "dismiss:" + warning.id;
   dismiss.textContent = "Dismiss";
   dismiss.disabled = !selectable;
   dismiss.setAttribute(
@@ -2986,15 +3004,17 @@ function renderWarnings() {
     (count === 1 ? "1 unresolved issue" : count + " unresolved issues") +
     (outstanding > 0 ? " · " + outstanding + " already queued for a fix" : "");
 
-  warningsList.replaceChildren();
-  if (count === 0) {
-    const empty = document.createElement("p");
-    empty.className = "warnings-empty";
-    empty.textContent = "No unresolved layout issues.";
-    warningsList.appendChild(empty);
-  } else {
-    for (const warning of active) warningsList.appendChild(createWarningRow(warning));
-  }
+  rebuildKeepingFocus(warningsList, () => {
+    warningsList.replaceChildren();
+    if (count === 0) {
+      const empty = document.createElement("p");
+      empty.className = "warnings-empty";
+      empty.textContent = "No unresolved layout issues.";
+      warningsList.appendChild(empty);
+    } else {
+      for (const warning of active) warningsList.appendChild(createWarningRow(warning));
+    }
+  });
   updateWarningSelectionState();
 }
 
@@ -3249,6 +3269,7 @@ function buildRevisionRow(entry) {
     const reveal = document.createElement("button");
     reveal.type = "button";
     reveal.className = "revision-reveal";
+    reveal.dataset.focusKey = "reveal:" + entry.id;
     const position = (revisionRevealCursor.get(entry.id) || 0) % entry.marks.length;
     reveal.textContent = entry.marks.length === 1 ? "Reveal" : "Reveal " + (position + 1) + "/" + entry.marks.length;
     reveal.setAttribute("aria-label", "Reveal the next block changed in " + entry.label);
@@ -3277,7 +3298,7 @@ function renderRevisionLegend() {
     " · " +
     (revisionMarks.length === 1 ? "1 marked block" : revisionMarks.length + " marked blocks");
 
-  revisionsList.replaceChildren(...revisionEntries.map(buildRevisionRow));
+  rebuildKeepingFocus(revisionsList, () => revisionsList.replaceChildren(...revisionEntries.map(buildRevisionRow)));
 }
 
 function setRevisionsDrawerOpen(open) {

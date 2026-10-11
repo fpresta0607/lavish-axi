@@ -24,6 +24,7 @@ import {
   isNativeInteractiveControl,
   isNearTotalOcclusion,
   isTrustedAttachmentResult,
+  rebuildKeepingFocus,
   attachmentSizeError,
   acceptedImageTypes,
   classifyAttachmentBatch,
@@ -3319,6 +3320,7 @@ const partitionDroppedFiles=${partitionDroppedFiles.toString()};
 const planClipboardPaste=${planClipboardPaste.toString()};
 const acceptedImageTypes=${acceptedImageTypes.toString()};
 const isTrustedAttachmentResult=${isTrustedAttachmentResult.toString()};
+const rebuildKeepingFocus=${rebuildKeepingFocus.toString()};
 const deriveAttachmentNoticeState=${deriveAttachmentNoticeState.toString()};
 ${mermaidHelperSource.declarations}
 const mermaidHelpers={ ${mermaidHelperSource.names.join(", ")} };
