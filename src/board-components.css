@@ -108,18 +108,18 @@ button:focus:not(:focus-visible), summary:focus:not(:focus-visible), [tabindex]:
 .dialogue-box { display: grid; grid-template-columns: auto minmax(0, 1fr) auto; align-items: center; gap: 12px 16px; width: 100%; padding: 14px 16px 14px 14px; color: var(--bone); }
 .dialogue-box::before, .dialogue-portrait::before { border: 2px solid var(--soot); background: var(--hide); box-shadow: inset 0 0 0 2px var(--edge); }
 .dialogue-portrait { display: grid; place-items: center; width: 64px; height: 64px; min-height: 64px; padding: 0; border: 0; background: transparent; }
-.dialogue-portrait::before { background: #1a140f; }
+.dialogue-portrait::before { background: #070b10; }
 button.dialogue-portrait:hover { background: transparent; transform: none; }
-button.dialogue-portrait:hover::before { background: #2e241b; }
+button.dialogue-portrait:hover::before { background: #12202a; }
 .dialogue-portrait .goblin-avatar { width: 56px; height: 56px; }
 .dialogue-text { min-width: 0; font-size: 1rem; line-height: 1.5; }
 .dialogue-text p { margin: 0; overflow-wrap: anywhere; }
 .dialogue-actions { display: flex; flex-wrap: wrap; justify-content: flex-end; align-items: center; gap: 8px; }
 .pixel-button { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 14px; border: 0; border-radius: 0; background: transparent; color: var(--soot); font: 400 1rem/1.2 var(--font-display); }
-.pixel-button::before { background: var(--lantern); box-shadow: inset -2px -2px 0 #b8832a, inset 2px 2px 0 #ffd98a; }
+.pixel-button::before { background: var(--lantern-fill); box-shadow: inset -2px -2px 0 var(--lantern-shade), inset 2px 2px 0 var(--lantern-light); }
 .pixel-button:hover { background: transparent; transform: none; }
-.pixel-button:hover::before { background: #f7c565; }
-.pixel-button:active::before { box-shadow: inset 2px 2px 0 #b8832a, inset -2px -2px 0 #ffd98a; }
+.pixel-button:hover::before { background: var(--lantern-hover); }
+.pixel-button:active::before { box-shadow: inset 2px 2px 0 var(--lantern-shade), inset -2px -2px 0 var(--lantern-light); }
 .pixel-button.outline { color: var(--bone); }
 .pixel-button.outline::before { background: transparent; box-shadow: inset 0 0 0 2px var(--bone); }
 .pixel-button.outline:hover::before { background: #ffffff12; }
@@ -139,7 +139,7 @@ button.dialogue-portrait:hover::before { background: #2e241b; }
 .voice-bubble { position: relative; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-width: 64px; height: 40px; padding: 0 16px; border: 0; border-radius: 0; background: transparent; color: var(--bone); box-shadow: none; transition: min-width .16s steps(3, end); }
 .voice-bubble::before { background: var(--hide); box-shadow: inset 0 0 0 2px var(--bone); }
 .voice-bubble:hover { background: transparent; transform: none; }
-.voice-bubble:hover::before { background: #2e241b; }
+.voice-bubble:hover::before { background: #12202a; }
 .voice-bubble .icon { width: 22px; height: 22px; }
 .voice-bubble.recording { min-width: 112px; }
 .voice-bubble.recording::before { box-shadow: inset 0 0 0 2px var(--moss); }
