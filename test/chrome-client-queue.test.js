@@ -539,7 +539,8 @@ async function createChromeHarness({
 
   vm.runInNewContext(source, context, { filename: "chrome-client.js" });
   await flushPromises();
-  if (artifactSrc) frame.dispatch("load");
+  // A frame fires load only once something was loaded into it: a superseded first load never is.
+  if (frame.src) frame.dispatch("load");
 
   function frameLoadToken() {
     const match = String(frame.src).match(/[?&]artifact_load_token=([^&]+)/);
@@ -4059,39 +4060,136 @@ test("chrome client registers message listener before loading the artifact ifram
   assert.equal(chrome.srcLoads[0].hadMessageListener, true);
 });
 
-test("the layout gate reveals after a completed pass with no findings", async () => {
+// The curtain covers the artifact only until its document says it can be shown. Waiting for the
+// layout check instead held every page for seconds: the check needs several animation frames, and
+// a frame behind the curtain gets about one a second.
+test("the curtain lifts as soon as the artifact is ready to show, before any layout pass", async () => {
   const { posts, fetchImpl } = diagnosticsHarness([[]]);
   const chrome = await createChromeHarness({ fetchImpl });
 
   assert.equal(chrome.element("layoutGateOverlay").hidden, false);
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), true);
 
-  chrome.sendFrameMessage({ type: "lavish:layoutDiagnostics", complete: true, viewport_width: 720, findings: [] });
-  await flushPromises();
+  chrome.sendFrameMessage({ type: "lavish:readyToShow" });
 
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), false);
-  assert.equal(posts[0].url, "/api/abc/layout-diagnostics");
-  assert.deepEqual(posts[0].body.findings, []);
+  assert.equal(
+    posts.some((post) => post.url === "/api/abc/layout-diagnostics"),
+    false,
+  );
 });
 
-// The gate used to hold the artifact hostage until an agent repaired the finding. Triage is the
-// user's now, so a completed pass always reveals and hands the result to the inbox.
-test("the layout gate reveals on severe findings and points at the inbox instead of holding", async () => {
+// The layout check runs on the shown page. Its findings go to the inbox; a pass neither lifts the
+// curtain nor brings it back.
+test("a layout pass fills the inbox and never decides the curtain", async () => {
   const { fetchImpl } = diagnosticsHarness([[warningPayload()]]);
   const chrome = await createChromeHarness({ fetchImpl });
-
-  chrome.sendFrameMessage({
+  const severePass = {
     type: "lavish:layoutDiagnostics",
     complete: true,
     viewport_width: 720,
     findings: [{ selector: "html", kind: "page-horizontal-overflow", overflowPx: 18, severity: "error" }],
-  });
+  };
+
+  chrome.sendFrameMessage(severePass);
+  await flushPromises();
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false, "only the artifact's own signal lifts it");
+  assert.equal(chrome.element("warningsWrap").hidden, false);
+
+  chrome.sendFrameMessage({ type: "lavish:readyToShow" });
+  chrome.sendFrameMessage(severePass);
   await flushPromises();
 
   assert.equal(chrome.element("layoutGateOverlay").hidden, true, "the user sees the artifact");
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), false);
   assert.equal(chrome.element("warningsWrap").hidden, false);
+});
+
+// The iframe's own blank document can report its load after the artifact load began. Lifting the
+// curtain on it shows an empty white frame while the artifact is still on its way.
+test("a frame load from a document that never spoke leaves the curtain up", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.frame.dispatch("load");
+
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+// The previous document's scroll position is restored at the new one's load, when its images and
+// fonts are in. Shown at its ready-to-show, the page would open at its top and then jump.
+test("a reload is shown where the reader was, once that place is restored", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:scroll", x: 0, y: 640 });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.frame.dispatch("load");
+
+  const restores = chrome.postedToFrame
+    .filter((message) => message.type === "lavish:restoreScroll")
+    .map(({ x, y }) => ({ x, y }));
+  assert.deepEqual(restores, [{ x: 0, y: 640 }]);
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+test("a reload whose load arrives before it speaks is shown on its ready-to-show", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:scroll", x: 0, y: 640 });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+
+  chrome.frame.dispatch("load");
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+// A late font holds the load event, so a page shown at once is being read when its load comes.
+// Restoring a position then would move the page under the reader.
+test("a page shown before its load keeps the reader's own scroll when it loads", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+  const token = chrome.artifactLoadToken();
+
+  chrome.sendFrameMessage({ artifact_load_token: token, type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+  chrome.sendFrameMessage({ artifact_load_token: token, type: "lavish:scroll", x: 0, y: 300 });
+  chrome.frame.dispatch("load");
+
+  assert.equal(
+    chrome.postedToFrame.some((message) => message.type === "lavish:restoreScroll"),
+    false,
+  );
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+test("a previous document's ready-to-show cannot lift the next load's curtain", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  const oldToken = chrome.artifactLoadToken();
+  chrome.sendFrameMessage({ artifact_load_token: oldToken, type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+  assert.notEqual(chrome.artifactLoadToken(), oldToken);
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.sendFrameMessage({ artifact_load_token: oldToken, type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
 
 test("layout gate timeout fails open when no result arrives", async () => {
@@ -4105,10 +4203,8 @@ test("layout gate timeout fails open when no result arrives", async () => {
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), false);
 });
 
-test("layout gate re-arms on reload and still reveals on the next completed pass", async () => {
-  const { fetchImpl } = diagnosticsHarness([[], [warningPayload()]]);
+test("layout gate re-arms on reload and still reveals on the next ready-to-show", async () => {
   const chrome = await createChromeHarness({
-    fetchImpl,
     sessionData: { key: "abc", file: "/tmp/artifact.html", layoutGateMaxHoldMs: 25 },
   });
 
@@ -4119,13 +4215,7 @@ test("layout gate re-arms on reload and still reveals on the next completed pass
   assert.equal(chrome.element("layoutGateOverlay").hidden, false);
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), true);
 
-  chrome.sendFrameMessage({
-    type: "lavish:layoutDiagnostics",
-    complete: true,
-    viewport_width: 720,
-    findings: [{ selector: "html", kind: "page-horizontal-overflow", overflowPx: 18, severity: "error" }],
-  });
-  await flushPromises();
+  chrome.sendFrameMessage({ type: "lavish:readyToShow" });
 
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
@@ -4264,7 +4354,7 @@ test("a first begin-load that fails keeps retrying until the artifact loads", as
   assert.equal(chrome.artifactBeginRequests.length, 4);
   assert.match(chrome.frame.src, /^\/artifact\/abc\/index\.html\?artifact_revision=\d+&artifact_load_token=/);
   // Retries alone never raise the failure card: the gate is back on its ordinary checking copy.
-  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Checking layout/);
+  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Opening this artifact/);
 });
 
 test("a first begin-load that never recovers surfaces a reloadable failure instead of a blank frame", async () => {
@@ -4335,7 +4425,7 @@ test("a load that asks for the artifact again gets the whole recovery backoff ag
   await flushPromises();
   assert.equal(chrome.artifactBeginRequests.length, 19);
   assert.match(chrome.frame.src, /artifact_load_token=/);
-  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Checking layout/);
+  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Opening this artifact/);
 });
 
 test("a superseded reviewer is not retried in the background", async () => {
@@ -4591,14 +4681,9 @@ test("the not-running card survives a later successful artifact load", async () 
   assert.equal(chrome.element("layoutGateAction").textContent, "Check and reload");
   assert.equal(chrome.element("layoutGateOverlay").hidden, false);
 
-  // A completed diagnostic pass from the replacement server must release the visual gate even
-  // while the sticky card copy remains in state. The card is not allowed to trap the artifact.
-  chrome.sendFrameMessage({
-    artifact_load_token: chrome.artifactLoadToken(),
-    type: "lavish:layoutDiagnostics",
-    complete: true,
-    findings: [],
-  });
+  // The artifact served by the replacement server must release the visual gate even while the
+  // sticky card copy remains in state. The card is not allowed to trap the artifact.
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
   assert.equal(chrome.element("layoutGateTitle").textContent, "Lavish is not running.");
 
@@ -4636,7 +4721,7 @@ test("a sticky failure cannot outlive the layout gate timeout", async () => {
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
 
-test("a no-gate sticky failure reveals by pass, manual bypass, or timeout", async () => {
+test("a no-gate sticky failure reveals by ready-to-show, manual bypass, or timeout", async () => {
   async function createFailedChrome() {
     const chrome = await createChromeHarness({
       artifactSrc: "/artifact/abc/index.html",
@@ -4662,12 +4747,7 @@ test("a no-gate sticky failure reveals by pass, manual bypass, or timeout", asyn
   }
 
   const completed = await createFailedChrome();
-  completed.sendFrameMessage({
-    artifact_load_token: completed.artifactLoadToken(),
-    type: "lavish:layoutDiagnostics",
-    complete: true,
-    findings: [],
-  });
+  completed.sendFrameMessage({ artifact_load_token: completed.artifactLoadToken(), type: "lavish:readyToShow" });
   assert.equal(completed.element("layoutGateOverlay").hidden, true);
 
   const bypassed = await createFailedChrome();
@@ -4677,18 +4757,6 @@ test("a no-gate sticky failure reveals by pass, manual bypass, or timeout", asyn
   const timedOut = await createFailedChrome();
   timedOut.runTimers(12000);
   assert.equal(timedOut.element("layoutGateOverlay").hidden, true);
-});
-
-test("a diagnostics network failure does not hold the visual gate", async () => {
-  const chrome = await createChromeHarness({
-    fetchImpl: async (url) => {
-      if (String(url).includes("/layout-diagnostics")) throw new Error("server replaced");
-      return { ok: true, json: async () => ({}) };
-    },
-  });
-
-  chrome.sendFrameMessage({ type: "lavish:layoutDiagnostics", complete: true, findings: [] });
-  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
 
 test("a layout pass lost to a token race requests a fresh pass", async () => {
@@ -4912,7 +4980,7 @@ test("a slow probe does not write its failure copy over a card that moved on", a
   chrome.eventSource().listeners.get("reload")();
   await flushPromises();
   await flushPromises();
-  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Checking layout/);
+  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Opening this artifact/);
   const checkingCopy = chrome.element("layoutGateCopy").textContent;
 
   chrome.runTimers(4000);
@@ -5537,9 +5605,11 @@ test("stale artifact messages are ignored until the current frame load", async (
     chrome.postedToFrame.some((message) => message.type === "lavish:restoreReviewState"),
     false,
   );
-  const restoredScroll = chrome.postedToFrame.filter((message) => message.type === "lavish:restoreScroll").at(-1);
-  assert.equal(restoredScroll.x, 0);
-  assert.equal(restoredScroll.y, 0);
+  assert.equal(
+    chrome.postedToFrame.some((message) => message.type === "lavish:restoreScroll"),
+    false,
+    "the stale document's position is not restored",
+  );
 
   chrome.sendFrameMessage({
     artifact_load_token: chrome.artifactLoadToken(),

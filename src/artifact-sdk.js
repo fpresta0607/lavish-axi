@@ -1345,6 +1345,8 @@ export function createArtifactSdk(
     return lines.join("\n");
   }
 
+  // How long a page waits for a font that is on time before it is shown with its fallback.
+  const readyToShowFontWaitMs = 100;
   const layoutAuditSettleMs = 180;
   const layoutAuditMaxWaitMs = 2000;
   const layoutAuditAnimationMaxWaitMs = 4000;
@@ -2118,6 +2120,20 @@ export function createArtifactSdk(
     }, 50);
   }
 
+  // The chrome keeps its curtain over this document until it says it can be shown. The SDK runs
+  // once the document is parsed and styled, so only fonts remain: reading layout makes the
+  // browser request the ones the page sets text in, a font that is on time is in before the first
+  // look, and a late one swaps in on the shown page. Nothing here waits on an animation frame or
+  // on the layout audit, which runs on the shown page: a frame behind the curtain gets about one
+  // animation frame a second.
+  function announceReadyToShow() {
+    document.documentElement.getBoundingClientRect();
+    Promise.race([
+      waitForDocumentFontsReady(),
+      new Promise((resolve) => window.setTimeout(resolve, readyToShowFontWaitMs)),
+    ]).then(() => postArtifactMessage("lavish:readyToShow"));
+  }
+
   function startLayoutAudit() {
     scheduleLayoutAudit();
     window.addEventListener("load", () => scheduleLayoutAudit(), { once: true });
@@ -2888,6 +2904,7 @@ export function createArtifactSdk(
     head.insertBefore(scrollbars, head.firstChild);
   }
   setAnnotationMode(annotationMode);
+  announceReadyToShow();
   if (document.readyState === "loading") {
     document.addEventListener("DOMContentLoaded", startLayoutAudit, { once: true });
   } else {

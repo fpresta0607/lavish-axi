@@ -1139,9 +1139,17 @@ body.lavish {
   background: var(--scrim);
   backdrop-filter: blur(6px);
 }
+/* Most artifacts show within a moment of opening. Until then the curtain only keeps the frame
+   empty, and its card appears once an artifact is slow, so a fast open never flashes it. */
 .ended-overlay.layout-gate-overlay {
   position: absolute;
   inset: 0;
+  animation: layout-gate-late 0s 1s both;
+}
+@keyframes layout-gate-late {
+  from {
+    visibility: hidden;
+  }
 }
 .ended-card {
   width: min(440px, calc(100vw - 48px));

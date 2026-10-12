@@ -124,6 +124,8 @@ function bootSdk({
   pageHeadTags = [],
   // What the page declares in its `<script data-lavish-choices>`, or null for a page without one.
   choices = null,
+  // The page's `document.fonts.ready`, or null for a browser without the font loading API.
+  fontsReady = null,
 } = {}) {
   const posted = [];
   const documentListeners = [];
@@ -191,6 +193,7 @@ function bootSdk({
             : documentQuery(selector),
       querySelectorAll: (selector) => (selector === "[data-lavish-revision]" ? revisionMarkElements : []),
       getSelection: () => null,
+      ...(fontsReady ? { fonts: { ready: fontsReady } } : {}),
     },
   };
   const windowListeners = [];
@@ -223,6 +226,13 @@ function bootSdk({
     },
     setDocumentQuery(query) {
       documentQuery = query;
+    },
+    // Runs only the pending timers due within `ms`, as that much time passing would.
+    runTimersWithin(ms) {
+      for (const timer of timers.filter((entry) => !entry.cancelled && entry.ms <= ms)) {
+        timer.cancelled = true;
+        timer.fn();
+      }
     },
     runTimers() {
       const pending = timers.splice(0, timers.length);
@@ -320,6 +330,40 @@ test("a requested layout diagnostic publishes even when the result is unchanged"
   assert.equal(diagnostics.length, 2);
   assert.equal(diagnostics[1].artifact_pass_sequence, diagnostics[0].artifact_pass_sequence + 1);
   assert.deepEqual(diagnostics[1].findings, diagnostics[0].findings);
+});
+
+// The chrome lifts its curtain on `lavish:readyToShow`. A frame behind the curtain gets about one
+// animation frame a second, so none is run here, and a font that never arrives holds the message
+// back only for the short font wait.
+test("the served SDK says a page whose font is slow is ready to show at once", async () => {
+  const sdk = bootSdk({ fontsReady: new Promise(() => {}) });
+
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:readyToShow"),
+    false,
+    "an on-time font gets a moment to arrive first",
+  );
+
+  sdk.runTimersWithin(100);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const ready = sdk.posted.filter((message) => message.type === "lavish:readyToShow");
+  assert.equal(ready.length, 1);
+  assert.equal(ready[0].artifact_load_token, "load-token");
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:layoutDiagnostics"),
+    false,
+    "the page is shown before its layout check, which runs on the shown page",
+  );
+});
+
+test("the served SDK says the page is ready to show as soon as its fonts are in", async () => {
+  const sdk = bootSdk({ fontsReady: Promise.resolve() });
+
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(sdk.posted.filter((message) => message.type === "lavish:readyToShow").length, 1);
 });
 
 // The page frame's scrollbars wear the dark theme through a rule with no specificity that comes

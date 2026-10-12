@@ -165,8 +165,11 @@ pnpm link
   Run `lavish-axi design` for the single source of agent-facing design guidance, including optional CDN snippets and the whiteboard (Mermaid) opt-in snippet.
 - **Self-paint warning** - `lavish-axi <html-file>`, `export`, and `share` run a render-free check for artifacts missing an explicit page background and return a one-line `self_paint_warning`.
   The check fails open - any stylesheet link, `@import`, Tailwind runtime script, `color-scheme`, or `html`/`body`/`:root` background signal suppresses it - and it never blocks the open.
-- **Open-time layout gate** - The browser chrome masks an artifact only while the real in-iframe audit waits for fonts and final geometry.
-  The first completed client-side check reveals the artifact, whatever it found and even if reporting that check to the server fails; the gate never holds the review hostage waiting for a repair or a network round-trip.
+- **Open-time layout gate** - The browser chrome masks an artifact only until its document has loaded and styled itself, giving a font that is on time up to 100 ms to arrive.
+  A slow font swaps in on the shown page instead of holding it.
+  The in-iframe layout audit then runs on the shown page, so the gate never waits for it, for a repair, or for a network round-trip.
+  A live reload that returns the reader to where they were is shown once the new page has loaded and that place is restored, so it never opens at the top and jumps.
+  The mask's card appears only once an artifact has taken a second to show, so a fast open never flashes it.
   The user can click **Show anyway**, and a bounded safety timeout fails open from every gate state.
   If the review cannot load at all - the chrome's own script never runs, or the server does not answer the artifact's load request after several retries - the mask names the problem and offers **Check and reload** without removing the independent **Show anyway** escape.
   A review already loaded in another browser tab is named the same way, with a **Take over here** button that moves it into the current tab, because Lavish loads an artifact in one tab at a time.

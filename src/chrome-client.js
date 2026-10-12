@@ -280,6 +280,11 @@ let terminalSubmission =
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let sendAcknowledgementTimer;
 let lastScroll = { x: 0, y: 0 };
+// Where the reader was in the previous document, restored once this one has loaded. Null when
+// there is nothing to restore, or once this document reports a position of its own: that one is
+// the reader's, and restoring over it would move a page they are already reading.
+/** @type {{ x: number, y: number } | null} */
+let pendingScrollRestore = null;
 // In-iframe review context (an open annotation card's unsent text, Lavish-owned question
 // answers). The sandbox means the chrome cannot read it back after a reload, so the SDK reports
 // it as it changes and the chrome replays it once the new document is up. It is persisted per
@@ -2596,18 +2601,11 @@ function clearLayoutGateTimer() {
   layoutGateTimer = undefined;
 }
 
-function setLayoutGateCard(state) {
+function setLayoutGateCard() {
   if (!layoutGateTitle || !layoutGateCopy) return;
 
-  if (state === "held") {
-    layoutGateTitle.innerHTML = "Fixing a layout issue...";
-    layoutGateCopy.textContent =
-      "The browser found inaccessible or unusable content. Your agent has been notified and this will reveal after the next clean reload.";
-    return;
-  }
-
-  layoutGateTitle.innerHTML = "Checking layout.<br>One moment.";
-  layoutGateCopy.textContent = `${PRODUCT} is waiting for fonts and final geometry before revealing this artifact.`;
+  layoutGateTitle.innerHTML = "Opening this artifact.<br>One moment.";
+  layoutGateCopy.textContent = `${PRODUCT} shows it as soon as it has loaded, then checks its layout on screen.`;
 }
 
 function setLayoutGateActive(active) {
@@ -2741,14 +2739,16 @@ function startLayoutGateCycle() {
   setLayoutGateActive(true);
   // A sticky failure owns the card copy, but never the reveal. Do not repaint it as a checking
   // card, and do arm a fresh timer for reloads that happen while the sticky card is present.
-  if (!layoutGateFailureSticky) setLayoutGateCard("checking");
+  if (!layoutGateFailureSticky) setLayoutGateCard();
   armLayoutGateTimer();
 }
 
-// The gate only waits for fonts and final geometry now. It never holds the artifact hostage
-// pending an agent repair: findings are the user's to triage, so a completed pass always reveals
-// and hands the result to the passive inbox.
-function handleLayoutGatePass() {
+// The curtain covers the artifact only until its document says it can be shown, or, for a reload
+// that restores the reader's place, until it has loaded. The layout audit runs on the shown page
+// and reports to the passive inbox; its passes never decide the reveal, because the audit needs
+// several animation frames and the curtain's transparent iframe gets about one a second, which
+// held every page for seconds.
+function showArtifact() {
   if (ended || !layoutGateVisible) return;
   revealLayoutGate();
 }
@@ -3740,6 +3740,7 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
     // Only clear it here, right before the frame is actually replaced - a preserved
     // load (superseded/out-of-order/exhausted retries below) must leave it intact.
     resetRevisionLegend();
+    pendingScrollRestore = lastScroll.x || lastScroll.y ? { ...lastScroll } : null;
     startLayoutGateCycle();
     const currentSrc = frame.src || "about:blank";
     frame.src = currentSrc + (currentSrc.includes("?") ? "&" : "?") + "lavish_reload=" + Date.now();
@@ -3855,6 +3856,7 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
   artifactSpokeToken = "";
   inlineWhiteboardChannels.clear();
   setHandoffSuperseded(false);
+  pendingScrollRestore = lastScroll.x || lastScroll.y ? { ...lastScroll } : null;
   startLayoutGateCycle();
   // The next document reports its own registry once it loads; until then the
   // previous revision's legend would point at blocks that may no longer exist.
@@ -4531,15 +4533,18 @@ window.addEventListener("message", (event) => {
   const messageSequence = ++artifactMessageSequence;
   artifactSpokeToken = messageToken;
   clearTimeout(artifactSilenceTimer);
+  if (msg.type === "lavish:readyToShow") {
+    // A reload that returns the reader to their place is shown at its load, once that place is
+    // restored: shown now it would open at its top and then jump.
+    if (!pendingScrollRestore) showArtifact();
+    return;
+  }
   if (msg.type === "lavish:layoutDiagnostics") {
     const diagnosticSequence = ++layoutDiagnosticSequence;
-    const complete = msg.complete !== false;
-    // The gate is visual, so the client-side settled pass is the release signal. Reporting the
-    // pass is deliberately fire-and-forget: a server restart or a diagnostics 4xx/5xx must not
-    // hold a rendered artifact hostage to a network round-trip.
-    if (complete) handleLayoutGatePass();
+    // Reporting the pass is fire-and-forget and never touches the curtain: a server restart or a
+    // diagnostics 4xx/5xx only leaves the inbox as it was.
     submitLayoutDiagnostics({
-      complete,
+      complete: msg.complete !== false,
       targetPresenceComplete: msg.target_presence_complete === true,
       artifactRevision: msg.artifact_revision,
       artifactLoadToken: msg.artifact_load_token,
@@ -4555,13 +4560,7 @@ window.addEventListener("message", (event) => {
           return;
         }
       })
-      .catch(() => {
-        // A failed report is still a completed client-side pass. Keep this fallback explicit so a
-        // future change cannot accidentally make the network request the gate's release path.
-        if (complete && messageToken === artifactLoadToken && diagnosticSequence === layoutDiagnosticSequence) {
-          handleLayoutGatePass();
-        }
-      });
+      .catch(() => {});
     return;
   }
   // The artifact spoke, so it rendered and ran its SDK - there is nothing fatal to probe for.
@@ -4575,6 +4574,7 @@ window.addEventListener("message", (event) => {
   }
   if (msg.type === "lavish:scroll") {
     lastScroll = { x: Number(msg.x) || 0, y: Number(msg.y) || 0 };
+    pendingScrollRestore = null;
   }
   if (msg.type === "lavish:reviewState") {
     setReviewState(msg.state && typeof msg.state === "object" ? msg.state : null);
@@ -4951,13 +4951,21 @@ document.addEventListener(
 frame.addEventListener("load", () => {
   if (artifactSpokeToken !== artifactLoadToken) armArtifactAvailabilityProbe(artifactLoadToken);
   postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation && !ended });
-  // Replay the pre-reload scroll position so hot reloads don't jump the artifact to the top.
-  postToFrame({ type: "lavish:restoreScroll", x: lastScroll.x, y: lastScroll.y });
+  // Replay the pre-reload scroll position so hot reloads don't jump the artifact to the top. Load
+  // waits for every font and image, so a page shown before it is the reader's to scroll by now.
+  if (pendingScrollRestore) {
+    postToFrame({ type: "lavish:restoreScroll", x: pendingScrollRestore.x, y: pendingScrollRestore.y });
+    pendingScrollRestore = null;
+  }
   if (lastReviewState) postToFrame({ type: "lavish:restoreReviewState", state: lastReviewState });
   if (overlayIndex !== null) {
     inlineWhiteboardChannels.delete(overlayIndex);
     postToFrame({ type: "lavish:suspendWhiteboard", diagramIndex: overlayIndex });
   }
+  // A reload that waited to restore the reader's place is shown now. Only a document that has
+  // spoken counts: the iframe's own blank document can report a load after the artifact load
+  // began, and showing it would flash an empty white frame.
+  if (artifactSpokeToken === artifactLoadToken) showArtifact();
 });
 
 initializeLayoutGate();
