@@ -1284,7 +1284,9 @@ test("chrome remembers the artifact scroll position across reloads", async () =>
   assert.match(js, /let lastScroll = \{ x: 0, y: 0 \}/);
   assert.match(js, /msg\.type === ["']lavish:scroll["']/);
   assert.match(js, /type:\s*["']lavish:restoreScroll["']/);
-  assert.match(js, /x:\s*lastScroll\.x,\s*y:\s*lastScroll\.y/);
+  // A reload restores the previous document's place, captured when the new load begins.
+  assert.match(js, /pendingScrollRestore = lastScroll\.x \|\| lastScroll\.y \? \{ \.\.\.lastScroll \} : null/);
+  assert.match(js, /x:\s*pendingScrollRestore\.x,\s*y:\s*pendingScrollRestore\.y/);
 });
 
 test("chrome ignores Lavish postMessages not sent by the artifact iframe", async () => {
