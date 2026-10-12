@@ -4106,9 +4106,9 @@ test("a layout pass fills the inbox and never decides the curtain", async () => 
   assert.equal(chrome.element("warningsWrap").hidden, false);
 });
 
-// A document the SDK never ran in, such as an expired load or a gone page, never says it is ready.
-// It has loaded, so it is shown rather than held until the safety timeout.
-test("a loaded artifact that never spoke is shown", async () => {
+// The iframe's own blank document can report its load after the artifact load began. Lifting the
+// curtain on it shows an empty white frame while the artifact is still on its way.
+test("a frame load from a document that never spoke leaves the curtain up", async () => {
   const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
   chrome.eventSource().listeners.get("reload")();
   await flushPromises();
@@ -4116,6 +4116,8 @@ test("a loaded artifact that never spoke is shown", async () => {
 
   chrome.frame.dispatch("load");
 
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
 
@@ -4136,6 +4138,19 @@ test("a reload is shown where the reader was, once that place is restored", asyn
     .filter((message) => message.type === "lavish:restoreScroll")
     .map(({ x, y }) => ({ x, y }));
   assert.deepEqual(restores, [{ x: 0, y: 640 }]);
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+test("a reload whose load arrives before it speaks is shown on its ready-to-show", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:scroll", x: 0, y: 640 });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+
+  chrome.frame.dispatch("load");
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
 

@@ -2743,10 +2743,11 @@ function startLayoutGateCycle() {
   armLayoutGateTimer();
 }
 
-// The curtain covers the artifact only until its document can be shown: when it says so, or when
-// it has loaded. The layout audit runs on the shown page and reports to the passive inbox; its
-// passes never decide the reveal, because the audit needs several animation frames and the
-// curtain's transparent iframe gets about one a second, which held every page for seconds.
+// The curtain covers the artifact only until its document says it can be shown, or, for a reload
+// that restores the reader's place, until it has loaded. The layout audit runs on the shown page
+// and reports to the passive inbox; its passes never decide the reveal, because the audit needs
+// several animation frames and the curtain's transparent iframe gets about one a second, which
+// held every page for seconds.
 function showArtifact() {
   if (ended || !layoutGateVisible) return;
   revealLayoutGate();
@@ -4961,9 +4962,10 @@ frame.addEventListener("load", () => {
     inlineWhiteboardChannels.delete(overlayIndex);
     postToFrame({ type: "lavish:suspendWhiteboard", diagramIndex: overlayIndex });
   }
-  // Everything the document asked for has loaded. This also shows a document the SDK never ran
-  // in, such as an expired load or a gone page, which never says it is ready to show.
-  showArtifact();
+  // A reload that waited to restore the reader's place is shown now. Only a document that has
+  // spoken counts: the iframe's own blank document can report a load after the artifact load
+  // began, and showing it would flash an empty white frame.
+  if (artifactSpokeToken === artifactLoadToken) showArtifact();
 });
 
 initializeLayoutGate();
