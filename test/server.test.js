@@ -293,7 +293,7 @@ test("the chrome boot failsafe turns the layout gate into a reloadable failure w
     boot.pendingDelays().sort((left, right) => left - right),
     [CHROME_LAYOUT_GATE_MAX_HOLD_MS, CHROME_BOOT_FAILSAFE_MS],
   );
-  assert.match(boot.element("layoutGateTitle").textContent, /Checking layout/);
+  assert.match(boot.element("layoutGateTitle").textContent, /Opening this artifact/);
 
   boot.runTimers();
 
@@ -6799,10 +6799,15 @@ test("layout gate curtain reuses the ended overlay card styling", async () => {
     /<div class="frame"><iframe id="artifact"[^>]*><\/iframe><div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay">/,
   );
   assert.match(css, /\.frame\{[^}]*position:relative;isolation:isolate/);
-  assert.match(css, /\.ended-overlay\.layout-gate-overlay\{position:absolute;inset:0;\}/);
+  assert.match(
+    css,
+    /\.ended-overlay\.layout-gate-overlay\{position:absolute;inset:0;animation:layout-gate-late 0s 1s both;\}/,
+  );
+  // A fast open never flashes the card: it appears only once the artifact has taken a second.
+  assert.match(css, /@keyframes layout-gate-late\{from\{visibility:hidden;\}\}/);
   assert.match(
     html,
-    /<div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"><\/span><h3 class="ended-title" id="layoutGateTitle">Checking layout/,
+    /<div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"><\/span><h3 class="ended-title" id="layoutGateTitle">Opening this artifact/,
   );
   assert.match(html, /class="ended-copy" id="layoutGateCopy"/);
   assert.match(html, /class="button ended-action" id="layoutGateAction" type="button">Show anyway/);
