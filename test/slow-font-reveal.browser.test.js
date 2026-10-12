@@ -14,8 +14,10 @@ import { fileURLToPath } from "node:url";
 // swaps in on the shown page, and the layout check then runs there.
 const runBrowserE2e = process.env.LAVISH_AXI_BROWSER_E2E === "1";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-// Well under the gate's safety timeout, so that timeout cannot be what lifts the curtain.
-const SHOWN_WITHIN_MS = 4000;
+// Well under the gate's 12-second safety timeout, the only thing that lifted this curtain before,
+// with room for reading the page through the CLI, which takes about a second a read here. The
+// held font is what proves "at once": the page shows while it is still on the wire.
+const SHOWN_WITHIN_MS = 8000;
 const POLL_INTERVAL_MS = 250;
 
 function run(command, args, env, timeout = 45_000) {
