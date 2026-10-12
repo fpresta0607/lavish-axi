@@ -208,6 +208,9 @@ test(
       assert.ok(shown, "the chrome page came up");
       assert.equal(shown.gate, false, "the curtain lifted");
       assert.ok(shown.now < SHOWN_WITHIN_MS, `the page showed ${shown.now} ms after it opened`);
+      // Each read blocks this process, so the font server takes a request the page made during
+      // the last read only once this process is free again.
+      await sleep(POLL_INTERVAL_MS);
       assert.equal(fontRequested, true, "the page asked for its font");
       assert.equal(fontReleased, false, "the font was still on the wire when the page showed");
       assert.equal(shown.wrapHidden, true, "the layout check waits for the font");
