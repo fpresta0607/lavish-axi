@@ -1764,12 +1764,16 @@ async function findRunningServer(port, { reconcileNetwork = false, isKept = (_he
       return health ? { host, baseUrl, health } : null;
     });
     const loopback = await probes[candidateHosts.indexOf(LOOPBACK_HOST)];
+    let isLoopbackReconciled = false;
     if (loopback && ownsPortLock(loopback.health)) {
-      const health = reconcileNetwork
-        ? ((await probeHealth(loopback.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ??
-          loopback.health)
-        : loopback.health;
-      if (isKept(health)) return { baseUrl: loopback.baseUrl, health, duplicates: [], foreign: null };
+      if (reconcileNetwork) {
+        loopback.health =
+          (await probeHealth(loopback.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ??
+          loopback.health;
+        isLoopbackReconciled = true;
+      }
+      if (isKept(loopback.health))
+        return { baseUrl: loopback.baseUrl, health: loopback.health, duplicates: [], foreign: null };
     }
     const found = (await Promise.all(probes)).filter((entry) => entry !== null);
     const owned = found.filter((entry) => isOwnedServer(entry, controlHosts));
@@ -1786,7 +1790,7 @@ async function findRunningServer(port, { reconcileNetwork = false, isKept = (_he
         : { baseUrl: serverBaseUrl(clientHost(), port), health: null, duplicates: [], foreign };
     }
     let health = chosen.health;
-    if (reconcileNetwork) {
+    if (reconcileNetwork && (chosen !== loopback || !isLoopbackReconciled)) {
       health =
         (await probeHealth(chosen.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ??
         health;

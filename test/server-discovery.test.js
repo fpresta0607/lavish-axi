@@ -713,6 +713,57 @@ test(
   },
 );
 
+test("replacement reconciles a proven loopback owner only once", { timeout: 60_000 }, async (t) => {
+  for (const { reason, overrides } of [
+    { reason: "upgrade", overrides: { version: "0.0.1" } },
+    { reason: "network change", overrides: { network_stale: true } },
+    { reason: "missing host", overrides: { requested_hosts: [] } },
+  ]) {
+    await t.test(reason, async () => {
+      await withTempDir(async (dir) => {
+        const artifact = await writeArtifact(dir);
+        const port = await freePort();
+        let reconciles = 0;
+        const owner = createHttpServer((request, response) => {
+          if (request.url?.startsWith("/health")) {
+            if (request.url.includes("reconcile_network=1")) reconciles += 1;
+            response.writeHead(200, { "content-type": "application/json" }).end(
+              JSON.stringify({
+                app: "lavish-axi",
+                version: VERSION,
+                state_id: stateId(path.join(dir, "state.json")),
+                hosts: ["127.0.0.1"],
+                requested_hosts: ["127.0.0.1"],
+                ...overrides,
+              }),
+            );
+            return;
+          }
+          if (request.method === "POST" && request.url === "/shutdown") {
+            response.writeHead(200, { connection: "close" }).end("{}");
+            owner.close();
+            return;
+          }
+          response.writeHead(404).end();
+        });
+        await new Promise((resolve) => owner.listen({ host: "127.0.0.1", port }, () => resolve(undefined)));
+        try {
+          const output = await withEnv(cliEnv(dir, port, "127.0.0.1"), () =>
+            captureCli(["open", artifact, "--no-open"]),
+          );
+          assert.doesNotMatch(output, /SERVER_ERROR/);
+          assert.equal(reconciles, 1, "replacement repeated the same owner's network reconciliation");
+          assert.deepEqual(await stateSessions(dir), [artifact]);
+        } finally {
+          owner.closeAllConnections();
+          await closeRaw(owner);
+          await shutdownAt("127.0.0.1", port);
+        }
+      });
+    });
+  }
+});
+
 test("another installation's server on loopback is never used or stopped", { timeout: 20_000 }, async () => {
   await withTempDir(async (dir) => {
     const artifact = await writeArtifact(dir);
