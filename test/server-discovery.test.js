@@ -598,6 +598,9 @@ test(
       });
       try {
         await withEnv(cliEnv(dir, port, undefined), () => runCli(["open", artifact, "--no-open"]));
+        const refused = await withEnv(cliEnv(dir, port, otherHost), () => captureCli(["open", artifact, "--no-open"]));
+        assert.match(refused, /SERVER_ERROR/);
+        assert.deepEqual(await stateSessions(otherInstallDir), []);
         assert.equal(await isResolved(otherInstall.done), false, "another installation's server was stopped");
         assert.equal(await isResolved(kept.done), false);
       } finally {
@@ -714,17 +717,24 @@ test(
 );
 
 test("replacement reconciles a proven loopback owner only once", { timeout: 60_000 }, async (t) => {
-  for (const { reason, overrides } of [
+  for (const { reason, overrides, configuredHost = "127.0.0.1" } of [
     { reason: "upgrade", overrides: { version: "0.0.1" } },
     { reason: "network change", overrides: { network_stale: true } },
     { reason: "missing host", overrides: { requested_hosts: [] } },
+    { reason: "pinned address upgrade", overrides: { version: "0.0.1" }, configuredHost: otherLocalIpv4() },
   ]) {
-    await t.test(reason, async () => {
+    await t.test(reason, async (subtest) => {
+      if (!configuredHost) {
+        subtest.skip("host has no non-loopback IPv4 address");
+        return;
+      }
       await withTempDir(async (dir) => {
         const artifact = await writeArtifact(dir);
         const port = await freePort();
         let reconciles = 0;
-        const owner = createHttpServer((request, response) => {
+        const hosts = [...new Set(["127.0.0.1", configuredHost])];
+        const owners = [];
+        const handleRequest = (request, response) => {
           if (request.url?.startsWith("/health")) {
             if (request.url.includes("reconcile_network=1")) reconciles += 1;
             response.writeHead(200, { "content-type": "application/json" }).end(
@@ -732,8 +742,8 @@ test("replacement reconciles a proven loopback owner only once", { timeout: 60_0
                 app: "lavish-axi",
                 version: VERSION,
                 state_id: stateId(path.join(dir, "state.json")),
-                hosts: ["127.0.0.1"],
-                requested_hosts: ["127.0.0.1"],
+                hosts,
+                requested_hosts: hosts,
                 ...overrides,
               }),
             );
@@ -741,22 +751,26 @@ test("replacement reconciles a proven loopback owner only once", { timeout: 60_0
           }
           if (request.method === "POST" && request.url === "/shutdown") {
             response.writeHead(200, { connection: "close" }).end("{}");
-            owner.close();
+            for (const owner of owners) owner.close();
             return;
           }
           response.writeHead(404).end();
-        });
-        await new Promise((resolve) => owner.listen({ host: "127.0.0.1", port }, () => resolve(undefined)));
+        };
+        for (const host of hosts) {
+          const owner = createHttpServer(handleRequest);
+          owners.push(owner);
+          await new Promise((resolve) => owner.listen({ host, port }, () => resolve(undefined)));
+        }
         try {
-          const output = await withEnv(cliEnv(dir, port, "127.0.0.1"), () =>
+          const output = await withEnv(cliEnv(dir, port, configuredHost), () =>
             captureCli(["open", artifact, "--no-open"]),
           );
           assert.doesNotMatch(output, /SERVER_ERROR/);
           assert.equal(reconciles, 1, "replacement repeated the same owner's network reconciliation");
           assert.deepEqual(await stateSessions(dir), [artifact]);
         } finally {
-          owner.closeAllConnections();
-          await closeRaw(owner);
+          for (const owner of owners) owner.closeAllConnections();
+          await Promise.all(owners.map(closeRaw));
           await shutdownAt("127.0.0.1", port);
         }
       });

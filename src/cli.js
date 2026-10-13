@@ -1782,7 +1782,8 @@ async function findRunningServer(port, { reconcileNetwork = false, isKept = (_he
         (entry) =>
           controlHosts.has(entry.host) && entry.health.app === "lavish-axi" && !isOwnedServer(entry, controlHosts),
       ) ?? null;
-    const chosen = owned[0];
+    // A reconciled port-lock owner also serves the configured host, so keep its one health result.
+    const chosen = isLoopbackReconciled ? loopback : owned[0];
     if (!chosen) {
       const other = found.find((entry) => controlHosts.has(entry.host));
       return other
@@ -1790,7 +1791,7 @@ async function findRunningServer(port, { reconcileNetwork = false, isKept = (_he
         : { baseUrl: serverBaseUrl(clientHost(), port), health: null, duplicates: [], foreign };
     }
     let health = chosen.health;
-    if (reconcileNetwork && (chosen !== loopback || !isLoopbackReconciled)) {
+    if (reconcileNetwork && !isLoopbackReconciled) {
       health =
         (await probeHealth(chosen.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ??
         health;
