@@ -1,3 +1,4 @@
+import { setMaxListeners } from "node:events";
 import {
   closeSync,
   createReadStream,
@@ -1652,7 +1653,7 @@ async function serverCommand(args) {
 async function visibleSessions() {
   const store = new SessionStore(stateFile());
   const sessions = (await store.listSessions()).filter((session) => session.status !== "ended");
-  const { health } = await findRunningServer(defaultPort());
+  const { health } = await findRunningServer(defaultPort(), { isKept: () => true });
   const listeners = new Map(
     Array.isArray(health?.listeners)
       ? health.listeners
@@ -1740,35 +1741,73 @@ function otherInstallationError(port, foreign) {
 // is probed in parallel and each probe is bounded, so a hanging or foreign address cannot mask
 // loopback, and a response whose app is lavish-axi wins over a foreign /health. When nothing
 // answers, the primary URL is still returned so callers have something to spawn against and report.
-async function findRunningServer(port, { reconcileNetwork = false } = {}) {
+//
+// A kept server proven to own the loopback port lock can return before slow adapter probes finish.
+// Replacement and stop still need the full sweep to retire duplicates and inherit their addresses.
+/**
+ * @param {number} port
+ * @param {{ reconcileNetwork?: boolean, isKept?: (health: object) => boolean }} [options]
+ */
+async function findRunningServer(port, { reconcileNetwork = false, isKept = (_health) => false } = {}) {
   const controlHosts = new Set([clientHost(), LOOPBACK_HOST]);
-  const probed = await Promise.all(
-    serverCandidateHosts().map(async (host) => {
+  const candidateHosts = serverCandidateHosts();
+  const sweep = new AbortController();
+  setMaxListeners(candidateHosts.length, sweep.signal);
+  try {
+    const probes = candidateHosts.map(async (host) => {
       const baseUrl = serverBaseUrl(host, port);
-      const health = await probeHealth(baseUrl, { reconcileNetwork: false, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+      const health = await probeHealth(baseUrl, {
+        reconcileNetwork: false,
+        timeoutMs: HEALTH_PROBE_TIMEOUT_MS,
+        signal: sweep.signal,
+      });
       return health ? { host, baseUrl, health } : null;
-    }),
+    });
+    const loopback = await probes[candidateHosts.indexOf(LOOPBACK_HOST)];
+    if (loopback && ownsPortLock(loopback.health)) {
+      const health = reconcileNetwork
+        ? ((await probeHealth(loopback.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ??
+          loopback.health)
+        : loopback.health;
+      if (isKept(health)) return { baseUrl: loopback.baseUrl, health, duplicates: [], foreign: null };
+    }
+    const found = (await Promise.all(probes)).filter((entry) => entry !== null);
+    const owned = found.filter((entry) => isOwnedServer(entry, controlHosts));
+    const foreign =
+      found.find(
+        (entry) =>
+          controlHosts.has(entry.host) && entry.health.app === "lavish-axi" && !isOwnedServer(entry, controlHosts),
+      ) ?? null;
+    const chosen = owned[0];
+    if (!chosen) {
+      const other = found.find((entry) => controlHosts.has(entry.host));
+      return other
+        ? { baseUrl: other.baseUrl, health: other.health, duplicates: [], foreign }
+        : { baseUrl: serverBaseUrl(clientHost(), port), health: null, duplicates: [], foreign };
+    }
+    let health = chosen.health;
+    if (reconcileNetwork) {
+      health =
+        (await probeHealth(chosen.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ??
+        health;
+    }
+    return { baseUrl: chosen.baseUrl, health, duplicates: ownedDuplicates(owned, chosen), foreign };
+  } finally {
+    sweep.abort();
+  }
+}
+
+// Loopback is the port lock: every server that reports a state_id binds it first and refuses to
+// start while another Lavish server holds it, so this installation's server there is the only one
+// of ours on the port. It must also hold this CLI's own host, where another server could otherwise
+// answer first.
+function ownsPortLock(health) {
+  const host = clientHost();
+  return (
+    health.app === "lavish-axi" &&
+    health.state_id === stateId() &&
+    (host === LOOPBACK_HOST || (Array.isArray(health.hosts) && health.hosts.includes(host)))
   );
-  const found = probed.filter((entry) => entry !== null);
-  const owned = found.filter((entry) => isOwnedServer(entry, controlHosts));
-  const foreign =
-    found.find(
-      (entry) =>
-        controlHosts.has(entry.host) && entry.health.app === "lavish-axi" && !isOwnedServer(entry, controlHosts),
-    ) ?? null;
-  const chosen = owned[0];
-  if (!chosen) {
-    const other = found.find((entry) => controlHosts.has(entry.host));
-    return other
-      ? { baseUrl: other.baseUrl, health: other.health, duplicates: [], foreign }
-      : { baseUrl: serverBaseUrl(clientHost(), port), health: null, duplicates: [], foreign };
-  }
-  let health = chosen.health;
-  if (reconcileNetwork) {
-    health =
-      (await probeHealth(chosen.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ?? health;
-  }
-  return { baseUrl: chosen.baseUrl, health, duplicates: ownedDuplicates(owned, chosen), foreign };
 }
 
 // Other Lavish daemons of this installation on the same port. An address the chosen server itself
@@ -1859,8 +1898,8 @@ function hostsToServe(requiredHosts, duplicates) {
   );
 }
 
-async function probeHealth(baseUrl, { reconcileNetwork, timeoutMs }) {
-  const health = await fetchHealth(baseUrl, { reconcileNetwork, timeoutMs });
+async function probeHealth(baseUrl, { reconcileNetwork, timeoutMs, signal = undefined }) {
+  const health = await fetchHealth(baseUrl, { reconcileNetwork, timeoutMs, signal });
   return health && typeof health === "object" ? health : null;
 }
 
@@ -1877,7 +1916,18 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
   }
   const port = defaultPort();
   const requiredHosts = await requiredServerHosts();
-  const { baseUrl, health: existing, duplicates, foreign } = await findRunningServer(port, { reconcileNetwork: true });
+  // The adoption check below, for a server discovery proved has no same-port duplicate.
+  const isKept = (health, force = false) =>
+    !shouldRestartServer(VERSION, health, force) && missingServerHosts(health, requiredHosts).length === 0;
+  const {
+    baseUrl,
+    health: existing,
+    duplicates,
+    foreign,
+  } = await findRunningServer(port, {
+    reconcileNetwork: true,
+    isKept: (health) => isKept(health, forceRestart),
+  });
   if (foreign) throw otherInstallationError(port, foreign);
   const missingHosts =
     existing?.app === "lavish-axi" ? missingServerHosts(existing, hostsToServe(requiredHosts, duplicates)) : [];
@@ -1924,7 +1974,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       health,
       duplicates: liveDuplicates,
       foreign: liveForeign,
-    } = await findRunningServer(port, { reconcileNetwork: true });
+    } = await findRunningServer(port, { reconcileNetwork: true, isKept });
     if (liveForeign) throw otherInstallationError(port, liveForeign);
     const liveMissing =
       health?.app === "lavish-axi" ? missingServerHosts(health, hostsToServe(requiredHosts, liveDuplicates)) : [];
@@ -2029,13 +2079,16 @@ async function canControlServerOnPort(baseUrl, healthBody, processMatchesLavish)
 
 /**
  * @param {string} baseUrl
- * @param {{ reconcileNetwork?: boolean, timeoutMs?: number }} [options]
+ * @param {{ reconcileNetwork?: boolean, timeoutMs?: number, signal?: AbortSignal }} [options]
  */
 // Plain node:http with the socket destroyed on every exit path, not fetch: an aborted fetch leaves
 // its TCP connect running, and discovery dials every local address - including a Tailscale IPv6
 // address that silently drops connections to itself - so each CLI invocation lingered for the OS
 // connect timeout (~10s) after printing its result.
-function fetchHealth(baseUrl, { reconcileNetwork = false, timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS } = {}) {
+function fetchHealth(
+  baseUrl,
+  { reconcileNetwork = false, timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS, signal = undefined } = {},
+) {
   return new Promise((resolve) => {
     let settled = false;
     /** @type {import("node:http").ClientRequest | null} */
@@ -2044,11 +2097,13 @@ function fetchHealth(baseUrl, { reconcileNetwork = false, timeoutMs = DEFAULT_HE
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       request?.destroy();
       resolve(value);
     };
     const abort = () => finish(null);
     const timer = setTimeout(abort, timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
     try {
       const url = new URL(`${baseUrl}/health${reconcileNetwork ? "?reconcile_network=1" : ""}`);
       request = httpGet(url, { agent: false }, (response) => {
