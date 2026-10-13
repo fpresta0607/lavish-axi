@@ -52,9 +52,11 @@ class FixtureElement extends EventTarget {
   }
 
   matches(selector) {
+    if (selector.includes(",")) return selector.split(",").some((part) => this.matches(part.trim()));
     if (selector === ":focus-visible") return this.isFocusVisible;
     if (selector === "[data-tip]") return this.attributes.has("data-tip");
     if (selector === "dialog[open]") return this.tagName === "dialog" && this.attributes.has("open");
+    if (selector === '[aria-modal="true"]') return this.getAttribute("aria-modal") === "true";
     return false;
   }
 
@@ -262,6 +264,22 @@ test("board tips read live text and remove and restore empty tips", (t) => {
   page.flushFrames();
 });
 
+test("board tips stay out of an expanded control and return when it closes", (t) => {
+  const page = fixture();
+  t.after(page.stop);
+  const anchor = page.anchor("More");
+  page.emit("pointerover", anchor);
+
+  anchor.setAttribute("aria-expanded", "true");
+  page.change(anchor);
+
+  assert.equal(page.tip(), null);
+  anchor.setAttribute("aria-expanded", "false");
+  page.change(anchor);
+  assert.equal(page.tip()?.textContent, "More");
+  page.flushFrames();
+});
+
 for (const isShadow of [false, true]) {
   test(`board tips stay in their ${isShadow ? "shadow" : "document"} root and active dialog`, (t) => {
     const page = fixture({ isShadow });
@@ -277,6 +295,24 @@ for (const isShadow of [false, true]) {
     page.change(dialog);
 
     assert.equal(page.tip()?.parentNode, dialog);
+    page.flushFrames();
+  });
+}
+
+for (const isShadow of [false, true]) {
+  test(`board tips stay above an ARIA modal in a ${isShadow ? "shadow" : "document"} root`, (t) => {
+    const page = fixture({ isShadow });
+    t.after(page.stop);
+    const modal = new FixtureElement("div");
+    modal.setAttribute("role", "dialog");
+    modal.setAttribute("aria-modal", "true");
+    (isShadow ? page.root : page.body).append(modal);
+    const anchor = page.anchor();
+    modal.append(anchor);
+
+    page.emit("pointerover", anchor);
+
+    assert.equal(page.tip()?.parentNode, modal);
     page.flushFrames();
   });
 }

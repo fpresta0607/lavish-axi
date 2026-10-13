@@ -63,7 +63,7 @@ export function watchBoardTips(root = document) {
     cancelAnimationFrame(frame);
     frame = 0;
     if (anchor && (!anchor.isConnected || !root.contains(anchor))) return point(null);
-    const text = anchor?.getAttribute("data-tip");
+    const text = anchor?.getAttribute("aria-expanded") === "true" ? null : anchor?.getAttribute("data-tip");
     if (!anchor || !text) {
       sizes.disconnect();
       tooltip?.remove();
@@ -76,7 +76,7 @@ export function watchBoardTips(root = document) {
       tooltip.setAttribute("role", "tooltip");
       sizes.observe(tooltip);
     }
-    const container = anchor.closest("dialog[open]") ?? host;
+    const container = anchor.closest('dialog[open], [aria-modal="true"]') ?? host;
     if (tooltip.parentNode !== container) container.append(tooltip);
     if (tooltip.textContent !== text) tooltip.textContent = text;
     const box = place(tooltip, anchor);
