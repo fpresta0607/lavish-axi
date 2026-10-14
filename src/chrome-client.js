@@ -173,7 +173,6 @@ const endButton = /** @type {HTMLButtonElement} */ (document.getElementById("end
 const copyPathButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyPath"));
 const copyHint = /** @type {HTMLSpanElement} */ (document.getElementById("copyHint"));
 const copyHintText = /** @type {HTMLSpanElement} */ (document.getElementById("copyHintText"));
-const presenceBanner = /** @type {HTMLDivElement} */ (document.getElementById("presenceBanner"));
 const handoffBanner = /** @type {HTMLDivElement} */ (document.getElementById("handoffBanner"));
 const handoffTakeoverButton = /** @type {HTMLButtonElement} */ (document.getElementById("handoffTakeover"));
 const outdatedBanner = /** @type {HTMLDivElement} */ (document.getElementById("outdatedBanner"));
@@ -1101,7 +1100,6 @@ function setAgentPresence(state) {
   agentPresence = state === "listening" || state === "external" || state === "working" ? state : "waiting";
   updateSendState();
   renderSheetSummary();
-  if (presenceBanner) presenceBanner.hidden = ended || agentPresence !== "waiting";
 
   // A supervisor-owned process-only listener is busy on the agent's behalf. It must not make the
   // composer look like an idle captain turn while the owning agent is offline.
@@ -1314,7 +1312,8 @@ function applySheetState() {
 }
 
 // What the closed dock says. One line, most actionable state first: work the user has queued,
-// then a reply they have not seen, then whether the agent is there to receive a send.
+// then a reply they have not seen, then what the agent is doing. No poll yet says nothing: a send
+// waits for the agent's next poll, so it is not news.
 function sheetSummary() {
   if (ended) return { text: "Session ended", accent: false, unread: false };
   if (queued.length > 0) {
@@ -1324,7 +1323,7 @@ function sheetSummary() {
   if (agentPresence === "working") return { text: "Agent is working…", accent: false, unread: false };
   if (agentPresence === "external") return { text: "External listener active", accent: false, unread: false };
   if (agentPresence === "listening") return { text: "Agent listening", accent: false, unread: false };
-  return { text: "Agent not listening", accent: false, unread: false };
+  return { text: "", accent: false, unread: false };
 }
 
 function renderSheetSummary() {
@@ -3434,7 +3433,6 @@ function markSessionEnded() {
   chatInput.disabled = true;
   updateSendState();
   applySheetState();
-  if (presenceBanner) presenceBanner.hidden = true;
   if (handoffBanner) handoffBanner.hidden = true;
   if (outdatedBanner) outdatedBanner.hidden = true;
   layoutGateManuallyBypassed = true;
