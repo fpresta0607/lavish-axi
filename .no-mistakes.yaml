@@ -1,0 +1,6 @@
+# Commands the no-mistakes gate runs in its worktree of tracked files only.
+# The worktree has no node_modules, so prepare installs them from the lockfile
+# before test runs the full project check.
+commands:
+  prepare: "pnpm install --frozen-lockfile"
+  test: "pnpm check"
