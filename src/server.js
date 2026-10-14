@@ -955,7 +955,7 @@ export async function serve({
     let requestClosed = Boolean(req.aborted || (req.method !== "POST" && req.destroyed));
     let cleanupPoll = null;
     let claimedHolder = null;
-    // A poll whose answer ends the review is the last one: no next round is coming to bridge.
+    // Only a round that ends empty is bridged: an answer hands off to "working" or ends the review.
     let releaseGraceMs = pollReleaseGraceMs;
     const onRequestClose = () => {
       // A POST request emits `close` when its JSON body stream ends, before the long-poll
@@ -1050,7 +1050,7 @@ export async function serve({
           return;
         }
         finishFeedbackDelivery(key, immediate);
-        if (endsReview(immediate)) releaseGraceMs = 0;
+        releaseGraceMs = 0;
         releasePollListener(holder, activePolls, deliveredFeedback, lingeringPolls, events, releaseGraceMs);
         if (immediate.session_ended) clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events);
         detachRequestClose();
@@ -1122,7 +1122,7 @@ export async function serve({
           // is only the non-terminal replacement for a poll that would otherwise keep waiting.
           const responseResult = forcedResult && result.status === "waiting" ? forcedResult : result;
           finalSessionEnded = responseResult?.session_ended === true;
-          if (endsReview(responseResult)) releaseGraceMs = 0;
+          if (responseResult.status !== "waiting") releaseGraceMs = 0;
           if (holder.replaced) {
             if (responseResult.status !== "waiting") await restoreClosedFeedback(key, responseResult);
             if (!requestClosed && !res.writableEnded) {
@@ -2947,10 +2947,6 @@ function releasePollListener(holder, activePolls, deliveredFeedback, lingeringPo
   }
   const nextPresence = computePresence(holder.key, activePolls, deliveredFeedback, lingeringPolls);
   if (nextPresence !== previousPresence) events.emit("agent-presence", holder.key, nextPresence);
-}
-
-function endsReview(result) {
-  return result?.session_ended === true || result?.status === "ended";
 }
 
 function clearLingeringPoll(key, lingeringPolls) {

@@ -6048,7 +6048,7 @@ test("a disconnect during immediate feedback take requeues the batch without wor
   const artifact = path.join(dir, "artifact.html");
   const stateFile = path.join(dir, "state.json");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ pollReleaseGraceMs: 20, port: 0, stateFile, version: "9.9.9-test" });
+  const server = await serve({ pollReleaseGraceMs: 0, port: 0, stateFile, version: "9.9.9-test" });
   const originalTakeFeedback = SessionStore.prototype.takeFeedback;
   try {
     const base = `http://127.0.0.1:${server.port}`;
