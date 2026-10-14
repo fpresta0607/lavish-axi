@@ -89,7 +89,7 @@ test(
       let shot = snapshot();
       while (!isReady(shot)) {
         if (Date.now() > deadline) assert.fail(`${description} within ${seconds}s:\n${shot}`);
-        await wait(300);
+        await wait(2000);
         shot = snapshot();
       }
       return shot;
