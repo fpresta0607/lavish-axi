@@ -2471,8 +2471,9 @@ export function createArtifactSdk(
       return;
     }
     if (!activeChip || activeChip.noteId !== String(noteId || "")) return;
-    // The note was taken out of the queue in the conversation panel: its chip goes with it.
-    if (status === "removed") {
+    // The note was taken out of the queue in the conversation panel, or it got through: either
+    // way its chip is done. A note that did not get through keeps its chip and its words.
+    if (status === "removed" || status === "delivered") {
       closeCard();
       return;
     }
