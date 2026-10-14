@@ -6839,7 +6839,7 @@ test("annotation card only queues on Ctrl+Enter or Cmd+Enter, for notes that go 
 
   assert.match(js, /const queueOnly = event\.ctrlKey \|\| event\.metaKey/);
   assert.match(js, /class="muted lavish-hint"/);
-  assert.match(js, /\.comment-overlay footer \.muted \{ flex: 1; font-size: \.9375rem; \}/);
+  assert.match(js, /\.lavish-hint\{flex:1;font-size:\.9375rem\}/);
 });
 
 test("chrome client chat input sends on Enter and inserts newline on Shift+Enter", async () => {
