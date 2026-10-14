@@ -221,7 +221,7 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
   A shadow root cannot declare a font face, so the SDK puts the three in the page itself, and only once Scrawl draws something there.
   The SDK holds no colour of the old palette; a test fails on one.
 - **A note's delivery is reported to the page, never the reverse.**
-  The annotation card gives a note an id (`_lavishNoteId`) so its chip can follow that note; the chrome, which owns the queue, posts `lavish:noteStatus` (`queued`, `sending`, `delivered`, `removed`) for it and strips the id before anything goes to the server.
+  The annotation card gives a note an id (`_lavishNoteId`) so its chip can follow that note; the chrome, which owns the queue, posts `lavish:noteStatus` (`queued`, `sending`, `delivered`, `removed`) for it and strips the id before anything goes to the server. A chip closes on `delivered` or `removed` and on nothing else, so a note that did not get through keeps its chip and its words.
   The page is never asked what happened to a note, and an id it supplies is bounded and treated as opaque.
 - **Declared choices send the option exactly.**
   A page's `<script type="application/json" data-lavish-choices>` is parsed by `src/page-choices.js` and drawn by the SDK, where the declaration sits, as the board's question card.

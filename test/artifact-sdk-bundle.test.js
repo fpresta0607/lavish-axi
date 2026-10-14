@@ -80,8 +80,27 @@ function createElement(tag) {
       if (!queried.has(selector)) queried.set(selector, createElement(selector.replace(/^[.#]/, "")));
       return queried.get(selector);
     },
-    querySelectorAll() {
-      return [];
+    // Only class selectors are understood, which is what removing a card or a chip needs.
+    querySelectorAll(selectorList) {
+      const classes = String(selectorList)
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => /^\.[\w-]+$/.test(part))
+        .map((part) => part.slice(1));
+      const found = [];
+      const walk = (node) => {
+        for (const child of node.children) {
+          if (
+            String(child.className)
+              .split(" ")
+              .some((name) => classes.includes(name))
+          )
+            found.push(child);
+          walk(child);
+        }
+      };
+      if (classes.length) walk(element);
+      return found;
     },
     getBoundingClientRect() {
       return { left: 10, top: 10, right: 110, bottom: 40, width: 100, height: 30 };
@@ -644,9 +663,39 @@ test("a sent note shrinks to a chip whose check marks follow its delivery", () =
   assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Sending");
 
   sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
-  assert.match(chip.innerHTML, /<span class="delivery succeeded" aria-hidden="true">/);
-  assert.match(chip.innerHTML, /M2 12\.5 6\.5 17 16 7\.5M11\.5 16l1 1L22 7\.5/);
-  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Delivered");
+  assert.equal(sdk.shadowChildren("lavish-annotation-chip").length, 0, "a delivered note's chip closes");
+  assert.equal(paragraph.style.outline, "", "the element is released with it");
+});
+
+test("a delivered note closes only its own chip, not the card the reader moved on to", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  const heading = appendTo(sdk.body, cell("h2", "A heading"));
+
+  sdk.click(paragraph);
+  const noteId = sdk.queue("Reword this").prompt._lavishNoteId;
+  sdk.click(heading);
+  sdk.card().querySelector("textarea").value = "still typing";
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
+
+  assert.equal(sdk.card().querySelector("textarea").value, "still typing");
+  assert.notEqual(heading.style.outline, "");
+});
+
+test("a note added to the queue keeps its chip until it is delivered, then closes it", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  sdk.card().querySelector("textarea").value = "One of several";
+  pressEnter(sdk.card().querySelector("textarea"), { ctrlKey: true });
+  const noteId = sdk.posted.findLast((message) => message.type === "lavish:queuePrompt").prompt._lavishNoteId;
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "queued" });
+  assert.equal(sdk.shadowChildren("lavish-annotation-chip").length, 1);
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
+  assert.equal(sdk.shadowChildren("lavish-annotation-chip").length, 0);
 });
 
 test("a note that falls back to the queue after a failed send says so on its chip", () => {
@@ -659,6 +708,8 @@ test("a note that falls back to the queue after a failed send says so on its chi
   sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
   sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "queued" });
 
+  assert.equal(sdk.shadowChildren("lavish-annotation-chip").at(-1), chip, "the chip stays up with the note's words");
+  assert.match(chip.innerHTML, /Reword this/);
   assert.match(chip.innerHTML, /<span class="delivery uncertain" aria-hidden="true">/);
   assert.match(
     chip.innerHTML,
@@ -840,8 +891,8 @@ test("the served SDK bundle drops a late restore once the user has opened a card
   late = appendTo(sdk.body, cell("h1", "Headline"));
   sdk.runTimers();
 
-  assert.equal(sdk.cards().length, cardsAfterCancel, "the cancelled card is not replaced by a restored one");
-  assert.notEqual(sdk.card().querySelector("textarea").value, "needs a shorter headline");
+  assert.equal(cardsAfterCancel, 0, "cancelling takes the card off the page");
+  assert.equal(sdk.cards().length, 0, "the cancelled card is not replaced by a restored one");
   assert.equal(
     sdk.posted.some((message) => message.type === "lavish:reviewDraftUnrestorable"),
     false,

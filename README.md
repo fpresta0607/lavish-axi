@@ -214,8 +214,10 @@ pnpm link
   In this fork the annotation card behaves like the Code Goblins board's diff comment: Enter sends the annotation, Shift+Enter inserts a newline, and Escape cancels.
   Ctrl+Enter (Cmd+Enter on macOS) only adds it to the queue, for several notes that go together with one **Send to Agent**.
   Cancelling, by Escape or the Cancel button, keeps what you typed for that element's next card, so a stray Escape loses nothing; a card holding an image stays open on Escape, because an image has nowhere to be kept.
-  Once sent, the card shrinks in place to a chip that names what the note is about, shows what it says, and carries check marks that follow its delivery: one while it is on its way, two once the conversation carries it.
-  The chip offers a new comment on the same thing and a close button, and a note that falls back to the queue after a failed send says so on its chip.
+  Once sent, the card shrinks in place to a chip that names what the note is about, shows what it says, and carries a check mark while it is on its way.
+  The chip closes by itself, and only itself, once the conversation carries the note.
+  A note that falls back to the queue after a failed send keeps its chip and its words and says so on the chip, and the chip closes once a retry gets the note through.
+  The chip offers a new comment on the same thing and a close button.
   Cmd+I or Ctrl+I toggles between annotate and explore mode from either the browser chrome or the artifact iframe, including while focus is in a textarea or control; the **Annotate** and **Explore** halves of the mode pill in the top bar choose a mode directly.
   Holding Ctrl+Shift+Space while focus is in the browser chrome dictates into the composer through the browser's own speech recognition (Chrome and Edge), with a live level meter while it listens; releasing any of those keys stops.
   What you said lands in the message box at the caret and is sent only when you send it; a browser without speech recognition shows the microphone disabled, and a blocked microphone is explained under the composer.
