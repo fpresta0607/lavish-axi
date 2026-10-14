@@ -73,11 +73,6 @@ body.lavish {
   width: 20px;
   height: 20px;
 }
-/* An open menu speaks for its button, so the button's tip stays out of its way. */
-.more-button[aria-expanded="true"]::after {
-  content: none;
-}
-
 /* Menus and drawers: the board's floating glass panel. */
 .menu {
   position: absolute;
@@ -924,6 +919,9 @@ body.lavish {
   margin: 0;
   font-size: 0.9375rem;
 }
+.presence-banner.agent-offline {
+  color: var(--amber);
+}
 .handoff-banner {
   flex-wrap: wrap;
 }
@@ -987,19 +985,6 @@ body.lavish {
 .composer-tool .icon {
   width: 20px;
   height: 20px;
-}
-/* The box sits at the foot of the window, so its tooltips open above the buttons. */
-.composer-tool[data-tip]::after,
-.chat-voice[data-tip]::after {
-  top: auto;
-  bottom: calc(100% + 8px);
-  transform: translateY(4px);
-}
-.composer-tool[data-tip]:hover::after,
-.composer-tool[data-tip]:focus-visible::after,
-.chat-voice[data-tip]:hover::after,
-.chat-voice[data-tip]:focus-visible::after {
-  transform: none;
 }
 .composer.is-dropping {
   background: var(--glass-bg-hover);
