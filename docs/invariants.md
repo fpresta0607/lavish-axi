@@ -208,7 +208,8 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
   `src/board-components.css` holds rules copied from the board's stylesheet word for word.
   `test/board-tokens.test.js` reads the board's current `frontend/src/styles.css` from the code-goblins checkout beside this repository's main checkout (or `CODE_GOBLINS_DIR`), at `origin/main` as last fetched, and fails while the token file differs or any copied line is no longer in the board.
   The failure mode it closes: a hand-edited value, or a second palette growing beside the first, makes Scrawl drift from the board with nothing to notice it.
-  Never edit either file by hand; `node scripts/sync-board-tokens.js` copies the token block and the fonts again, and a changed copied rule is replaced by the board's current one.
+  `node scripts/sync-board-tokens.js` generates the token block and fonts; it does not generate component rules.
+  Replace changed component rules by copying their current source verbatim, adapting Scrawl's markup and runtime to their contract rather than editing their values.
   Both files are in `.prettierignore`, because a reformatted copy is a different copy.
 - **One stylesheet response.**
   `/chrome.css` is the token block, the copied rules, then `src/chrome.css`, in that order.
@@ -220,6 +221,11 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
   `createSdkJs` hands the SDK `options.board`: the shadow-root stylesheet (the tokens on `:host`, plus the copied rules whose selectors start with a prefix in `BOARD_SDK_RULE_PREFIXES`), the font faces, the accent, and the scrollbar colours.
   A shadow root cannot declare a font face, so the SDK puts the three in the page itself, and only once Scrawl draws something there.
   The SDK holds no colour of the old palette; a test fails on one.
+- **Floating tips share one runtime.**
+  `src/board-tips.js` follows the board's tooltip placement and interaction behavior for both the chrome document and SDK shadow roots.
+  The server serializes its function into both scripts, and each root disposes its watcher on `pagehide`.
+  The `.tip` rules are copied from the board; tooltip text is assigned with `textContent`, follows keyboard focus or the pointer, and stays inside the viewport without clipping to a scrolling control.
+  Failed-send chips use the board's `comment-trouble` rule and retain Scrawl's amber warning emphasis.
 - **A note's delivery is reported to the page, never the reverse.**
   The annotation card gives a note an id (`_lavishNoteId`) so its chip can follow that note; the chrome, which owns the queue, posts `lavish:noteStatus` (`queued`, `sending`, `delivered`, `removed`) for it and strips the id before anything goes to the server. A chip closes on `delivered` or `removed` and on nothing else, so a note that did not get through keeps its chip and its words.
   The page is never asked what happened to a note, and an id it supplies is bounded and treated as opaque.

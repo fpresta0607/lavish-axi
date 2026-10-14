@@ -118,6 +118,7 @@ function createElement(tag) {
     },
     attachShadow() {
       element.shadowRoot = createElement("shadow-root");
+      Object.defineProperty(element.shadowRoot, "ownerDocument", { value: Reflect.get(element, "ownerDocument") });
       return element.shadowRoot;
     },
   };
@@ -202,7 +203,11 @@ function bootSdk({
       baseURI: "http://127.0.0.1/artifact/abc/index.html",
       addEventListener: (type, handler) => documentListeners.push({ type, handler }),
       removeEventListener() {},
-      createElement,
+      createElement(tag) {
+        const element = createElement(tag);
+        Object.defineProperty(element, "ownerDocument", { value: this });
+        return element;
+      },
       getElementById: () => null,
       querySelector: (selector) =>
         selector === "script[data-lavish-revisions]"
@@ -230,6 +235,7 @@ function bootSdk({
     URL: sandbox.URL,
   };
   sandbox.globalThis = sandbox;
+  Object.defineProperty(sandbox.document, "defaultView", { value: sandbox.window });
 
   vm.runInNewContext(createSdkJs("abc", 3, "load-token"), sandbox);
 
@@ -713,7 +719,7 @@ test("a note that falls back to the queue after a failed send says so on its chi
   assert.match(chip.innerHTML, /<span class="delivery uncertain" aria-hidden="true">/);
   assert.match(
     chip.innerHTML,
-    /<p class="warning-text">Not sent\. It is still in the queue: Send to Agent tries again\.<\/p>/,
+    /<p class="comment-trouble lavish-hint-alert">Not sent\. It is still in the queue: Send to Agent tries again\.<\/p>/,
   );
 });
 
