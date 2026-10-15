@@ -1157,15 +1157,15 @@ test("chrome only marks session ended after the end request succeeds", async () 
   assert.match(js, /if \(!response\.ok\) throw new Error\("failed to end session"\);\n {2}markSessionEnded\(\)/);
 });
 
-test("chrome shows a waiting banner when no agent has attached", async () => {
+test("chrome never tells him his agent is not listening", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const js = await chromeClientSource();
   const css = await chromeCssSource();
 
-  assert.match(html, /id="presenceBanner"/);
-  assert.match(html, /Your agent is not listening/);
-  assert.match(js, /presenceBanner\.hidden = ended \|\| agentPresence !== "waiting"/);
-  assert.match(css, /\.presence-banner\{/);
+  for (const source of [html, js, css]) {
+    assert.doesNotMatch(source, /not listening/i);
+    assert.doesNotMatch(source, /presenceBanner|agent-offline/);
+  }
 });
 
 test("chrome keeps queued notes at the tail of the one conversation, above the sticky composer", async () => {
@@ -5672,7 +5672,12 @@ test("event WebSocket agent-presence returns to waiting when a poll times out wi
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5699,11 +5704,98 @@ test("event WebSocket agent-presence returns to waiting when a poll times out wi
   }
 });
 
-test("SSE agent-presence returns to waiting when a poll disconnects without feedback", async () => {
+test("a poll that follows another within the release grace never reports waiting between them", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const pollReleaseGraceMs = 400;
+  const server = await serve({
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    pollReleaseGraceMs,
+  });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+    const presence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await presence.next(), "waiting");
+      const pollOnce = async () => {
+        const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=20`);
+        assert.deepEqual(await poll.json(), { status: "waiting" });
+      };
+
+      // A supervisor polls in rounds, each a new process: the next round starts a moment after
+      // the last one timed out.
+      await pollOnce();
+      assert.equal(await presence.next(), "listening");
+      await pollOnce();
+      const lastRoundEndedAt = Date.now();
+
+      assert.equal(await presence.next(), "waiting");
+      assert.ok(
+        Date.now() - lastRoundEndedAt >= pollReleaseGraceMs - 50,
+        "waiting is reported only once the grace after the last round has passed",
+      );
+    } finally {
+      await presence.close();
+    }
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("feedback sent while no poll is live waits for the next poll", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
   const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+
+    const sent = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ prompts: [{ prompt: "Make the heading bigger", tag: "message" }] }),
+    });
+    assert.equal(sent.status, 200);
+
+    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
+    const feedback = await poll.json();
+    assert.equal(feedback.status, "feedback");
+    assert.deepEqual(
+      feedback.prompts.map((prompt) => prompt.prompt),
+      ["Make the heading bigger"],
+    );
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("SSE agent-presence returns to waiting when a poll disconnects without feedback", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5739,7 +5831,7 @@ test("SSE agent-presence returns to waiting when poll feedback storage fails", a
   const artifact = path.join(dir, "artifact.html");
   const stateFile = path.join(dir, "state.json");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const server = await serve({ pollReleaseGraceMs: 20, port: 0, stateFile, version: "9.9.9-test" });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5789,7 +5881,12 @@ test("a poll dropped before it arms never leaves presence listening", async () =
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5904,7 +6001,12 @@ test("a fresh poll attaching alone retires the previous round's working presence
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5927,17 +6029,13 @@ test("a fresh poll attaching alone retires the previous round's working presence
       assert.equal(await presence.next(), "working");
 
       // The agent came back and attached with no other poll in flight: that starts a new round,
-      // so the poll ending without feedback has to leave presence waiting - not stuck on
-      // "working", which hides the "your agent is not listening" banner while nothing is attached.
+      // so the poll ending without feedback has to leave presence waiting once its release grace
+      // passes - not stuck on "working" while nothing is attached.
       const next = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=1`);
       assert.deepEqual(await next.json(), { status: "waiting" });
 
-      const afterRound = await startPresenceStream(base, key);
-      try {
-        assert.equal(await afterRound.next(), "waiting");
-      } finally {
-        await afterRound.close();
-      }
+      assert.equal(await presence.next(), "listening");
+      assert.equal(await presence.next(), "waiting");
     } finally {
       await presence.close();
     }
@@ -5952,7 +6050,7 @@ test("a disconnect during immediate feedback take requeues the batch without wor
   const artifact = path.join(dir, "artifact.html");
   const stateFile = path.join(dir, "state.json");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const server = await serve({ pollReleaseGraceMs: 0, port: 0, stateFile, version: "9.9.9-test" });
   const originalTakeFeedback = SessionStore.prototype.takeFeedback;
   try {
     const base = `http://127.0.0.1:${server.port}`;
@@ -6044,7 +6142,7 @@ test("a disconnect during event-driven feedback take requeues the batch without 
   const artifact = path.join(dir, "artifact.html");
   const stateFile = path.join(dir, "state.json");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const server = await serve({ pollReleaseGraceMs: 20, port: 0, stateFile, version: "9.9.9-test" });
   const originalTakeFeedback = SessionStore.prototype.takeFeedback;
   const originalQueuePrompts = SessionStore.prototype.queuePrompts;
   try {
@@ -6242,7 +6340,12 @@ test("SSE agent-presence resets to waiting after ending and reopening a session"
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -6498,7 +6601,12 @@ test("SSE agent-presence returns to waiting after an agent reply", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
