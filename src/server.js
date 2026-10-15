@@ -42,6 +42,7 @@ import * as boardTips from "./board-tips.js";
 import * as mermaidNode from "./mermaid-node.js";
 import * as pageChoices from "./page-choices.js";
 import * as tableCellHelpers from "./table-cell.js";
+import * as pageColors from "./page-colors.js";
 import { extractMermaidSources, mermaidSourceHash } from "./mermaid-source.js";
 import {
   isValidDiagramIndex,
@@ -68,6 +69,7 @@ import {
   boardTokenValue,
 } from "./board-tokens.js";
 import { brandName, brandTitleSuffix, DEFAULT_BRAND } from "./brand.js";
+import { loadProjectTheme, projectThemeCss, SIQ_THEME, themeScheme } from "./project-theme.js";
 import {
   bindHost,
   extraAllowedHosts,
@@ -99,6 +101,8 @@ import {
 
 const chromeClientUrl = new URL("./chrome-client.js", import.meta.url);
 const chromeCssUrl = new URL("./chrome.css", import.meta.url);
+// How the frame wears a project's saved theme (src/project-theme.js), after Scrawl's own rules.
+const projectThemeCssUrl = new URL("./project-theme.css", import.meta.url);
 // The Code Goblins board's look, by value: its token block, the rules copied from it, its fonts
 // and its goblin. test/board-tokens.test.js fails when the copies differ from the board's.
 const boardTokensUrl = new URL("./board-tokens.css", import.meta.url);
@@ -1537,6 +1541,7 @@ export async function serve({
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
       const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
       const { faviconTag, title } = extractArtifactHead(artifactHtml);
+      const projectTheme = await loadProjectTheme(path.dirname(stateFile), session.file);
       // Nothing legitimately frames the review chrome - it is the top-level
       // page, and shares/exports ship standalone HTML rather than embedding it.
       // Refusing to be framed denies an attacker page both a window handle to
@@ -1561,6 +1566,7 @@ export async function serve({
           chromeLoadToken: chromeLoad.chrome_load_token,
           attachmentMaxBytes: attachmentConfig.maxBytes,
           attachmentMaxCount: attachmentConfig.maxPerPrompt,
+          projectTheme,
         }),
       );
     } catch (error) {
@@ -1753,6 +1759,7 @@ export async function serve({
         createSdkJs(String(req.query.key || ""), verified.artifact_revision, verified.artifact_load_token, {
           maxAttachmentCount: attachmentConfig.maxPerPrompt,
           maxAttachmentBytes: attachmentConfig.maxBytes,
+          projectTheme: await loadProjectTheme(path.dirname(stateFile), verified.session.file),
         }),
       );
     } catch (error) {
@@ -2606,10 +2613,11 @@ function sendText(req, res, type, body) {
 }
 
 // The review page's stylesheet is one response: the board's token block, the rules copied from
-// the board, then Scrawl's own rules, which lay those out for a review page.
+// the board, then Scrawl's own rules, which lay those out for a review page, and last the layer
+// that dresses them in a project's saved theme.
 async function readChromeCss() {
   const parts = await Promise.all(
-    [boardTokensUrl, boardComponentsUrl, chromeCssUrl].map((url) => readFile(url, "utf8")),
+    [boardTokensUrl, boardComponentsUrl, chromeCssUrl, projectThemeCssUrl].map((url) => readFile(url, "utf8")),
   );
   return parts.join("\n");
 }
@@ -3174,8 +3182,10 @@ export function createChromeHtml(
     attachmentMaxBytes = 0,
     attachmentMaxCount = 0,
     attachmentAcceptedMime = ACCEPTED_IMAGE_MIME,
+    projectTheme = null,
   } = {},
 ) {
+  const theme = projectTheme || SIQ_THEME;
   const acceptedMime = attachmentAcceptedMime.map(String);
   const product = brandTitleSuffix(brand);
   const safeProduct = escapeHtml(product);
@@ -3215,11 +3225,15 @@ export function createChromeHtml(
   const layoutGateHidden = layoutGateEnabled ? "" : " hidden";
   const modeHotkeyUpper = MODE_TOGGLE_HOTKEY_KEY.toUpperCase();
   const modeToggleHint = `Toggle annotate/explore mode (⌘${modeHotkeyUpper} / Ctrl+${modeHotkeyUpper})`;
+  // The browser paints what the head says before the stylesheet arrives, so the page colour and
+  // scheme come first: no white frame while the stylesheet loads.
   return `<!doctype html>
-<html>
+<html${projectTheme ? ` data-project-theme="${themeScheme(projectTheme)}"` : ""}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="${themeScheme(theme)}">
+<style>html{background:${theme.colors.page}}${projectTheme ? projectThemeCss(projectTheme) : ""}</style>
 <title>${escapeHtml(title)}</title>
 ${faviconTag}
 <link rel="stylesheet" href="/chrome.css">
@@ -3278,19 +3292,21 @@ function serializeModuleHelpers(module) {
  * @param {string} key
  * @param {number} [artifactRevision]
  * @param {string} [artifactLoadToken]
- * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[] }} [options]
+ * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[], projectTheme?: ReturnType<typeof import("./project-theme.js").validateProjectTheme> | null }} [options]
  */
 export function createSdkJs(
   key,
   artifactRevision = 0,
   artifactLoadToken = "",
-  { maxAttachmentCount, maxAttachmentBytes, acceptedImageMime = ACCEPTED_IMAGE_MIME } = {},
+  { maxAttachmentCount, maxAttachmentBytes, acceptedImageMime = ACCEPTED_IMAGE_MIME, projectTheme = null } = {},
 ) {
+  const theme = projectTheme || SIQ_THEME;
   const mermaidHelperSource = serializeModuleHelpers(mermaidNode);
   const tableHelperSource = serializeModuleHelpers(tableCellHelpers);
   const revisionHelperSource = serializeModuleHelpers(artifactRevisions);
   const choiceHelperSource = serializeModuleHelpers(pageChoices);
   const tipHelperSource = serializeModuleHelpers(boardTips);
+  const pageColorHelperSource = serializeModuleHelpers(pageColors);
   const revisionNumber = Number(artifactRevision);
   const revision = Number.isFinite(revisionNumber) && revisionNumber >= 0 ? Math.trunc(revisionNumber) : 0;
   const loadToken = String(artifactLoadToken || "").slice(0, 200);
@@ -3303,6 +3319,8 @@ export function createSdkJs(
     maxAttachmentBytes: Number.isFinite(maxAttachmentBytes) ? maxAttachmentBytes : undefined,
     acceptedImageMime: acceptedImageMime.map(String),
     board: SDK_BOARD,
+    // What a page that sets no colours of its own is shown on: the frame's own page colours.
+    pageDefaults: { background: theme.colors.page, color: theme.colors.text, scheme: themeScheme(theme) },
   };
   return `(() => {
 const key=${JSON.stringify(key)};
@@ -3331,6 +3349,7 @@ ${tableHelperSource.declarations}
 ${revisionHelperSource.declarations}
 ${choiceHelperSource.declarations}
 ${tipHelperSource.declarations}
+${pageColorHelperSource.declarations}
 (${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken, key, ${JSON.stringify(sdkOptions)});
 })();`;
 }

@@ -2,6 +2,7 @@
 
 import { readArtifactRevisions } from "./artifact-revisions.js";
 import { watchBoardTips } from "./board-tips.js";
+import { pageDefaultsCss, pageSetsItsOwnColors } from "./page-colors.js";
 import * as mermaidHelpers from "./mermaid-node.js";
 import { choiceAnswer, orderedChoices, parsePageChoices } from "./page-choices.js";
 import { tableCellTarget } from "./table-cell.js";
@@ -473,7 +474,7 @@ export function deriveAttachmentNoticeState(state = {}) {
  * @param {number} [artifactRevision]
  * @param {string} [artifactLoadToken]
  * @param {string} [sessionKey]
- * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[], board?: { shadowCss: string, fontFaces: string, accent: string, scrollbarThumb: string, scrollbarTrack: string } }} [options]
+ * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[], board?: { shadowCss: string, fontFaces: string, accent: string, scrollbarThumb: string, scrollbarTrack: string }, pageDefaults?: { background: string, color: string, scheme: string } }} [options]
  */
 export function createArtifactSdk(
   deriveQueueKey,
@@ -492,6 +493,16 @@ export function createArtifactSdk(
   // and copied rules (src/board-tokens.css, src/board-components.css) and hands it over here.
   const board = options.board;
   if (!board) throw new Error("the SDK needs the board's look: pass options.board");
+  // A page that sets no colours of its own is shown on the frame's page colours rather than the
+  // browser's white sheet, read before the SDK adds anything to the page and before the chrome
+  // lifts its curtain. The page's bytes are untouched and anything it says still wins.
+  if (options.pageDefaults && !pageSetsItsOwnColors(document, (element) => getComputedStyle(element))) {
+    const defaults = document.createElement("style");
+    defaults.id = "lavish-page-defaults";
+    defaults.textContent = pageDefaultsCss(options.pageDefaults);
+    const head = document.head || document.documentElement;
+    head.insertBefore(defaults, head.firstChild);
+  }
   // The board's line icons (code-goblins frontend/src/Icon.tsx), drawn by its `.icon` rule.
   const boardIcon = (path) =>
     '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';

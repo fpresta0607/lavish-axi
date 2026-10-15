@@ -47,6 +47,7 @@ await chmod("dist/server.mjs", 0o755);
 
 await copyFile("src/chrome-client.js", "dist/chrome-client.js");
 await copyFile("src/chrome.css", "dist/chrome.css");
+await copyFile("src/project-theme.css", "dist/project-theme.css");
 // The Code Goblins board's look, served beside the review page's own stylesheet.
 await copyFile("src/board-tokens.css", "dist/board-tokens.css");
 await copyFile("src/board-components.css", "dist/board-components.css");
