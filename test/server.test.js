@@ -500,7 +500,9 @@ test("server serves chrome styles from a dedicated source file", async () => {
 
   assert.match(source, /chrome\.css/);
   assert.match(html, /<link rel="stylesheet" href="\/chrome\.css">/);
-  assert.doesNotMatch(html, /<style>/);
+  // The one inline rule is the first-paint page colour, so nothing paints white before the
+  // stylesheet arrives; every other style comes from the stylesheet.
+  assert.deepEqual(html.match(/<style>[^<]*<\/style>/g), ["<style>html{background:#03050a}</style>"]);
 });
 
 test("export content disposition uses a safe fallback and encoded UTF-8 filename", () => {

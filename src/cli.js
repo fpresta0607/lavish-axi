@@ -59,6 +59,14 @@ import {
   writeTextFileAtomically,
 } from "./plugin.js";
 import { findPlaybook, listPlaybooks, playbookIds, PLAYBOOK_ROUTER_HELP } from "./playbooks.js";
+import {
+  clearProjectTheme,
+  projectRootOf,
+  readProjectTheme,
+  saveProjectTheme,
+  SIQ_THEME,
+  themeScheme,
+} from "./project-theme.js";
 import { analyzeSelfPaint, SELF_PAINT_WARNING } from "./self-paint.js";
 import { resolveDesignAssetPath, serve } from "./server.js";
 import { canonicalFile, canonicalSessionFile, isFileGone, sessionKey, SessionStore } from "./session-store.js";
@@ -66,7 +74,19 @@ import { generateSharePassword } from "./share-password.js";
 import { initDefaultTelemetry } from "./telemetry.js";
 
 const SHARE_VALUE_FLAGS = ["--password", "--token", "--site", "--update-key"];
-const COMMANDS = new Set(["open", "poll", "end", "stop", "server", "playbook", "design", "setup", "export", "share"]);
+const COMMANDS = new Set([
+  "open",
+  "poll",
+  "end",
+  "stop",
+  "server",
+  "playbook",
+  "design",
+  "theme",
+  "setup",
+  "export",
+  "share",
+]);
 // SDK-reserved built-ins (e.g. `update`) must reach runAxiCli untouched; otherwise
 // the bare-arg normalization below would rewrite them into the hidden `open` command.
 const RESERVED = new Set(RESERVED_COMMANDS);
@@ -213,6 +233,7 @@ export async function run(argv) {
         stop: stopCommand,
         playbook: playbookCommand,
         design: designCommand,
+        theme: themeCommand,
         setup: setupCommand,
         server: serverCommand,
         export: exportCommand,
@@ -1273,6 +1294,57 @@ async function playbookCommand(args) {
 
 async function designCommand() {
   return createDesignOutput();
+}
+
+// The theme Scrawl's frame wears for every page of a project (src/project-theme.js). It needs no
+// server: themes are files in the state directory, read when a review page loads.
+async function themeCommand(args) {
+  const target = firstPositionalArg(args, ["--set"]);
+  if (!target) {
+    throw new AxiError("A directory or file in the project is required", "VALIDATION_ERROR", [
+      "Run `lavish-axi theme <project-dir>`",
+    ]);
+  }
+  const project = await projectRootOf(target);
+  if (!project) {
+    throw new AxiError(`${path.resolve(target)} is not inside a git checkout`, "VALIDATION_ERROR", [
+      "Pass a directory or file inside the project's git checkout or one of its worktrees",
+    ]);
+  }
+  const themesDir = path.dirname(stateFile());
+  const themeFile = flagValue(args, "--set");
+  if (themeFile && args.includes("--clear")) {
+    throw new AxiError("Pass --set or --clear, not both", "VALIDATION_ERROR", [
+      "Run `lavish-axi theme <project-dir> --set <file.json>` or `lavish-axi theme <project-dir> --clear`",
+    ]);
+  }
+  if (args.includes("--clear")) {
+    const cleared = await clearProjectTheme(themesDir, project);
+    return { theme: { project, saved: false, cleared, wears: SIQ_THEME.name } };
+  }
+  if (themeFile) {
+    let input;
+    try {
+      input = JSON.parse(await readFile(path.resolve(themeFile), "utf8"));
+    } catch (error) {
+      throw new AxiError(`Could not read ${themeFile} as JSON: ${error.message}`, "VALIDATION_ERROR", [
+        "Write the theme as a JSON file shaped like `lavish-axi design`'s frame_theme example",
+      ]);
+    }
+    let saved;
+    try {
+      saved = await saveProjectTheme(themesDir, project, input);
+    } catch (error) {
+      throw new AxiError(error.message, "VALIDATION_ERROR", ["Fix each listed field, then run the same command again"]);
+    }
+    return {
+      theme: { project, saved: true, name: saved.theme.name, scheme: themeScheme(saved.theme) },
+      next_step: "Review pages of this project wear the theme when they next load.",
+    };
+  }
+  const theme = await readProjectTheme(themesDir, project);
+  if (!theme) return { theme: { project, saved: false, wears: SIQ_THEME.name } };
+  return { theme: { project, saved: true, scheme: themeScheme(theme), ...theme } };
 }
 
 async function setupCommand(args) {
@@ -2535,7 +2607,7 @@ export function getCommandHelp(command, { agent = "generic" } = {}) {
 }
 
 function createTopLevelHelp({ agent = "generic" } = {}) {
-  return `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n  lavish-axi poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]\n  lavish-axi end <html-file>\n  lavish-axi end --gone\n  lavish-axi export <html-file> [--out <path>]\n  lavish-axi share <html-file> [--private | --password <pw>] [--token <t>]\n  lavish-axi share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  lavish-axi share --unpublish --site <site_id> --update-key <key>\n  lavish-axi stop\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi setup hooks\n  lavish-axi setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the Lavish top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
+  return `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n  lavish-axi poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]\n  lavish-axi end <html-file>\n  lavish-axi end --gone\n  lavish-axi export <html-file> [--out <path>]\n  lavish-axi share <html-file> [--private | --password <pw>] [--token <t>]\n  lavish-axi share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  lavish-axi share --unpublish --site <site_id> --update-key <key>\n  lavish-axi stop\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi theme <project-dir> [--set <file.json> | --clear]\n  lavish-axi setup hooks\n  lavish-axi setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the Lavish top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
 }
 
 function createCommandHelp({ agent = "generic" } = {}) {
@@ -2548,6 +2620,7 @@ function createCommandHelp({ agent = "generic" } = {}) {
     stop: `Usage: lavish-axi stop [--port <port>]\n\nShut down the background Lavish Editor server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected, except while a Tailscale https proxy points at it.\n`,
     playbook: `Usage: lavish-axi playbook [playbook_id]\n\nList focused artifact guidance playbooks, or show one playbook by ID. Known IDs: diagram, table, comparison, plan, code, input, explanation, slides.\n\n${PLAYBOOK_ROUTER_HELP}\n\nExamples:\n  lavish-axi playbook\n  lavish-axi playbook diagram\n  lavish-axi playbook input\n`,
     design: `Usage: lavish-axi design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, the whiteboard (Mermaid) opt-in snippet, a content-to-playbook router, an optional layout safety CSS snippet, plus technical reference for DaisyUI components. ${PLAYBOOK_ROUTER_HELP} Lavish artifacts stay portable HTML. This CDN snippet is the design fallback, not the default: inspect the subject project before falling back, and paste the layout safety CSS only when useful for dense nested grid/flex layouts, badges, wide fonts, or local media. ${DESIGN_PRIORITY_RULE}\n`,
+    theme: `Usage: lavish-axi theme <project-dir> [--set <file.json> | --clear]\n\nShow, save or clear the theme Scrawl's review frame wears for every page of a project: its colours, fonts and corner radius. The project is the git checkout the path is in, and a worktree counts as the checkout it was made from. A project with no saved theme wears the Code Goblins SIQ theme. --set reads a JSON theme shaped like the frame_theme example in \`lavish-axi design\` and refuses one whose text is hard to read or whose surfaces are pure white. Themes are kept in the state directory (LAVISH_AXI_STATE_DIR), never in the project, and a review page reads its project's theme when it loads.\n`,
     setup: `Usage: lavish-axi setup hooks\n       lavish-axi setup plugin\n\nhooks: install or repair agent SessionStart hooks for lavish-axi ambient context in Claude Code, Codex, OpenCode, and GitHub Copilot CLI. Restart your agent session afterward to receive the context. This is the primary integration - it carries live session state.\n\nplugin: register the installed lavish-axi package as an Agent Plugin (agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI. The installed package directory is itself the plugin root, so nothing is downloaded and no marketplace is involved. Reload each client afterward. Codex users should use \`setup hooks\` instead.\n\nBoth actions are explicit opt-in, idempotent, and repair a stale path after a reinstall.\n`,
     server: `Usage: lavish-axi server [--port 4387] [--verbose] [--also-listen <host>...]\n\nRun the local Lavish Editor server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nBy default Lavish binds to 127.0.0.1 and, when Tailscale is running, this machine's Tailscale IPv4. Any explicit LAVISH_AXI_HOST overrides automatic Tailscale binding; wildcard values such as 0.0.0.0 or :: are restricted to loopback. An explicit non-wildcard LAVISH_AXI_HOST sets the bind address, and the server also listens on 127.0.0.1 so every local CLI finds it; --also-listen adds further concrete addresses (the CLI passes it when it replaces a server, to keep every address the old one served). An address that cannot be bound is retried in the background and reported as network_warning. Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. With automatic binding enabled, a successfully bound Tailscale listener uses its MagicDNS name in generated session links; otherwise LAVISH_AXI_LINK_HOST can set the link hostname. When \`tailscale serve\` proxies https on this machine's MagicDNS name to this port (\`tailscale serve --bg --https=4388 http://127.0.0.1:4387\`), session links use that https origin instead, so the page is a secure context on every tailnet device and its microphone works. LAVISH_AXI_LINK_URL (a bare http or https origin) overrides every link choice. See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
   };
