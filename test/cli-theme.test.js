@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdir, mkdtemp, readdir, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -53,7 +53,7 @@ async function project(dir) {
 }
 
 test("lavish-axi theme saves a project's theme once for all its worktrees, shows it, and clears it", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "lavish-cli-theme-"));
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), "lavish-cli-theme-")));
   try {
     const stateDir = path.join(dir, "state");
     const { checkout, worktree } = await project(dir);
@@ -88,7 +88,7 @@ test("lavish-axi theme saves a project's theme once for all its worktrees, shows
 });
 
 test("lavish-axi theme refuses a theme that is hard to read and saves nothing", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "lavish-cli-theme-"));
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), "lavish-cli-theme-")));
   try {
     const stateDir = path.join(dir, "state");
     const { checkout } = await project(dir);
@@ -105,7 +105,7 @@ test("lavish-axi theme refuses a theme that is hard to read and saves nothing", 
 });
 
 test("lavish-axi theme refuses a path outside any git checkout", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "lavish-cli-theme-"));
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), "lavish-cli-theme-")));
   try {
     const refused = await lavish(path.join(dir, "state"), "theme", dir);
     assert.notEqual(refused.code, 0);

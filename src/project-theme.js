@@ -8,7 +8,7 @@
 // written into the review page, and its text must be readable on its surfaces.
 
 import { createHash } from "node:crypto";
-import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 export const THEME_COLOR_NAMES = Object.freeze([
@@ -150,8 +150,8 @@ export async function projectRootOf(start) {
   while (true) {
     const dotGit = path.join(dir, ".git");
     const entry = await stat(dotGit).catch(() => null);
-    if (entry?.isDirectory()) return dir;
-    if (entry?.isFile()) return (await mainCheckoutOf(dir, dotGit)) ?? dir;
+    if (entry?.isDirectory()) return realpath(dir);
+    if (entry?.isFile()) return realpath((await mainCheckoutOf(dir, dotGit)) ?? dir);
     const parent = path.dirname(dir);
     if (parent === dir) return null;
     dir = parent;
@@ -168,8 +168,11 @@ async function mainCheckoutOf(dir, dotGit) {
   return path.basename(common) === ".git" ? path.dirname(common) : null;
 }
 
-function themeFile(stateDir, projectRoot) {
-  const identity = process.platform === "win32" ? projectRoot.toLowerCase() : projectRoot;
+// One file per project, named for the checkout's real path, so a short (8.3) or symlinked spelling of
+// it finds the same theme as the canonical path a review session carries.
+async function themeFile(stateDir, projectRoot) {
+  const canonical = await realpath(projectRoot).catch(() => path.resolve(projectRoot));
+  const identity = process.platform === "win32" ? canonical.toLowerCase() : canonical;
   const name = createHash("sha256").update(identity).digest("hex").slice(0, 16);
   return path.join(stateDir, "themes", `${name}.json`);
 }
@@ -181,7 +184,7 @@ function themeFile(stateDir, projectRoot) {
  */
 export async function saveProjectTheme(stateDir, projectRoot, theme) {
   const checked = validateProjectTheme(theme);
-  const file = themeFile(stateDir, projectRoot);
+  const file = await themeFile(stateDir, projectRoot);
   await mkdir(path.dirname(file), { recursive: true });
   const temporary = `${file}.${process.pid}.tmp`;
   await writeFile(
@@ -193,7 +196,7 @@ export async function saveProjectTheme(stateDir, projectRoot, theme) {
 }
 
 export async function clearProjectTheme(stateDir, projectRoot) {
-  const file = themeFile(stateDir, projectRoot);
+  const file = await themeFile(stateDir, projectRoot);
   const existed = await stat(file).then(
     () => true,
     () => false,
@@ -216,7 +219,7 @@ export async function loadProjectTheme(stateDir, file) {
 export async function readProjectTheme(stateDir, projectRoot) {
   let stored;
   try {
-    stored = JSON.parse(await readFile(themeFile(stateDir, projectRoot), "utf8"));
+    stored = JSON.parse(await readFile(await themeFile(stateDir, projectRoot), "utf8"));
   } catch {
     return null;
   }

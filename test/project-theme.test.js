@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -34,7 +34,8 @@ const PARCHMENT = {
 };
 
 async function withTemp(run) {
-  const dir = await mkdtemp(path.join(tmpdir(), "lavish-theme-"));
+  // The real path, as a review session carries it: Windows runners name their temp folder in 8.3 form.
+  const dir = await realpath(await mkdtemp(path.join(tmpdir(), "lavish-theme-")));
   try {
     await run(dir);
   } finally {
