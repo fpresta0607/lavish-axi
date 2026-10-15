@@ -715,7 +715,7 @@ test("chrome client carries live events over a WebSocket outside the HTTP connec
 
   assert.equal(chrome.webSocket().url, "ws://lavish.test/events/abc");
   chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "listening" }) });
-  assert.equal(chrome.element("presenceBanner").hidden, true);
+  assert.equal(chrome.element("panelSummary").textContent, "Agent listening");
 });
 
 test("chrome reconnects its live WebSocket and syncs missed chat", async () => {
@@ -7346,7 +7346,8 @@ test("the dock summarizes what the user should know while the sheet is down", as
     fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
   });
 
-  assert.equal(sheetState(chrome).summary, "Agent not listening");
+  // No poll yet is not news: what he sends waits for the agent's next poll.
+  assert.equal(sheetState(chrome).summary, "");
 
   chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "listening" }) });
   assert.equal(sheetState(chrome).summary, "Agent listening");

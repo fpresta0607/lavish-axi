@@ -919,9 +919,6 @@ body.lavish {
   margin: 0;
   font-size: 0.9375rem;
 }
-.presence-banner.agent-offline {
-  color: var(--amber);
-}
 .handoff-banner {
   flex-wrap: wrap;
 }
