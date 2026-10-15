@@ -251,7 +251,7 @@ export const DESIGN_PRIORITY_RULE =
 export const DESIGN_SYSTEM_HINT =
   "Lavish does not auto-inject any design system - artifacts stay portable so they render identically when opened directly without lavish-axi running. Before writing any HTML: " +
   DESIGN_PRIORITY_RULE +
-  " Run `lavish-axi design` for a content-to-playbook router, the board look's stylesheets and page patterns, a copy-pasteable CDN snippet, the whiteboard (Mermaid) opt-in snippet, and the DaisyUI component reference. When you deliver the artifact, state which of the three design sources you used and why.";
+  " Run `lavish-axi design` for a content-to-playbook router, the board look's stylesheets and page patterns, a copy-pasteable CDN snippet, the whiteboard (Mermaid) opt-in snippet, the DaisyUI component reference, and how to save a project's theme for the review frame. When you deliver the artifact, state which of the three design sources you used and why.";
 
 export const DAISYUI_THEMES = [
   "light",
@@ -291,6 +291,26 @@ export const DAISYUI_THEMES = [
   "silk",
 ];
 
+const FRAME_THEME_EXAMPLE = JSON.stringify(
+  {
+    name: "Example",
+    colors: {
+      page: "#0a0f14",
+      surface: "#121b22",
+      raised: "#1a2830",
+      text: "#f0fdfa",
+      muted: "#94a3b8",
+      accent: "#06b6d4",
+      accentText: "#0a0f14",
+      border: "#29373d",
+    },
+    fonts: { body: '"Inter", system-ui, sans-serif', display: '"Space Grotesk", system-ui, sans-serif' },
+    radius: "12px",
+  },
+  null,
+  2,
+);
+
 export function createDesignOutput() {
   return {
     playbook_router: {
@@ -326,6 +346,12 @@ export function createDesignOutput() {
         "Optional copy-paste CSS for artifacts with dense nested grid/flex layouts, badges, wide monospace or pixel fonts, or local media. Paste it into the artifact yourself when useful. Lavish never auto-injects it, so direct-open portability stays intact.",
       other_design_systems:
         "If the user asks for a different design system (Bootstrap, custom CSS, plain HTML, etc.), use that instead - Lavish does not require DaisyUI.",
+    },
+    frame_theme: {
+      use_when:
+        "The project a page is about has a frontend, a web app or a native app with its own colours and type, and `lavish-axi theme <project-dir>` says it has no saved theme. Save one once per project: every page of the project, in any of its worktrees, then opens in a review frame that wears the project's look. A project with no frontend keeps the Code Goblins SIQ theme, so save nothing for it.",
+      how: "Read the project's own design tokens, such as its CSS variables, Tailwind or theme config, or palette file, and write them to a JSON file shaped like the example: colors are six-digit hex, fonts are CSS font family lists (display and mono are optional), radius is px or rem up to 32px. Run `lavish-axi theme <project-dir> --set <file.json>`. Text must read at 4.5:1 on page, surface and raised, and accentText on accent, and no surface may be pure white: the command refuses a theme that fails and names each pair. Review pages pick the theme up when they next load.",
+      example: FRAME_THEME_EXAMPLE,
     },
     whiteboard_tooling: {
       use_when:
