@@ -718,22 +718,36 @@ body.lavish {
   margin-top: 6px;
   color: var(--red);
 }
-.bubble.agent-working {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  color: #9ccdff;
+.bubble .agent-received {
+  color: var(--mint);
   font-weight: 700;
-  filter: none;
 }
-.spinner {
-  width: 18px;
-  height: 18px;
-  flex: 0 0 auto;
-  border-radius: 50%;
-  border: 3px solid #1d3a32;
-  border-top-color: var(--mint);
-  animation: spin 0.8s linear infinite;
+.agent-progress {
+  height: 8px;
+  margin-top: 10px;
+  overflow: hidden;
+  border: 1px solid var(--glass-border);
+  background: var(--field-bg);
+}
+.agent-progress::before {
+  content: "";
+  display: block;
+  width: 40%;
+  height: 100%;
+  background: var(--mint);
+  animation: agent-progress 1.4s ease-in-out infinite alternate;
+}
+@keyframes agent-progress {
+  to {
+    transform: translateX(150%);
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .agent-progress::before {
+    animation: none;
+    width: 100%;
+    opacity: 0.5;
+  }
 }
 /* A queued note is the user bubble in its not-yet-sent state. Dashed is the panel's word for
    "not delivered" (the Unsent annotation note uses it). */
@@ -895,11 +909,6 @@ body.lavish {
 }
 .chat-md strong {
   font-weight: 800;
-}
-@keyframes spin {
-  to {
-    transform: rotate(360deg);
-  }
 }
 
 /* The composer: the board's comment box, kept at the foot of the panel. */

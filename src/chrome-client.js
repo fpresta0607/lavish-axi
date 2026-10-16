@@ -1111,10 +1111,17 @@ function setAgentPresence(state) {
 
   if (!workingBubble) {
     workingBubble = document.createElement("div");
-    workingBubble.className = "bubble agent agent-working";
-    workingBubble.innerHTML = '<span class="spinner"></span><span>Working...</span>';
+    workingBubble.className = "bubble agent dialogue agent-working";
     chatLog.appendChild(workingBubble);
   }
+  const html = chatBubbleHtml({
+    role: "agent",
+    html:
+      agentPresence === "working"
+        ? '<small class="agent-received">Received</small><p role="status">Agent is working</p><div class="agent-progress" role="progressbar" aria-label="Agent is working"></div>'
+        : "<p>External listener active</p>",
+  });
+  if (workingBubble.innerHTML !== html) workingBubble.innerHTML = html;
   scrollElementIntoView(workingBubble);
 }
 
@@ -4590,7 +4597,7 @@ window.addEventListener("message", (event) => {
   // There is deliberately no attachment-delete message. See removeAttachment's
   // removal note below: the iframe cannot be trusted to decide a delete, and the
   // chrome cannot see every live reference, so reclamation is the sweeper's job.
-  if (msg.type === "lavish:sendQueuedPrompts") sendQueued();
+  if (msg.type === "lavish:sendQueuedPrompts") sendQueued(msg.endSession === true);
   if (msg.type === "lavish:endSession") endSession();
   if (msg.type === "lavish:revisions") applyRevisionMessage(msg);
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();

@@ -984,6 +984,42 @@ test("a pick is sent as the exact option text, once", () => {
   assert.equal(promptMessages(sdk).length, 2, "a second submit sends nothing");
 });
 
+test("choice selection stays local until Send or End submits it", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+
+  assert.match(form.innerHTML, /class="primary send-decision"[^>]*disabled>.*Send<\/button>/);
+  assert.match(form.innerHTML, /class="end-decision"[^>]*disabled>.*End<\/button>/);
+  assert.match(form.innerHTML, /class="card-actions"><button class="primary send-decision"/);
+  pick(form, "option:Keep 300 s");
+  pick(form, "option:Fix it next");
+
+  assert.deepEqual(promptMessages(sdk), []);
+  assert.equal(form.querySelector(".send-decision").disabled, false);
+  assert.equal(form.querySelector(".end-decision").disabled, false);
+  fire(form, "submit");
+  assert.equal(promptMessages(sdk)[0].prompt.prompt, "Fix it next");
+  assert.equal(promptMessages(sdk)[1].endSession, undefined);
+});
+
+test("choice End sends the selected answer with an atomic end intent exactly once", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "other");
+  write(form, "  Revise the plan  ");
+
+  fire(form, "submit", { submitter: form.querySelector(".end-decision") });
+  fire(form, "submit", { submitter: form.querySelector(".end-decision") });
+
+  assert.equal(promptMessages(sdk).length, 2);
+  assert.equal(promptMessages(sdk)[0].prompt.prompt, "Revise the plan");
+  assert.equal(promptMessages(sdk)[1].endSession, true);
+  assert.equal(
+    sdk.posted.some((message) => message.type === "lavish:endSession"),
+    false,
+  );
+});
+
 test("Other sends the written answer, and only once something is written", () => {
   const sdk = bootSdk({ choices: PLAN_QUESTION });
   const [form] = sdk.choiceForms();

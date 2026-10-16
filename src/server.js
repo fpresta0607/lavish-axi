@@ -458,7 +458,10 @@ export async function serve({
   // One listener per event scales independently of the number of open review tabs and avoids the
   // EventEmitter listener warning the former one-listener-per-SSE-client design reached at only a
   // few boards.
-  events.on("reload", (key) => broadcastLiveEvent("reload", key));
+  events.on("reload", (key) => {
+    clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events);
+    broadcastLiveEvent("reload", key);
+  });
   // The transcript the chrome renders is computed here (src/chat-messages.js): agent text ships
   // with its rendered html, user entries ship as text with their anchor, never as html.
   events.on("agent-reply", (key, entry) => broadcastLiveEvent("agent-reply", key, entry));
