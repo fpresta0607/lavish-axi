@@ -1088,7 +1088,6 @@ test("chrome chat bubbles are the board's dialogue box for the agent and its com
   );
   assert.match(css, /\.bubble\.user\{[^}]*border:1px solid var\(--glass-border\)/);
   assert.match(css, /\.bubble\.user\{[^}]*background:var\(--field-bg\)/);
-  assert.match(css, /\.spinner\{[^}]*border-top-color:var\(--mint\)/);
 });
 
 test("chrome includes a chat-like prompt composer and agent reply listener", async () => {
@@ -1118,14 +1117,6 @@ test("chrome client renders persisted chat history", async () => {
   const js = await chromeClientSource();
 
   assert.match(js, /initialChat\.forEach/);
-});
-
-test("chrome shows agent working state when a previous poll has released", async () => {
-  const js = await chromeClientSource();
-
-  assert.match(js, /agent-presence/);
-  assert.match(js, /Working\.\.\./);
-  assert.match(js, /spinner/);
 });
 
 test("composer offers two always-visible top-level send actions", async () => {
@@ -6597,55 +6588,65 @@ test("immediate send-and-end delivery clears working presence without an active 
   }
 });
 
-test("SSE agent-presence returns to waiting after an agent reply", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
-  const artifact = path.join(dir, "artifact.html");
-  await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({
-    pollReleaseGraceMs: 20,
-    port: 0,
-    stateFile: path.join(dir, "state.json"),
-    version: "9.9.9-test",
-  });
-  try {
-    const base = `http://127.0.0.1:${server.port}`;
-    const open = await fetch(`${base}/api/sessions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ file: artifact }),
+for (const completion of ["an agent reply", "an artifact update"]) {
+  test(`SSE agent-presence returns to waiting after ${completion}`, async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<!doctype html><html><body></body></html>");
+    const server = await serve({
+      pollReleaseGraceMs: 20,
+      port: 0,
+      stateFile: path.join(dir, "state.json"),
+      version: "9.9.9-test",
     });
-    const { key } = await open.json();
-    const presence = await startPresenceStream(base, key);
     try {
-      assert.equal(await presence.next(), "waiting");
-
-      const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`).then((response) => response.json());
-      assert.equal(await presence.next(), "listening");
-      await fetch(`${base}/api/${key}/prompts`, {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: base },
-        body: JSON.stringify({ prompts: [{ prompt: "hello", tag: "message" }] }),
-      });
-      await poll;
-      // An armed poll that drains the feedback and releases leaves presence "working".
-      assert.equal(await presence.next(), "working");
-
-      // The reply concludes that work. Without a clear here, presence stays "working" forever
-      // even though the agent has answered.
-      await fetch(`${base}/api/${key}/agent-reply`, {
+      const base = `http://127.0.0.1:${server.port}`;
+      const open = await fetch(`${base}/api/sessions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "done - applied your feedback" }),
+        body: JSON.stringify({ file: artifact }),
       });
-      assert.equal(await presence.next(), "waiting");
+      const { key } = await open.json();
+      const presence = await startPresenceStream(base, key);
+      try {
+        assert.equal(await presence.next(), "waiting");
+
+        const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`).then((response) => response.json());
+        assert.equal(await presence.next(), "listening");
+        await fetch(`${base}/api/${key}/prompts`, {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: base },
+          body: JSON.stringify({ prompts: [{ prompt: "hello", tag: "message" }] }),
+        });
+        await poll;
+        // An armed poll that drains the feedback and releases leaves presence "working".
+        assert.equal(await presence.next(), "working");
+
+        if (completion === "an artifact update") {
+          await writeFile(artifact, "<!doctype html><html><body><h1>Updated plan</h1></body></html>");
+        } else {
+          await fetch(`${base}/api/${key}/agent-reply`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: "done - applied your feedback" }),
+          });
+        }
+        assert.equal(await presence.next(), "waiting");
+        const resumed = await startPresenceStream(base, key);
+        try {
+          assert.equal(await resumed.next(), "waiting");
+        } finally {
+          await resumed.close();
+        }
+      } finally {
+        await presence.close();
+      }
     } finally {
-      await presence.close();
+      await server.close();
+      await rm(dir, { recursive: true, force: true });
     }
-  } finally {
-    await server.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+  });
+}
 
 test("SSE agent-presence stays working when resuming after immediate feedback", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
@@ -6950,15 +6951,6 @@ test("annotation card only queues on Ctrl+Enter or Cmd+Enter, for notes that go 
   assert.match(js, /const queueOnly = event\.ctrlKey \|\| event\.metaKey/);
   assert.match(js, /class="muted lavish-hint"/);
   assert.match(js, /\.lavish-hint\{flex:1;font-size:\.9375rem\}/);
-});
-
-test("chrome client chat input sends on Enter and inserts newline on Shift+Enter", async () => {
-  const js = await chromeClientSource();
-
-  assert.match(js, /chatInput\.addEventListener\(["']keydown["']/);
-  assert.match(js, /event\.key === ["']Enter["'] && !event\.shiftKey/);
-  assert.match(js, /event\.preventDefault\(\)/);
-  assert.match(js, /sendQueued\(\)/);
 });
 
 async function startFakeHtmlApp(requests, responseBody = null) {

@@ -4,7 +4,7 @@
 // `<script type="application/json" data-lavish-choices>` holding a question (or a list of them)
 // with its options and, optionally, the recommended one. Scrawl draws each question where the
 // declaration sits, as the Code Goblins board draws a question: a plain radio list with the
-// recommended option first and marked, Other for a written answer, and Send decision. The pick
+// recommended option first and marked, Other for a written answer, and Send and End buttons. The answer
 // goes back as an ordinary prompt whose text is the option exactly as the page declared it.
 //
 // The page never builds an answer form of its own, so there is one way to answer and it looks

@@ -515,6 +515,7 @@ export function createArtifactSdk(
     "M5 4.5h14A1.5 1.5 0 0 1 20.5 6v9a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V6A1.5 1.5 0 0 1 5 4.5Z",
   );
   const CHECK_ICON = boardIcon("M5 12.5 9.5 17 19 7.5");
+  const EXIT_ICON = boardIcon("M9 20.5H5.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H9M16 16.5l4.5-4.5L16 7.5M20.5 12H9");
   const CHECK_DOUBLE_ICON = boardIcon("M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5");
   const CLOCK_ICON = boardIcon("M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM12 7.5V12l3 2");
   const WARNING_ICON = boardIcon(
@@ -1333,8 +1334,10 @@ export function createArtifactSdk(
     postArtifactMessage("lavish:queuePrompt", { prompt: item });
   }
 
-  function sendQueuedPrompts() {
-    postArtifactMessage("lavish:sendQueuedPrompts");
+  // `endSession` asks the chrome to send the queue and end the review as one request, so the
+  // answer can never land without the end or the end without the answer.
+  function sendQueuedPrompts(endSession = false) {
+    postArtifactMessage("lavish:sendQueuedPrompts", endSession === true ? { endSession: true } : {});
   }
 
   function endSession() {
@@ -2737,7 +2740,7 @@ export function createArtifactSdk(
 
   /** @type {Window & { lavish?: unknown }} */ (window).lavish = {
     queuePrompt,
-    sendQueuedPrompts,
+    sendQueuedPrompts: () => sendQueuedPrompts(),
     endSession,
     getQueuedPrompts: () => [],
     setStatus: (message) => postArtifactMessage("lavish:status", { message: String(message) }),
@@ -2957,7 +2960,8 @@ export function createArtifactSdk(
   // ---- The choices a page declares (src/page-choices.js) ----
   // Each declared question is drawn as the board's question card, where the declaration sits: a
   // plain radio list with the recommended option first and marked, Other for a written answer,
-  // and Send decision. A card keeps its state here rather than in its controls, so a reload can
+  // and two buttons: Send, which keeps the review open, and End, which sends and ends it. A pick
+  // only selects. A card keeps its state here rather than in its controls, so a reload can
   // restore it and a redraw never loses a half-made pick.
   function createChoiceCard(question, host) {
     const form = document.createElement("form");
@@ -2979,6 +2983,7 @@ export function createArtifactSdk(
       "</span>";
 
     function openHtml() {
+      const disabled = choiceAnswer(question, card.selection, card.written) ? "" : " disabled";
       const radio = (value, selected) =>
         '<input type="radio" name="answer" value="' +
         escapeAnnotationText(value) +
@@ -3007,10 +3012,14 @@ export function createArtifactSdk(
         ' what you prefer...">' +
         escapeAnnotationText(card.written) +
         '</textarea></label></fieldset><div class="card-actions"><button class="primary send-decision" type="submit"' +
-        (choiceAnswer(question, card.selection, card.written) ? "" : " disabled") +
+        disabled +
         ">" +
         SEND_ICON +
-        "Send decision</button></div>"
+        'Send</button><button class="end-decision" type="submit"' +
+        disabled +
+        ">" +
+        EXIT_ICON +
+        "End</button></div>"
       );
     }
 
@@ -3070,9 +3079,12 @@ export function createArtifactSdk(
     // reader's cursor: whether the written answer shows, and whether there is an answer to send.
     function syncControls() {
       const written = /** @type {HTMLElement | null} */ (form.querySelector(".written-answer"));
-      const send = /** @type {HTMLButtonElement | null} */ (form.querySelector(".send-decision"));
       if (written) written.hidden = card.selection !== "other";
-      if (send) send.disabled = !choiceAnswer(question, card.selection, card.written);
+      const hasAnswer = Boolean(choiceAnswer(question, card.selection, card.written));
+      for (const selector of [".send-decision", ".end-decision"]) {
+        const button = /** @type {HTMLButtonElement | null} */ (form.querySelector(selector));
+        if (button) button.disabled = !hasAnswer;
+      }
     }
 
     form.addEventListener("change", (event) => {
@@ -3093,6 +3105,7 @@ export function createArtifactSdk(
       event.preventDefault();
       const answer = choiceAnswer(question, card.selection, card.written);
       if (!answer || card.answered) return;
+      const isEnd = Boolean(event.submitter) && event.submitter === form.querySelector(".end-decision");
       noteCounter += 1;
       card.noteId = NOTE_ID_PREFIX + noteCounter;
       card.answered = answer;
@@ -3108,7 +3121,7 @@ export function createArtifactSdk(
         queueKey: "choice:" + question.id,
         noteId: card.noteId,
       });
-      sendQueuedPrompts();
+      sendQueuedPrompts(isEnd);
       card.render();
       scheduleReviewStateReport();
     });
@@ -3131,7 +3144,7 @@ export function createArtifactSdk(
     style.textContent =
       ":host{all:initial}" +
       board.shadowCss +
-      ':host{display:block;background:none}.lavish-choices{display:grid;gap:16px;max-width:820px;margin:32px auto;padding:0 16px 32px}.lavish-choices .question-card{background:var(--glass-bg),var(--hero-surface)}.lavish-choices fieldset{display:grid;gap:12px;min-width:0;margin:0;padding:0;border:0}.lavish-choices .goblin-avatar{display:block;flex:none;width:48px;height:48px;background:url("/assets/goblin-app.png") center / contain no-repeat}.lavish-choices .question-detail{max-width:72ch;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}';
+      ':host{display:block;background:none}.lavish-choices{display:grid;gap:16px;max-width:820px;margin:32px auto;padding:0 16px 32px}.lavish-choices .question-card{background:var(--glass-bg),var(--hero-surface)}.lavish-choices fieldset{display:grid;gap:12px;min-width:0;margin:0;padding:0;border:0}.lavish-choices .goblin-avatar{display:block;flex:none;width:48px;height:48px;background:url("/assets/goblin-app.png") center / contain no-repeat}.lavish-choices .question-detail{max-width:72ch;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}.lavish-choices .end-decision{display:inline-flex;align-items:center;gap:8px;padding-inline:22px;white-space:nowrap;color:var(--red)}.lavish-choices .end-decision:not(:disabled){border-color:var(--red)}.lavish-choices .end-decision .icon{width:20px;height:20px}';
     root.appendChild(style);
     window.addEventListener("pagehide", watchBoardTips(root), { once: true });
     const list = document.createElement("div");

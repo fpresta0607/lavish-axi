@@ -5884,6 +5884,110 @@ test("a send acknowledgement does not finish the round before late feedback deli
   assert.equal(workingBubbles().length, 1);
 });
 
+test("confirmed work shows Received and a loading bar in the agent dialogue until its reply", async () => {
+  const chrome = await createChromeHarness();
+  const work = () => chrome.element("chatLog").children.find((child) => child.className.includes("agent-working"));
+
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "working" }) });
+
+  assert.match(work().className, /dialogue/);
+  assert.match(work().innerHTML, /Received/);
+  assert.match(work().innerHTML, /Agent is working/);
+  assert.match(work().innerHTML, /role="progressbar"[^>]*aria-label="Agent is working"/);
+  assert.doesNotMatch(work().innerHTML, /aria-valuenow/);
+
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify({ text: "Updated the plan" }) });
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "waiting" }) });
+
+  assert.equal(work(), undefined);
+  assert.ok(chrome.element("chatLog").children.some((child) => child.innerHTML.includes("Updated the plan")));
+});
+
+test("an external listener does not claim that feedback was received", async () => {
+  const chrome = await createChromeHarness();
+  const work = () => chrome.element("chatLog").children.find((child) => child.className.includes("agent-working"));
+
+  chrome.eventSource().listeners.get("agent-presence")({
+    data: JSON.stringify({ state: "listening", mode: "external-listener" }),
+  });
+
+  assert.match(work().innerHTML, /External listener active/);
+  assert.doesNotMatch(work().innerHTML, /Received|role="progressbar"/);
+
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "working" }) });
+  assert.match(work().innerHTML, /Received/);
+  assert.match(work().innerHTML, /role="progressbar"/);
+
+  chrome.eventSource().listeners.get("agent-presence")({
+    data: JSON.stringify({ state: "listening", mode: "external-listener" }),
+  });
+  assert.doesNotMatch(work().innerHTML, /Received|role="progressbar"/);
+});
+
+for (const { name, shiftKey, isComposing, shouldSend } of [
+  { name: "Enter", shiftKey: false, isComposing: false, shouldSend: true },
+  { name: "Shift+Enter", shiftKey: true, isComposing: false, shouldSend: false },
+  { name: "composing Enter", shiftKey: false, isComposing: true, shouldSend: false },
+]) {
+  test(`the chat composer sends only on plain Enter: ${name}`, async () => {
+    const posts = [];
+    const chrome = await createChromeHarness({
+      fetchImpl: async (url, init) => {
+        posts.push({ url, body: JSON.parse(init.body) });
+        return { ok: true };
+      },
+    });
+    const input = chrome.element("chatInput");
+    input.value = "Revise the plan";
+    let isDefaultPrevented = false;
+
+    input.dispatch("keydown", {
+      key: "Enter",
+      shiftKey,
+      isComposing,
+      preventDefault() {
+        isDefaultPrevented = true;
+      },
+    });
+    await flushPromises();
+    if (shouldSend) chrome.sendSnapshot("uid=1 body");
+    await flushPromises();
+
+    assert.equal(isDefaultPrevented, shouldSend);
+    assert.equal(posts.length, shouldSend ? 1 : 0);
+    if (shouldSend) {
+      assert.equal(posts[0].url, "/api/abc/prompts");
+      assert.equal(posts[0].body.prompts[0].prompt, "Revise the plan");
+      assert.notEqual(posts[0].body.endSession, true);
+    } else {
+      assert.equal(input.value, "Revise the plan");
+    }
+  });
+}
+
+test("a choice End from the artifact sends the answer and ends in one request", async () => {
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return { ok: true };
+    },
+  });
+  chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: { prompt: "Revise the plan", tag: "choice" } });
+
+  chrome.sendFrameMessage({ type: "lavish:sendQueuedPrompts", endSession: true });
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, "/api/abc/prompts");
+  assert.equal(posts[0].body.prompts[0].prompt, "Revise the plan");
+  assert.equal(posts[0].body.endSession, true);
+  assert.equal(chrome.element("send").disabled, true);
+});
+
 test("send controls stay enabled while the agent works and lock only once the session ends", async () => {
   const chrome = await createChromeHarness({
     fetchImpl: async () => ({ ok: true, json: async () => ({}) }),

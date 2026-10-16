@@ -96,9 +96,6 @@ html[data-project-theme] .primary {
   color: var(--theme-accent-text);
   box-shadow: none;
 }
-html[data-project-theme] .bubble.agent-working {
-  color: var(--theme-accent-ink);
-}
 
 /* Hover washes: a little of the text colour, so they show on a light page as on a dark one. */
 html[data-project-theme] .icon-button:hover,
@@ -129,9 +126,6 @@ html[data-project-theme] .voice-bubble:hover::before {
 html[data-project-theme] ::selection,
 html[data-project-theme] .anchor-excerpt.text {
   background: color-mix(in srgb, var(--theme-accent) 28%, transparent);
-}
-html[data-project-theme] .spinner {
-  border-color: var(--theme-border);
 }
 html[data-project-theme] * {
   scrollbar-color: var(--theme-border) transparent;
