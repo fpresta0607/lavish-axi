@@ -3515,7 +3515,8 @@ test("opening an artifact names that session as the one to reload across a versi
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     recorder.close();
-    await rm(dir, { recursive: true, force: true });
+    // The stopped server can still be exiting, and until it has Windows keeps its folder.
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 
