@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import os from "node:os";
 import path from "node:path";
@@ -3019,18 +3019,103 @@ test("telemetry command names are anonymous and do not include file paths", () =
 });
 
 test("server spawn options detach without inheriting invalid streams", () => {
-  const options = createServerSpawnOptions();
+  const options = createServerSpawnOptions(os.tmpdir());
 
   assert.equal(options.detached, true);
   assert.equal(options.stdio, "ignore");
 });
 
 test("server spawn options can persist detached server output to a log fd", () => {
-  const options = createServerSpawnOptions(17);
+  const options = createServerSpawnOptions(os.tmpdir(), 17);
 
   assert.equal(options.detached, true);
   assert.deepEqual(options.stdio, ["ignore", 17, 17]);
 });
+
+for (const directory of [path.join(os.tmpdir(), "lavish-state"), "lavish-state"]) {
+  test(`server spawn options run the server in its state folder given ${path.isAbsolute(directory) ? "an absolute" : "a relative"} path`, () => {
+    const options = createServerSpawnOptions(directory);
+
+    assert.equal(options.cwd, path.resolve(directory));
+    // Relative to the server's new folder, a relative path would name another state file than the CLI's.
+    assert.equal(options.env?.LAVISH_AXI_STATE_DIR, path.resolve(directory));
+  });
+}
+
+// The detached server's pid, found by the port on its command line.
+async function linuxServerPid(port) {
+  for (const entry of await readdir("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    // A process can exit between the listing and the read.
+    const args = (await readFile(`/proc/${entry}/cmdline`, "utf8").catch(() => "")).split("\0");
+    if (args.some((arg) => arg.endsWith("lavish-axi-server.js")) && args[args.indexOf("--port") + 1] === String(port)) {
+      return Number(entry);
+    }
+  }
+  return null;
+}
+
+// A goblin presents a page from its worktree and the worktree is removed while the server still runs.
+// Windows refuses to remove a folder a process runs in, and Linux shows where the server runs.
+test(
+  "the server runs in its state folder, so the folder of the command that started it can be removed",
+  { timeout: 60_000 },
+  async () => {
+    const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "lavish-server-cwd-")));
+    const stateDir = path.join(dir, "state");
+    const worktree = path.join(dir, "worktree");
+    await mkdir(worktree);
+    const artifact = path.join(worktree, "page.html");
+    await writeFile(artifact, "<!doctype html><html><body>page</body></html>", "utf8");
+    const probe = createServer();
+    await new Promise((resolve) => probe.listen(0, "127.0.0.1", () => resolve(undefined)));
+    const address = probe.address();
+    const port = address && typeof address === "object" ? address.port : 0;
+    await new Promise((resolve) => probe.close(() => resolve(undefined)));
+    const cli = async (cwd, ...args) => {
+      const child = spawn(
+        process.execPath,
+        [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), ...args],
+        {
+          cwd,
+          env: {
+            ...process.env,
+            LAVISH_AXI_STATE_DIR: stateDir,
+            LAVISH_AXI_PORT: String(port),
+            LAVISH_AXI_HOST: "127.0.0.1",
+            LAVISH_AXI_TELEMETRY: "0",
+            LAVISH_AXI_NO_OPEN: "1",
+            // A server a failed stop leaves behind ends itself.
+            LAVISH_AXI_IDLE_TIMEOUT_MS: "60000",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        },
+      );
+      let output = "";
+      child.stdout.on("data", (chunk) => (output += chunk));
+      child.stderr.on("data", (chunk) => (output += chunk));
+      const [code] = await once(child, "close");
+      return { code, output };
+    };
+    try {
+      const opened = await cli(worktree, artifact, "--no-open");
+      assert.equal(opened.code, 0, opened.output);
+
+      await rm(worktree, { recursive: true });
+
+      const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+      assert.equal(health.ok, true, "the server stopped before the worktree was removed");
+      if (process.platform === "linux") {
+        assert.equal(await readlink(`/proc/${await linuxServerPid(port)}/cwd`), stateDir);
+      }
+    } finally {
+      await cli(dir, "stop", "--port", String(port));
+      // The stopped server can still be exiting, and until it has Windows keeps its folder.
+      await rm(dir, { recursive: true, force: true, maxRetries: 10 });
+    }
+  },
+);
 
 test("detached server entry dispatches the CLI", () => {
   const entry = fileURLToPath(new URL("../bin/lavish-axi-server.js", import.meta.url));
@@ -3430,7 +3515,8 @@ test("opening an artifact names that session as the one to reload across a versi
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     recorder.close();
-    await rm(dir, { recursive: true, force: true });
+    // The stopped server can still be exiting, and until it has Windows keeps its folder.
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 

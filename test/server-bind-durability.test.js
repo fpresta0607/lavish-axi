@@ -26,7 +26,9 @@ async function withTempDir(run) {
   try {
     return await run(dir);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    // A server the CLI started runs in its state directory, and Windows keeps the directory until
+    // that server has exited.
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
 }
 
