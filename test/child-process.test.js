@@ -110,7 +110,7 @@ test(
         ].join("\n"),
       );
       // Started exactly as the CLI starts its server: detached, so it has no console of its own.
-      const child = nodeSpawn(process.execPath, [parent, report], createServerSpawnOptions());
+      const child = nodeSpawn(process.execPath, [parent, report], createServerSpawnOptions(dir));
       const code = await new Promise((resolve) => child.on("exit", resolve));
       assert.equal(code, 0);
       assert.deepEqual(JSON.parse(await readFile(report, "utf8")), {

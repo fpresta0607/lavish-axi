@@ -45,6 +45,7 @@ import {
   LOOPBACK_HOST,
   resolveConcreteListenHosts,
   serverLogFile,
+  stateDir,
   stateFile,
   stateId,
 } from "./paths.js";
@@ -2297,7 +2298,7 @@ async function startServer(port, { alsoListen = [] } = {}) {
   try {
     const args = [entry, "server", "--port", String(port)];
     for (const host of alsoListen) args.push("--also-listen", host);
-    const child = spawn(process.execPath, args, createServerSpawnOptions(logFd));
+    const child = spawn(process.execPath, args, createServerSpawnOptions(stateDir(), logFd));
     child.unref();
   } finally {
     if (logFd !== null) closeSync(logFd);
@@ -2315,17 +2316,23 @@ function resolveServerEntry() {
 }
 
 /**
+ * @param {string} directory The state directory, which the server runs in.
  * @param {number | null} logFd
  * @returns {import("node:child_process").SpawnOptions}
  */
-export function createServerSpawnOptions(logFd = null) {
+export function createServerSpawnOptions(directory, logFd = null) {
   const stdio = /** @type {import("node:child_process").StdioOptions} */ (
     logFd === null ? "ignore" : ["ignore", logFd, logFd]
   );
+  // The server outlives the command that starts it, and on Windows no folder can be removed while a
+  // process runs in it, so it never runs in its first caller's folder. A relative state directory
+  // would resolve against the server's own folder, so the server is told the absolute one.
+  const cwd = path.resolve(directory);
   return {
+    cwd,
     detached: true,
     stdio,
-    env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" },
+    env: { ...process.env, LAVISH_AXI_NO_OPEN: "1", LAVISH_AXI_STATE_DIR: cwd },
   };
 }
 
