@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
-import { get as httpGet } from "node:http";
+import { get as httpGet, request as httpRequest } from "node:http";
 import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -491,7 +491,7 @@ async function pollCommand(args) {
       // can leave the first claim alive and make the retry reject itself as LISTENER_ACTIVE.
       retries: 0,
       onResponse: (pollResponse) => {
-        if (pollResponse.headers.get(POLL_STATE_HEADER) === "listening") notifyHerdrPollReady();
+        if (pollResponse.headers[POLL_STATE_HEADER] === "listening") notifyHerdrPollReady();
       },
     });
     if (response.code === "LISTENER_REPLACED") {
@@ -2218,7 +2218,7 @@ async function requestShutdown(baseUrl, { reloadKey = "", reason = "" } = {}) {
   if (reloadKey) body.reload_key = reloadKey;
   if (reason) body.reason = reason;
   try {
-    await fetch(`${baseUrl}/shutdown`, {
+    await requestServer(`${baseUrl}/shutdown`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -2337,8 +2337,46 @@ export function createServerSpawnOptions(directory, logFd = null) {
 }
 
 /**
+ * @typedef {{ ok: boolean, status: number, headers: import("node:http").IncomingHttpHeaders, text: Promise<string> }} LavishResponse
+ */
+
+/**
  * @param {string} url
- * @param {{ retries?: number, retryDelayMs?: number, onResponse?: ((response: Response) => void) | null, method?: string, headers?: Record<string, string>, body?: string }} [options]
+ * @param {{ method?: string, headers?: Record<string, string>, body?: string }} [options]
+ * @returns {Promise<LavishResponse>}
+ */
+// Plain node:http, like fetchHealth, never fetch: a server this CLI asks can be shutting down (an
+// upgrade, another agent's stop, its own idle timeout) and resets the connections it holds. Node
+// 24.21's fetch sets IP_TOS on every new socket without handling a failure, macOS fails that
+// setsockopt with EINVAL on a socket its peer already reset, and fetch throws it from the socket's
+// connect listener, where no caller can catch it and the CLI dies. Here the same reset is this
+// request's error. It settles when the response head arrives, as fetch does, so a connection that
+// fails stays told apart from a body cut short.
+function requestServer(url, { method = "GET", headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(new URL(url), { method, headers, agent: false }, (response) => {
+      const text = new Promise((resolveText, rejectText) => {
+        let chunks = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          chunks += chunk;
+        });
+        response.on("end", () => resolveText(chunks));
+        response.on("error", rejectText);
+      });
+      // A caller that needs only the status never reads the body, so its failure is not unhandled.
+      text.catch(() => {});
+      const status = response.statusCode ?? 0;
+      resolve({ ok: status >= 200 && status < 300, status, headers: response.headers, text });
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+/**
+ * @param {string} url
+ * @param {{ retries?: number, retryDelayMs?: number, onResponse?: ((response: LavishResponse) => void) | null, method?: string, headers?: Record<string, string>, body?: string }} [options]
  */
 export async function fetchJson(
   url,
@@ -2347,11 +2385,7 @@ export async function fetchJson(
   let response;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      response = await fetch(url, {
-        method,
-        ...(headers ? { headers } : {}),
-        ...(body === undefined ? {} : { body }),
-      });
+      response = await requestServer(url, { method, headers, body });
       break;
     } catch (error) {
       if (error instanceof AxiError) throw error;
@@ -2364,7 +2398,7 @@ export async function fetchJson(
   if (!response.ok) {
     let payload = null;
     try {
-      payload = await response.json();
+      payload = JSON.parse(await response.text);
     } catch {
       // Keep the generic transport error when the server did not send JSON.
     }
@@ -2386,7 +2420,7 @@ export async function fetchJson(
   }
   onResponse?.(response);
   try {
-    return await response.json();
+    return JSON.parse(await response.text);
   } catch {
     throw pollResponseInterruptedError();
   }
@@ -2395,7 +2429,7 @@ export async function fetchJson(
 async function postJson(url, body) {
   let response;
   try {
-    response = await fetch(url, {
+    response = await requestServer(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -2406,7 +2440,7 @@ async function postJson(url, body) {
   if (!response.ok) {
     throw new AxiError(`Lavish Editor request failed: ${response.status}`, "SERVER_ERROR");
   }
-  return response.json();
+  return JSON.parse(await response.text);
 }
 
 function serverConnectionError() {
