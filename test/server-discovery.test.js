@@ -910,6 +910,16 @@ test(
         const served = await health(otherHost, port);
         assert.deepEqual([...served.hosts].sort(), ["127.0.0.1", otherHost].sort());
         assert.deepEqual(await stateSessions(dir), [artifact]);
+        // The CLI started two replacements, and the one that lost the port refuses to start once it
+        // finds the winner, which can be after the open returned. Stopped before that, the winner
+        // would free the port for it, and it would serve from this folder after teardown.
+        assert.ok(
+          await waitFor(
+            async () => /not starting/.test(await readFile(path.join(dir, "server.log"), "utf8").catch(() => "")),
+            15_000,
+          ),
+          "the replacement that lost the port never refused to start",
+        );
       } finally {
         await first.close().catch(() => {});
         await (await racer.catch(() => null))?.close().catch(() => {});
