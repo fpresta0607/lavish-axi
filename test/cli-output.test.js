@@ -3,7 +3,7 @@ import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { createServer, request as httpRequest } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -3504,14 +3504,22 @@ test("opening an artifact names that session as the one to reload across a versi
     assert.equal(code, 0, stderr);
     assert.deepEqual(recorder.bodies, [{ reload_key: sessionKey(await canonicalFile(artifact)), reason: "upgrade" }]);
   } finally {
-    // The CLI replaced the recorder with a real server on that port; stop it again.
-    await fetch(`${base}/shutdown`, { method: "POST" }).catch(() => {});
+    // The CLI replaced the recorder with a real server on that port; stop it again. Plain node:http,
+    // not fetch: Node 24.21's fetch throws an uncaught EINVAL on macOS for a socket the closing
+    // server already reset.
+    const answers = (method, pathname) =>
+      new Promise((resolve) => {
+        const request = httpRequest(`${base}${pathname}`, { method, agent: false }, (response) => {
+          response.on("error", () => {});
+          response.resume();
+          resolve(true);
+        });
+        request.on("error", () => resolve(false));
+        request.end();
+      });
+    await answers("POST", "/shutdown");
     for (let i = 0; i < 30; i += 1) {
-      const alive = await fetch(`${base}/health`).then(
-        () => true,
-        () => false,
-      );
-      if (!alive) break;
+      if (!(await answers("GET", "/health"))) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     recorder.close();

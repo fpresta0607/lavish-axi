@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { createServer as createHttpServer } from "node:http";
-import { createServer } from "node:net";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { createServer, Socket } from "node:net";
 import os, { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -124,9 +124,33 @@ function closeRaw(server) {
   return new Promise((resolve) => server.close(() => resolve(undefined)));
 }
 
+// Plain node:http, not fetch, as the CLI does: these reach servers while they shut down, and Node
+// 24.21's fetch throws an uncaught EINVAL on macOS for a socket the closing server already reset.
+function requestJson(url, method = "GET") {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(new URL(url), { method, agent: false, timeout: 3000 }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+      });
+      response.on("end", () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (error) {
+          reject(error);
+        }
+      });
+      response.on("error", reject);
+    });
+    request.on("timeout", () => request.destroy(new Error(`${url} did not answer within 3s`)));
+    request.on("error", reject);
+    request.end();
+  });
+}
+
 async function health(host, port, query = "") {
-  const response = await fetch(`http://${host}:${port}/health${query}`, { signal: AbortSignal.timeout(3000) });
-  return response.json();
+  return requestJson(`http://${host}:${port}/health${query}`);
 }
 
 async function reachable(host, port) {
@@ -182,7 +206,7 @@ async function openSession(host, port, file) {
 }
 
 async function shutdownAt(host, port) {
-  await fetch(`http://${host}:${port}/shutdown`, { method: "POST" }).catch(() => {});
+  await requestJson(`http://${host}:${port}/shutdown`, "POST").catch(() => {});
   await waitFor(async () => !(await reachable(host, port)));
 }
 
@@ -886,6 +910,16 @@ test(
         const served = await health(otherHost, port);
         assert.deepEqual([...served.hosts].sort(), ["127.0.0.1", otherHost].sort());
         assert.deepEqual(await stateSessions(dir), [artifact]);
+        // The CLI started two replacements, and the one that lost the port refuses to start once it
+        // finds the winner, which can be after the open returned. Stopped before that, the winner
+        // would free the port for it, and it would serve from this folder after teardown.
+        assert.ok(
+          await waitFor(
+            async () => /not starting/.test(await readFile(path.join(dir, "server.log"), "utf8").catch(() => "")),
+            15_000,
+          ),
+          "the replacement that lost the port never refused to start",
+        );
       } finally {
         await first.close().catch(() => {});
         await (await racer.catch(() => null))?.close().catch(() => {});
@@ -1001,6 +1035,51 @@ test(
         await oldPinned.close().catch(() => {});
         await shutdownAt("127.0.0.1", port);
         await shutdownAt(otherHost, port);
+      }
+    });
+  },
+);
+
+test(
+  "the CLI's requests survive a socket that refuses its type of service, as macOS refuses one a closing server reset",
+  { timeout: 15_000 },
+  async (t) => {
+    if (typeof Socket.prototype.setTypeOfService !== "function") {
+      t.skip("this Node has no setTypeOfService, so its fetch never sets one");
+      return;
+    }
+    // A server that is shutting down resets the connections it holds, and macOS fails
+    // setsockopt(IP_TOS) with EINVAL on a socket its peer already reset. Node 24.21's fetch sets
+    // IP_TOS on every new socket and throws that error from the socket's connect listener, where no
+    // caller can catch it. Here every socket fails that way.
+    t.mock.method(Socket.prototype, "setTypeOfService", () => {
+      throw Object.assign(new Error("setTypeOfService EINVAL"), {
+        errno: -22,
+        code: "EINVAL",
+        syscall: "setTypeOfService",
+      });
+    });
+    await withTempDir(async (dir) => {
+      const artifact = await writeArtifact(dir);
+      const server = await serve({
+        port: await freePort(),
+        stateFile: path.join(dir, "state.json"),
+        version: VERSION,
+        env: {},
+        detectTailscale: null,
+        hosts: ["127.0.0.1"],
+        log: () => {},
+        idleTimeoutMs: null,
+      });
+      try {
+        await withEnv(cliEnv(dir, server.port, undefined), async () => {
+          assert.doesNotMatch(await captureCli(["open", artifact, "--no-open"]), /SERVER_ERROR/);
+          assert.doesNotMatch(await captureCli(["poll", artifact, "--timeout-ms", "50"]), /SERVER_ERROR/);
+          assert.match(await captureCli(["stop"]), /status: stopped/);
+        });
+        assert.equal(await isResolved(server.done), true, "stop left the server running");
+      } finally {
+        await server.close().catch(() => {});
       }
     });
   },
