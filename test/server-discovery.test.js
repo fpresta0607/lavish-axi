@@ -14,6 +14,7 @@ import WebSocket from "ws";
 import { inheritedListenHosts, run, stopCommand, VERSION } from "../src/cli.js";
 import { stateId } from "../src/paths.js";
 import { serve } from "../src/server.js";
+import { symlinkTest } from "./symlink-support.js";
 
 // 192.0.2.0/24 is TEST-NET-1: assigned to no interface, so binding it fails with EADDRNOTAVAIL.
 const UNBINDABLE_HOST = "192.0.2.1";
@@ -444,7 +445,7 @@ test("a foreign loopback listener prevents a pinned server from claiming the sam
   });
 });
 
-test("a symlinked state directory adopts the daemon started at its target", async () => {
+symlinkTest("a symlinked state directory adopts the daemon started at its target", async () => {
   await withTempDir(async (dir) => {
     const alias = path.join(dir, "alias");
     await symlink(dir, alias, "dir");

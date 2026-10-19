@@ -37,6 +37,7 @@ import {
 } from "../src/server.js";
 import { buildSelfContainedHtml } from "../src/export-bundle.js";
 import { canonicalFile, sessionKey, SessionStore } from "../src/session-store.js";
+import { symlinkTest } from "./symlink-support.js";
 
 async function chromeClientSource() {
   return readFile(new URL("../src/chrome-client.js", import.meta.url), "utf8");
@@ -519,7 +520,7 @@ test("artifact assets resolve within the artifact directory", async () => {
   assert.equal(await resolveArtifactAsset(root, "../secret.txt"), null);
 });
 
-test("artifact assets reject a symlink that escapes the artifact directory", async () => {
+symlinkTest("artifact assets reject a symlink that escapes the artifact directory", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   try {
@@ -535,7 +536,7 @@ test("artifact assets reject a symlink that escapes the artifact directory", asy
   }
 });
 
-test("artifact assets reject a path that escapes through an intermediate directory symlink", async () => {
+symlinkTest("artifact assets reject a path that escapes through an intermediate directory symlink", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   try {
@@ -550,7 +551,7 @@ test("artifact assets reject a path that escapes through an intermediate directo
   }
 });
 
-test("artifact assets still resolve a symlink that stays inside the artifact directory", async () => {
+symlinkTest("artifact assets still resolve a symlink that stays inside the artifact directory", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   try {
     const real = path.join(dir, "real.css");
@@ -565,7 +566,7 @@ test("artifact assets still resolve a symlink that stays inside the artifact dir
   }
 });
 
-test("artifact asset resolution fails closed when realpath errors", async () => {
+symlinkTest("artifact asset resolution fails closed when realpath errors", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   try {
     const linkA = path.join(dir, "loop-a");
@@ -2684,7 +2685,7 @@ test("/artifact serves files copied under the artifact directory", async () => {
   }
 });
 
-test("/artifact refuses to serve a symlink that escapes the artifact directory", async () => {
+symlinkTest("/artifact refuses to serve a symlink that escapes the artifact directory", async () => {
   const parent = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   const dir = path.join(parent, ".lavish");
@@ -2714,7 +2715,7 @@ test("/artifact refuses to serve a symlink that escapes the artifact directory",
   }
 });
 
-test("/artifact refuses a path that escapes through an intermediate directory symlink", async () => {
+symlinkTest("/artifact refuses a path that escapes through an intermediate directory symlink", async () => {
   const parent = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   const dir = path.join(parent, ".lavish");
@@ -2773,7 +2774,7 @@ test("/artifact still rejects lexical .. traversal that reaches the server unnor
   }
 });
 
-test("/whiteboard-assets refuses escaping symlinks and .. traversal but still serves its bundle", async () => {
+symlinkTest("/whiteboard-assets refuses escaping symlinks and .. traversal but still serves its bundle", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   const assetsDir = path.join(dir, "whiteboard-assets");
