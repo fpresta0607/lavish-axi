@@ -103,6 +103,9 @@ async function captureCli(args) {
   return output;
 }
 
+// The port is free at host only: the kernel checks no other address when it picks one. A test that
+// needs one port at loopback and at the LAN address picks it at the LAN address, since on macOS a
+// port free on loopback can still be the local port of a connection there.
 async function freePort(host = "127.0.0.1") {
   const probe = createServer();
   await new Promise((resolve) => probe.listen({ port: 0, host }, () => resolve(undefined)));
@@ -376,7 +379,7 @@ test("a second server for a port whose loopback a Lavish server owns refuses to 
   }
   await withTempDir(async (dir) => {
     const owner = await serve({
-      port: 0,
+      port: await freePort(otherHost),
       stateFile: path.join(dir, "state.json"),
       version: "9.9.9-test",
       env: {},
@@ -414,8 +417,8 @@ test("a foreign loopback listener prevents a pinned server from claiming the sam
     return;
   }
   await withTempDir(async (dir) => {
-    const loopback = await listenRaw("127.0.0.1", 0);
-    const port = /** @type {import('node:net').AddressInfo} */ (loopback.address()).port;
+    const port = await freePort(otherHost);
+    const loopback = await listenRaw("127.0.0.1", port);
     try {
       const contender = await serve({
         port,
