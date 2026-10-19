@@ -6115,10 +6115,18 @@ test("a disconnect during immediate feedback take requeues the batch without wor
       client.on("error", reject);
     });
     await takePending;
-    socket.on("error", () => {});
-    socket.destroy();
-    releaseTake();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The poll keeps its listener until the batch its take cleared is restored, so wait for the
+    // presence event that releases it: a fixed sleep loses to a slow state write.
+    const releasePresence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await releasePresence.next(), "listening");
+      socket.on("error", () => {});
+      socket.destroy();
+      releaseTake();
+      assert.equal(await releasePresence.next(), "waiting");
+    } finally {
+      await releasePresence.close();
+    }
 
     const presence = await startPresenceStream(base, key);
     try {
