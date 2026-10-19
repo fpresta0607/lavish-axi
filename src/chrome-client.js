@@ -816,6 +816,8 @@ function startEditingNote(index, event) {
   if (event) event.stopPropagation();
   const prompt = queued[index];
   if (!prompt || terminalSubmission || isPromptSending(prompt) || !isEditableNote(prompt)) return;
+  // One note is edited at a time; the one already open keeps its words.
+  settleOpenEdit();
   editingNote = { id: promptIdentity(prompt), text: String(prompt.prompt || "") };
   render();
   const editor = /** @type {HTMLTextAreaElement | undefined} */ (queuedLog.querySelectorAll(".queued-edit-input")[0]);
@@ -1600,15 +1602,20 @@ function promptQueueKey(prompt) {
   return prompt && typeof prompt[internalQueueKeyField] === "string" ? prompt[internalQueueKeyField].trim() : "";
 }
 
-// The page takes back a note it keyed, as a choice does when its answer is cleared. The page
-// already knows, so it is not told the note was removed.
+// A choice takes its answer back out of the notes when the answer is cleared. Only a choice's own
+// answer can be taken back this way: the page is untrusted, and every other note is his to remove.
+// The page already knows, so it is not told the note was removed.
 function dropQueuedPrompt(queueKey) {
-  if (!queueKey || terminalSubmission) return;
-  const index = queued.findIndex((prompt) => promptQueueKey(prompt) === queueKey);
+  if (!queueKey.startsWith("choice:") || terminalSubmission) return;
+  const index = queued.findIndex((prompt) => promptQueueKey(prompt) === queueKey && prompt.tag === "choice");
   if (index === -1 || isPromptSending(queued[index])) return;
   reportedNoteStatuses.delete(promptNoteId(queued[index]));
   queued.splice(index, 1);
   persistQueuedPrompts();
+  if (!queued.length) {
+    clearSendAcknowledgementWarning();
+    if (sendFailureOwner?.kind !== "preparation") clearPersistentSendFailure();
+  }
   render();
 }
 
@@ -2472,31 +2479,63 @@ function addComposerNote() {
 }
 
 // A send takes the open card's unfinished words with it, as a note like any other: the page adds
-// them to the notes under this request's id, then says it is done. A page that stopped answering
-// holds the send only this long, then the send goes without them.
+// them to the notes under this request's id, then says it is done. A card that holds its note
+// back, or a page that does not answer in time (and might still add the words after an end that
+// went without them), stops the send and says so; the next send then goes without the card, so
+// no page can hold the review.
 const DRAFT_COMMIT_TIMEOUT_MS = 2000;
 const DRAFT_HELD_COPY =
-  "Finish the note on the page first: its image is still uploading or could not be attached. Nothing was sent.";
-/** @type {Map<string, FeedbackPreparation>} */
+  "Finish the note on the page first: its image is still uploading or could not be attached. Nothing was sent. Send again to go without it.";
+const DRAFT_SILENT_COPY =
+  "The page did not answer, so its open note could not be added. Nothing was sent. Send again to go without it.";
+// What a page may add under a commit: the one note of its open card, never a note the chrome or a
+// page control owns.
+const CHROME_OWNED_TAGS = new Set(["choice", "layout-warnings", "message", "whiteboard"]);
+/** @type {Map<string, { preparation: FeedbackPreparation, admitted: boolean }>} */
 const draftCommits = new Map();
+let skipNextDraftCommit = false;
 
 function commitPageDraft() {
+  if (skipNextDraftCommit) {
+    skipNextDraftCommit = false;
+    return null;
+  }
   const preparation = beginFeedbackPreparation();
   if (!preparation) return null;
   const commitId = "commit-" + createPromptIdentity();
-  draftCommits.set(commitId, preparation);
-  const timeout = setTimeout(() => settleDraftCommit(commitId, true), DRAFT_COMMIT_TIMEOUT_MS);
+  draftCommits.set(commitId, { preparation, admitted: false });
+  const timeout = setTimeout(() => settleDraftCommit(commitId, false, DRAFT_SILENT_COPY), DRAFT_COMMIT_TIMEOUT_MS);
   preparation.done.then(() => clearTimeout(timeout));
   postToFrame({ type: "lavish:commitDraft", commit_id: commitId });
   return preparation;
 }
 
-function settleDraftCommit(commitId, committed) {
-  const preparation = draftCommits.get(commitId);
-  if (!preparation) return;
+// The commit id went to the untrusted page, so it admits one card note, unkeyed, and nothing else.
+function admitCommittedPrompt(commitId, rawPrompt) {
+  const commit = draftCommits.get(commitId);
+  if (!commit || commit.admitted || !rawPrompt || CHROME_OWNED_TAGS.has(String(rawPrompt.tag || ""))) return null;
+  commit.admitted = true;
+  const prompt = { ...rawPrompt };
+  delete prompt[internalQueueKeyField];
+  return { prompt, preparation: commit.preparation };
+}
+
+function settleDraftCommit(commitId, committed, heldCopy = DRAFT_HELD_COPY) {
+  const commit = draftCommits.get(commitId);
+  if (!commit) return;
   draftCommits.delete(commitId);
-  if (!committed) showSendHint(DRAFT_HELD_COPY, 6000, false);
-  preparation.finish(committed);
+  if (!committed) {
+    skipNextDraftCommit = true;
+    showSendHint(heldCopy, 6000, false);
+  }
+  commit.preparation.finish(committed);
+}
+
+// Puts an open edit's words on its note before a send takes the notes, or drops an emptied edit.
+function settleOpenEdit() {
+  if (!editingNote) return;
+  if (editingNote.text.trim()) saveEditedNote();
+  else stopEditingNote();
 }
 
 function sendQueued(endAfter) {
@@ -2507,10 +2546,7 @@ function sendQueued(endAfter) {
   }
   closeMenus();
   // A note being reworded goes with the words it has now.
-  if (editingNote) {
-    if (editingNote.text.trim()) saveEditedNote();
-    else stopEditingNote();
-  }
+  settleOpenEdit();
 
   // A pending or failed chip holds back only the COMPOSER message (and an
   // explicit end, which would strand the chips) - queued annotation prompts
@@ -2542,6 +2578,8 @@ function sendQueued(endAfter) {
 }
 
 function submitNotes(chipsBlocked) {
+  // An edit opened while the send waited for the card goes with its new words too.
+  settleOpenEdit();
   if (!queued.length) {
     if (!chipsBlocked && !sendFailureOwner) showSendHint();
     return;
@@ -3631,6 +3669,12 @@ async function refreshLayoutWarnings() {
   } catch {
     // Keep whatever the chrome already has; never clear on a failed refresh.
   }
+}
+
+// Ending the review never drops his notes: with any waiting, the end goes with them, as Send & End.
+function endReview() {
+  if (queued.length) sendQueued(true);
+  else endSession();
 }
 
 async function endSession(terminal = null) {
@@ -4796,7 +4840,9 @@ window.addEventListener("message", (event) => {
   // The artifact spoke, so it rendered and ran its SDK - there is nothing fatal to probe for.
   if (msg.type === "lavish:queuePrompt") {
     // A card's words committed for a send join that send, even once its batch is reserved.
-    enqueuePrompt(msg.prompt, draftCommits.get(String(msg.commit_id || "")) || null);
+    const committed = admitCommittedPrompt(String(msg.commit_id || ""), msg.prompt);
+    if (committed) enqueuePrompt(committed.prompt, committed.preparation);
+    else enqueuePrompt(msg.prompt);
     // Queued from inside the artifact, where the closed dock is the only sign it landed.
     pulseSheetDock();
   }
@@ -4827,7 +4873,7 @@ window.addEventListener("message", (event) => {
   // removal note below: the iframe cannot be trusted to decide a delete, and the
   // chrome cannot see every live reference, so reclamation is the sweeper's job.
   if (msg.type === "lavish:sendQueuedPrompts") sendQueued(msg.endSession === true);
-  if (msg.type === "lavish:endSession") endSession();
+  if (msg.type === "lavish:endSession") endReview();
   if (msg.type === "lavish:revisions") applyRevisionMessage(msg);
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();
 });
@@ -5124,7 +5170,7 @@ copyShareSiteIdButton.onclick = () => copyToButton(shareSiteIdInput.value, copyS
 shareGenerateInput.onchange = syncSharePasswordInput;
 endButton.onclick = () => {
   closeMenus();
-  endSession();
+  endReview();
 };
 handoffTakeoverButton.onclick = () => location.reload();
 if (outdatedReloadButton) outdatedReloadButton.onclick = () => reloadChromeForOutdatedBanner();

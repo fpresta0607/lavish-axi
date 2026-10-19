@@ -805,6 +805,31 @@ test("an added note's chip keeps its element selected until the chip closes", ()
   assert.equal(sdk.selection().selection, null);
 });
 
+// A document that reloads or navigates by itself is new to the chrome too, so it says at once that
+// nothing in it is selected.
+test("a new document reports that nothing is selected", () => {
+  const sdk = bootSdk();
+
+  assert.equal(sdk.selection().selection, null);
+  assert.equal(sdk.selection().card, false);
+});
+
+test("clearing the selection leaves a card holding an image open, and says it is still selected", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  const attachInput = sdk.card().querySelector(".lavish-attach-input");
+  attachInput.files = [{ name: "shot.png", type: "image/png", size: 10, arrayBuffer: () => new Promise(() => {}) }];
+  attachInput.listeners.find((entry) => entry.type === "change").handler();
+  const reports = sdk.posted.filter((message) => message.type === "lavish:selection").length;
+  sdk.sendChromeMessage({ type: "lavish:clearSelection" });
+
+  assert.equal(sdk.cards().length, 1, "an image has nowhere to be kept");
+  assert.equal(sdk.posted.filter((message) => message.type === "lavish:selection").length, reports + 1);
+  assert.equal(sdk.selection().selection.tag, "p");
+});
+
 test("the chrome can clear the selection, and a card's words are kept for its next card", () => {
   const sdk = bootSdk();
   const heading = appendTo(sdk.body, cell("h2", "Pricing"));

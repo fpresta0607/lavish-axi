@@ -540,7 +540,7 @@ export function createArtifactSdk(
   /** @type {{ target: any, options: any, context: any, label: string } | null} */
   let selectedNote = null;
   // The open card's own actions, for the chrome's requests to commit or clear it.
-  /** @type {{ commit: (commitId: string) => boolean, cancel: () => void, isEmpty: () => boolean } | null} */
+  /** @type {{ commit: (commitId: string) => boolean, cancel: () => void, isEmpty: () => boolean, holdsImage: () => boolean } | null} */
   let activeCard = null;
   let reportedSelection = "";
   // Words typed into a card that was cancelled, kept for that element's next card as the board
@@ -2757,6 +2757,7 @@ export function createArtifactSdk(
       commit: (commitId) => isEmpty() || tryQueue(commitId),
       cancel: cancelCard,
       isEmpty,
+      holdsImage: () => attachments.hasPending() || attachments.hasErrors() || attachments.hasReady(),
     };
     selectedNote = { target, options, context: c, label };
     reportSelection();
@@ -2780,6 +2781,9 @@ export function createArtifactSdk(
     setStatus: (message) => postArtifactMessage("lavish:status", { message: String(message) }),
     snapshot,
   };
+  // A document that reloaded or navigated by itself is new to the chrome too: nothing in it is
+  // selected yet.
+  reportSelection();
 
   window.addEventListener("message", (event) => {
     // The chrome is the only legitimate sender. This listener is on `window`, so
@@ -2816,7 +2820,12 @@ export function createArtifactSdk(
       postArtifactMessage("lavish:draftCommitted", { commit_id: commitId, committed });
     }
     if (msg.type === "lavish:clearSelection") {
-      if (activeCard) activeCard.cancel();
+      // A card holding an image stays open, as on Escape, because an image has nowhere to be kept:
+      // the chrome is told again that it is still selected.
+      if (activeCard?.holdsImage()) {
+        reportedSelection = "";
+        reportSelection();
+      } else if (activeCard) activeCard.cancel();
       else closeCard();
     }
     // The chrome put a note from the Conversation box on what is selected here: an empty card

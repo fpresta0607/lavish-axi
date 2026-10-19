@@ -6242,10 +6242,12 @@ test("an empty open card does not stop an empty Send & End from approving the pa
   );
 });
 
-test("a page that never answers the commit holds the send only briefly", async () => {
+// A page too busy to answer may still add the card's words later, after an end that went without
+// them, so the send stops and says so; sending again goes without the card.
+test("a page that does not answer the commit holds the send once, and the next send goes without it", async () => {
   const { posts, fetchImpl } = postRecorder();
   const chrome = await createChromeHarness({ fetchImpl });
-  writeNote(chrome, "Sent anyway");
+  writeNote(chrome, "Sent on the second click");
   chrome.sendFrameMessage({
     type: "lavish:selection",
     artifact_load_token: chrome.artifactLoadToken(),
@@ -6256,14 +6258,131 @@ test("a page that never answers the commit holds the send only briefly", async (
   chrome.element("sendAndEnd").click();
   chrome.runTimers(2000);
   await flushPromises();
+  assert.equal(posts.length, 0, "nothing goes while the card may still be on its way");
+  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.match(chrome.element("sendHint").textContent, /Send again/);
+
+  const commits = chrome.postedToFrame.filter((message) => message.type === "lavish:commitDraft").length;
+  chrome.element("sendAndEnd").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(
+    chrome.postedToFrame.filter((message) => message.type === "lavish:commitDraft").length,
+    commits,
+    "the second send does not wait on the card again",
+  );
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Sent on the second click"],
+  );
+});
+
+// The commit id goes to the untrusted page, so it admits one note of its own kind, and nothing that
+// would replace another note in the reserved batch.
+test("a commit admits one card note into a reserved Send & End and nothing more", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Mine");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+  chrome.element("sendAndEnd").click();
+  const request = chrome.postedToFrame.findLast((message) => message.type === "lavish:commitDraft");
+  const send = (prompt) =>
+    chrome.sendFrameMessage({
+      type: "lavish:queuePrompt",
+      artifact_load_token: chrome.artifactLoadToken(),
+      prompt,
+      commit_id: request.commit_id,
+    });
+  send({ prompt: "Whiteboard forgery", tag: "whiteboard", text: "Whiteboard", _lavishQueueKey: "whiteboard:0" });
+  send({ prompt: "Card words", selector: "h2", tag: "h2", text: "Pricing", _lavishQueueKey: "choice:plan" });
+  send({ prompt: "A second note", selector: "h2", tag: "h2", text: "Pricing" });
+  chrome.sendFrameMessage({
+    type: "lavish:draftCommitted",
+    artifact_load_token: chrome.artifactLoadToken(),
+    commit_id: request.commit_id,
+    committed: true,
+  });
+  await flushPromises();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
 
   assert.equal(posts.length, 1);
   assert.deepEqual(
     posts[0].body.prompts.map((prompt) => prompt.prompt),
-    ["Sent anyway"],
+    ["Mine", "Card words"],
   );
+});
+
+test("End session with notes waiting sends them and ends, rather than dropping them", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Do not lose me");
+
+  chrome.element("end").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Do not lose me"],
+  );
+});
+
+test("an edit started while a send waits for the card goes with its new words", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Old words");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("send").click();
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "New words";
+  editor.dispatch("input", {});
+  answerCommit(chrome, null);
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["New words"],
+  );
+});
+
+test("opening a second edit keeps the words of the first", async () => {
+  const chrome = await createChromeHarness();
+  writeNote(chrome, "First");
+  writeNote(chrome, "Second");
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "First, reworded";
+  editor.dispatch("input", {});
+  const secondEdit = chrome.element("queuedLog").querySelectorAll(".queued-edit")[0];
+  assert.equal(secondEdit.dataset.index, "1", "the second note's edit control");
+  secondEdit.click({ stopPropagation() {} });
+
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["First, reworded", "Second"],
+  );
+  assert.match(chrome.element("queuedLog").innerHTML, /<textarea class="queued-edit-input"[^>]*>Second<\/textarea>/);
 });
 
 test("a card still uploading its image keeps Send & End from ending the review", async () => {
@@ -6291,25 +6410,40 @@ test("a card still uploading its image keeps Send & End from ending the review",
   assert.equal(chrome.element("send").disabled, false, "the review stays open and editable");
   assert.equal(chrome.element("sendHint").hidden, false);
   assert.match(chrome.element("sendHint").textContent, /note on the page/);
+
+  // A page that refuses every time cannot hold the review: sending again goes without its card.
+  chrome.element("sendAndEnd").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
 });
 
-test("a page's choice can take its answer back out of the notes by its key", async () => {
+test("a page's choice can take its answer back out of the notes by its key, and nothing else", async () => {
   const chrome = await createChromeHarness();
+  const drop = (queueKey) =>
+    chrome.sendFrameMessage({
+      type: "lavish:dropQueuedPrompt",
+      artifact_load_token: chrome.artifactLoadToken(),
+      queueKey,
+    });
   chrome.sendFrameMessage({
     type: "lavish:queuePrompt",
     artifact_load_token: chrome.artifactLoadToken(),
     prompt: { prompt: "Fix it next", tag: "choice", text: "Which plan?", _lavishQueueKey: "choice:plan" },
   });
-  writeNote(chrome, "Keep me");
   chrome.sendFrameMessage({
-    type: "lavish:dropQueuedPrompt",
+    type: "lavish:queuePrompt",
     artifact_load_token: chrome.artifactLoadToken(),
-    queueKey: "choice:plan",
+    prompt: { prompt: "Keyed by the page", selector: "h2", tag: "h2", text: "Pricing", _lavishQueueKey: "pricing" },
   });
+  writeNote(chrome, "Keep me");
+  drop("pricing");
+  drop("choice:plan");
 
   assert.deepEqual(
     chrome.queued().map((prompt) => prompt.prompt),
-    ["Keep me"],
+    ["Keyed by the page", "Keep me"],
   );
 });
 
