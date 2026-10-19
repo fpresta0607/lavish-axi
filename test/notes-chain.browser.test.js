@@ -51,6 +51,7 @@ async function rewritingProxy(target) {
   const net = await import("node:net");
   const loopback = "127.0.0.1:" + target;
   const rewrite = (headers) => {
+    /** @type {Record<string, string | string[] | undefined>} */
     const out = {};
     for (const [name, value] of Object.entries(headers)) {
       if (/^(x-forwarded-|tailscale-)/i.test(name) || /^forwarded$/i.test(name)) continue;

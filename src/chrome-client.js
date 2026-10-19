@@ -2459,6 +2459,7 @@ function addComposerNote() {
   const text = chatInput.value.trim();
   const attachments = chatAttachmentController.collectReady();
   if (!text && !attachments.length) return true;
+  /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: object, attachments?: Array<{ id: string, name?: string }> }} */
   const prompt = pageSelection
     ? { ...pageSelection, prompt: text }
     : { uid: "", prompt: text, selector: "", tag: "message", text: WHOLE_PAGE };
