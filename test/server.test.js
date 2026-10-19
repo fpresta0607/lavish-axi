@@ -1357,6 +1357,18 @@ function availableConcreteIpv4() {
   return null;
 }
 
+// The port is free at host only: the kernel checks no other address when it picks one. serve() with
+// port 0 binds loopback first and the LAN address at the same port after it, and on macOS a port free
+// on loopback can still be the local port of a connection at the LAN address, so a test that binds
+// both picks the port there.
+async function freePort(host) {
+  const probe = createServer();
+  await new Promise((resolve) => probe.listen({ port: 0, host }, () => resolve(undefined)));
+  const { port } = /** @type {{ port: number }} */ (probe.address());
+  await new Promise((resolve) => probe.close(() => resolve(undefined)));
+  return port;
+}
+
 test("resolved all-interfaces aliases are rejected before listening", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-wildcard-alias-"));
   try {
@@ -1568,7 +1580,7 @@ test("Tailscale mode binds concrete listeners, serves the MagicDNS link, and tea
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailscale-"));
   const magicDnsName = "review-phone.example.ts.net";
   const server = await serve({
-    port: 0,
+    port: await freePort(tailscaleIpv4),
     stateFile: path.join(dir, "state.json"),
     version: "9.9.9-test",
     env: {},
@@ -1939,7 +1951,7 @@ test("a plain-http page link that reaches a non-loopback address goes to the htt
   await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
   let serveStatus = "{}";
   const server = await serve({
-    port: 0,
+    port: await freePort(concrete),
     stateFile: path.join(dir, "state.json"),
     version: "9.9.9-test",
     env: {},
