@@ -50,7 +50,10 @@ test("the SDK bundle applies upload results and offers a retry", () => {
 test("the SDK bundle carries ready attachment refs on the queued prompt", () => {
   assert.match(sdk, /options\.attachments/);
   assert.match(sdk, /item\.attachments = attachments/);
-  assert.match(sdk, /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, noteId \}\)/);
+  assert.match(
+    sdk,
+    /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, noteId, commitId \}\)/,
+  );
 });
 
 // A list in a shadow root, as the annotation card's chips are: its root says what has focus.
@@ -162,13 +165,8 @@ test("the SDK bundle gates queuing until in-flight uploads settle (R2.4)", () =>
   // hasPending flags any still-uploading chip, and the queue path bails on it so an
   // in-flight image is never silently dropped by collectReady/closeCard.
   assert.match(sdk, /function hasPending\(\)\s*\{\s*return items\.some\(\(item\) => item\.status === "uploading"\)/);
-  assert.match(sdk, /if \(attachments\.hasPending\(\)\)/);
+  assert.match(sdk, /if \(attachments\.hasPending\(\) \|\| attachments\.hasErrors\(\)\)/);
   assert.match(sdk, /Waiting for an image to finish uploading/);
-  // "Send now" only fires when the queue actually happened.
-  assert.match(
-    sdk,
-    /const queued = tryQueue\(!queueOnly\);\s*\n?\s*[\s\S]*?if \(queued && !queueOnly\) sendQueuedPrompts\(\)/,
-  );
 });
 
 test("the count-cap notice reads as an error, not as the passive keyboard hint", () => {

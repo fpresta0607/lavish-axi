@@ -515,6 +515,7 @@ export function createArtifactSdk(
     "M5 4.5h14A1.5 1.5 0 0 1 20.5 6v9a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V6A1.5 1.5 0 0 1 5 4.5Z",
   );
   const CHECK_ICON = boardIcon("M5 12.5 9.5 17 19 7.5");
+  const PLUS_ICON = boardIcon("M12 5v14M5 12h14");
   const EXIT_ICON = boardIcon("M9 20.5H5.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H9M16 16.5l4.5-4.5L16 7.5M20.5 12H9");
   const CHECK_DOUBLE_ICON = boardIcon("M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5");
   const CLOCK_ICON = boardIcon("M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM12 7.5V12l3 2");
@@ -531,14 +532,22 @@ export function createArtifactSdk(
   let pin = null;
   /** @type {{ getBoundingClientRect: () => DOMRect } | null} */
   let annotated = null;
-  // The chip a sent note shrinks to, and what the chrome last said of that note's delivery.
-  /** @type {{ el: HTMLElement, noteId: string, label: string, status: string, sawSending: boolean, sendRequested: boolean, render: () => void } | null} */
+  // The chip an added note shrinks to, and what the chrome last said of that note's delivery.
+  /** @type {{ el: HTMLElement, noteId: string, label: string, text: string, status: string, sawSending: boolean, render: () => void } | null} */
   let activeChip = null;
+  // What a note written now is about: the element or text range of the open card or of the chip.
+  // The chrome is told, so a note from the Conversation box goes on it too.
+  /** @type {{ target: any, options: any, context: any, label: string } | null} */
+  let selectedNote = null;
+  // The open card's own actions, for the chrome's requests to commit or clear it.
+  /** @type {{ commit: (commitId: string) => boolean, cancel: () => void, isEmpty: () => boolean } | null} */
+  let activeCard = null;
+  let reportedSelection = "";
   // Words typed into a card that was cancelled, kept for that element's next card as the board
   // keeps a cancelled diff comment.
   const cancelledDrafts = new Map();
   // The question cards drawn for the choices this page declares, and what was picked on each.
-  /** @type {Array<{ question: { id: string, question: string, detail: string, asker: string, options: string[], recommended: string }, form: HTMLElement, selection: string, written: string, answered: string, noteId: string, status: string, sawSending: boolean, render: () => void }>} */
+  /** @type {Array<{ question: { id: string, question: string, detail: string, asker: string, options: string[], recommended: string }, form: HTMLElement, selection: string, written: string, answered: string, pending: string, noteId: string, status: string, sawSending: boolean, render: () => void, follow: (status: string) => void }>} */
   const choiceCards = [];
   const NOTE_ID_PREFIX = Date.now().toString(36) + "-";
   let noteCounter = 0;
@@ -1301,6 +1310,28 @@ export function createArtifactSdk(
     setMermaidFrozen(annotationMode);
   }
 
+  // What is selected, as the chrome may put it on a note: plain fields only, since a text range's
+  // context also holds the live element and Range, which a message cannot carry.
+  function reportSelection() {
+    const c = selectedNote ? selectedNote.context : null;
+    const report = {
+      selection: c
+        ? {
+            uid: String(c.uid || ""),
+            selector: String(c.selector || ""),
+            tag: String(c.tag || ""),
+            text: String(c.text || ""),
+            ...(c.target ? { target: c.target } : {}),
+          }
+        : null,
+      card: Boolean(activeCard),
+    };
+    const key = JSON.stringify(report);
+    if (key === reportedSelection) return;
+    reportedSelection = key;
+    postArtifactMessage("lavish:selection", report);
+  }
+
   function queuePrompt(prompt, options = {}) {
     const originElement = options.element || document.activeElement || document.body;
     /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: unknown, attachments?: Array<{ id: string, name?: string }>, _lavishQueueKey?: string, _lavishNoteId?: string }} */
@@ -1331,7 +1362,11 @@ export function createArtifactSdk(
       if (attachments.length) item.attachments = attachments;
     }
 
-    postArtifactMessage("lavish:queuePrompt", { prompt: item });
+    // A note committed for a send names that send's request, so it joins that very batch.
+    postArtifactMessage("lavish:queuePrompt", {
+      prompt: item,
+      ...(options.commitId ? { commit_id: options.commitId } : {}),
+    });
   }
 
   // `endSession` asks the chrome to send the queue and end the review as one request, so the
@@ -2258,6 +2293,7 @@ export function createArtifactSdk(
         selection: card.selection,
         written: card.written.slice(0, 4000),
         answered: card.answered,
+        noteId: card.noteId,
       })),
       fields: lavishQuestionControls().map((entry) => ({
         key: entry.key,
@@ -2285,6 +2321,10 @@ export function createArtifactSdk(
       if (!card || card.answered) continue;
       card.selection = typeof saved.selection === "string" ? saved.selection.slice(0, 400) : "";
       card.written = typeof saved.written === "string" ? saved.written.slice(0, 4000) : "";
+      // The chrome's notes outlive this document, so an answer given before the reload is still
+      // there under its note's id: the card follows that note again and adds nothing to the notes.
+      if (typeof saved.noteId === "string" && saved.noteId.length <= 64) card.noteId = saved.noteId;
+      if (card.noteId) card.pending = choiceAnswer(card.question, card.selection, card.written);
       // An answer already sent stays sent: restoring never sends it again.
       if (typeof saved.answered === "string" && saved.answered) {
         card.answered = saved.answered.slice(0, 4000);
@@ -2376,6 +2416,8 @@ export function createArtifactSdk(
 
   function closeCard() {
     activeCardContext = null;
+    activeCard = null;
+    selectedNote = null;
     if (activeAttachments) {
       activeAttachments.destroy();
       activeAttachments = null;
@@ -2392,11 +2434,13 @@ export function createArtifactSdk(
     clearTextHighlight();
     selected = null;
     scheduleReviewStateReport();
+    reportSelection();
   }
 
-  // What a note's delivery reads as on its chip: the board's marks, one check while it is on its
-  // way and two once delivered. A note that drops back to the queue after it was being sent did
-  // not get through, and says so.
+  // What a note's delivery reads as on its chip: the board's marks, a clock while it waits in the
+  // notes, one check while it is on its way and two once delivered. A note that drops back to the
+  // notes after it was being sent did not get through, and says so. A choice that was sent with
+  // its card's own Send reads as on its way at once.
   function noteMark(chip) {
     if (chip.status === "delivered") return { tone: " succeeded", icon: CHECK_DOUBLE_ICON, label: "Delivered" };
     if (chip.status === "restored") return { tone: "", icon: CHECK_ICON, label: "Sent" };
@@ -2405,18 +2449,18 @@ export function createArtifactSdk(
         tone: " uncertain",
         icon: WARNING_ICON,
         label: "Not sent",
-        trouble: "Not sent. It is still in the queue: Send to Agent tries again.",
+        trouble: "Not sent. It is still in your notes: Send to Agent tries again.",
       };
     }
     if (chip.status === "queued" && !chip.sendRequested) {
-      return { tone: "", icon: CLOCK_ICON, label: "Queued: Send to Agent sends it" };
+      return { tone: "", icon: CLOCK_ICON, label: "In your notes: Send to Agent or Send & End sends them all" };
     }
     return { tone: "", icon: CHECK_ICON, label: "Sending" };
   }
 
-  // Once sent, the card shrinks to the board's chip in the same place: what the note is about,
+  // Once added, the card shrinks to the board's chip in the same place: what the note is about,
   // what it says, its delivery, a new comment on the same thing, and close.
-  function showSentChip(target, options, c, label, noteText, noteId, sendRequested) {
+  function showSentChip(target, options, c, label, noteText, noteId) {
     const root = ensureShadow();
     closeCard();
     if (options.range) {
@@ -2436,9 +2480,9 @@ export function createArtifactSdk(
       el,
       noteId,
       label,
+      text: noteText,
       status: "queued",
       sawSending: false,
-      sendRequested,
       render() {
         const mark = noteMark(chip);
         el.setAttribute("aria-label", "Comment on " + label + ". " + mark.label);
@@ -2450,7 +2494,7 @@ export function createArtifactSdk(
           '</span><p class="comment-sent-text"><strong>' +
           escapeAnnotationText(label) +
           "</strong> " +
-          escapeAnnotationText(noteText || "Image annotation") +
+          escapeAnnotationText(chip.text || "Image annotation") +
           '</p><button class="icon-button lavish-chip-new" type="button" aria-label="New comment on this" data-tip="New comment" data-tip-align="end">' +
           COMMENT_ICON +
           '</button><button class="icon-button lavish-chip-close" type="button" aria-label="Close" data-tip="Close" data-tip-align="end">' +
@@ -2466,22 +2510,15 @@ export function createArtifactSdk(
       },
     };
     activeChip = chip;
+    selectedNote = { target, options, context: c, label };
     chip.render();
+    reportSelection();
   }
 
   function updateNoteStatus(noteId, status) {
     const answered = choiceCards.find((card) => card.noteId && card.noteId === String(noteId || ""));
     if (answered) {
-      // The answer was taken out of the queue before it went: the question is open again.
-      if (status === "removed") {
-        answered.answered = "";
-        answered.noteId = "";
-        scheduleReviewStateReport();
-      } else if (status === "queued" || status === "sending" || status === "delivered") {
-        if (status === "sending") answered.sawSending = true;
-        answered.status = status;
-      }
-      answered.render();
+      answered.follow(status);
       return;
     }
     if (!activeChip || activeChip.noteId !== String(noteId || "")) return;
@@ -2556,7 +2593,6 @@ export function createArtifactSdk(
           : c.tag === "mermaid-node"
             ? "Tell the agent what to change about this diagram node..."
             : "Tell the agent what to change about this element...";
-    const sendNowHint = /Mac|iP(hone|ad|od)/.test(navigator.platform) ? "⌘" : "Ctrl";
     card.innerHTML =
       '<header><strong class="lavish-heading">' +
       heading +
@@ -2568,11 +2604,9 @@ export function createArtifactSdk(
       '</button><input class="lavish-attach-input" type="file" accept="' +
       ATTACHMENT_IMAGE_TYPES.accept +
       '" multiple hidden></div></div><div class="lavish-attachments" data-attachments hidden></div>' +
-      '<footer><span class="muted lavish-hint">Enter sends &middot; Shift+Enter new line &middot; Esc cancels' +
-      '</span><button class="icon-button send lavish-send" type="button" aria-label="Send to the agent" data-tip="Send. ' +
-      sendNowHint +
-      '+Enter only queues it" data-tip-align="end">' +
-      SEND_ICON +
+      '<footer><span class="muted lavish-hint">Enter adds it to your notes &middot; Shift+Enter new line &middot; Esc cancels' +
+      '</span><button class="icon-button send lavish-add" type="button" aria-label="Add to your notes" data-tip="Add to your notes. Send to Agent sends them all" data-tip-align="end">' +
+      PLUS_ICON +
       '</button><button class="icon-button lavish-cancel" type="button" aria-label="Cancel" data-tip="Cancel" data-tip-align="end">' +
       CLOSE_ICON +
       "</button></footer>";
@@ -2592,12 +2626,12 @@ export function createArtifactSdk(
 
     const textarea = /** @type {HTMLTextAreaElement | null} */ (card.querySelector("textarea"));
     const cancelButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-cancel"));
-    const sendButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-send"));
+    const addButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-add"));
     const attachmentsList = /** @type {HTMLDivElement | null} */ (card.querySelector("[data-attachments]"));
     const attachButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-attach"));
     const attachInput = /** @type {HTMLInputElement | null} */ (card.querySelector(".lavish-attach-input"));
     const attachNotice = /** @type {HTMLDivElement | null} */ (card.querySelector(".lavish-hint"));
-    if (!textarea || !cancelButton || !sendButton || !attachmentsList || !attachButton || !attachInput) return;
+    if (!textarea || !cancelButton || !addButton || !attachmentsList || !attachButton || !attachInput) return;
 
     // The card has one notice line, shared by the neutral keyboard hint and by
     // attachment problems (the count cap, a stalled upload, a failed one). A rejected
@@ -2654,21 +2688,16 @@ export function createArtifactSdk(
       }
     });
 
-    // Try to queue the card. Returns the note's id only if a prompt was actually queued, so
-    // the caller knows whether a follow-up send should fire. Gates on any
-    // still-uploading attachment (R2.4): queuing then would silently drop it, so we
+    // Try to add the card to the notes. Returns false only when it is held back. Gates on any
+    // still-uploading attachment (R2.4): adding it then would silently drop it, so we
     // keep the card open and tell the user to wait instead. Also gates on any errored
     // attachment (W2): collectReady drops errors and closeCard tears down the card, so
-    // queuing would discard the failed image and its retry/remove UI - keep the card
+    // adding it would discard the failed image and its retry/remove UI - keep the card
     // open so the user can retry or explicitly remove it first.
-    function tryQueue(sendRequested) {
-      if (attachments.hasPending()) {
+    function tryQueue(commitId = "") {
+      if (attachments.hasPending() || attachments.hasErrors()) {
         attachments.setQueueBlocked(true);
-        return "";
-      }
-      if (attachments.hasErrors()) {
-        attachments.setQueueBlocked(true);
-        return "";
+        return false;
       }
       attachments.setQueueBlocked(false);
       const prompt = textarea.value.trim();
@@ -2677,15 +2706,17 @@ export function createArtifactSdk(
       // refers to), but never queue an empty card.
       if (!prompt && !readyAttachments.length) {
         closeCard();
-        return "";
+        return true;
       }
       noteCounter += 1;
       const noteId = NOTE_ID_PREFIX + noteCounter;
-      queuePrompt(prompt, { ...c, queueKey: "", attachments: readyAttachments, noteId });
+      queuePrompt(prompt, { ...c, queueKey: "", attachments: readyAttachments, noteId, commitId });
       cancelledDrafts.delete(draftKey);
-      showSentChip(target, options, c, label, prompt, noteId, sendRequested);
-      return noteId;
+      showSentChip(target, options, c, label, prompt, noteId);
+      return true;
     }
+    const isEmpty = () =>
+      !textarea.value.trim() && !attachments.hasReady() && !attachments.hasPending() && !attachments.hasErrors();
 
     // Cancelling keeps the words for this element's next card, as the board keeps a cancelled
     // diff comment; nothing typed is thrown away by a stray Escape.
@@ -2696,18 +2727,13 @@ export function createArtifactSdk(
     }
 
     cancelButton.onclick = cancelCard;
-    sendButton.onclick = () => {
-      if (tryQueue(true)) sendQueuedPrompts();
-    };
+    addButton.onclick = () => tryQueue();
     textarea.addEventListener("keydown", (event) => {
       if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
         event.preventDefault();
-        // Enter sends, as on the board. Ctrl or Cmd only adds the note to the queue, for several
-        // notes that go together with one Send to Agent.
-        const queueOnly = event.ctrlKey || event.metaKey;
-        const queued = tryQueue(!queueOnly);
-        // postMessage delivery is ordered, so the queued prompt lands before the send.
-        if (queued && !queueOnly) sendQueuedPrompts();
+        // Enter adds the note to his notes; only Send to Agent or Send & End sends, all of them
+        // together (the Overlord, 2026-10-18).
+        tryQueue();
       } else if (event.key === "Escape" && !event.isComposing) {
         // An image has nowhere to be kept, so a card holding one stays open; excludes isComposing
         // since mid-IME text isn't in textarea.value yet.
@@ -2726,6 +2752,14 @@ export function createArtifactSdk(
       // living until the next keystroke.
       scheduleReviewStateReport();
     }
+    activeCard = {
+      // A held-back card keeps its words and says why on itself; an empty one has nothing to add.
+      commit: (commitId) => isEmpty() || tryQueue(commitId),
+      cancel: cancelCard,
+      isEmpty,
+    };
+    selectedNote = { target, options, context: c, label };
+    reportSelection();
     setTimeout(() => textarea.focus(), 0);
   }
 
@@ -2769,6 +2803,28 @@ export function createArtifactSdk(
     if (msg.type === "lavish:restoreReviewState") restoreReviewState(msg.state);
     if (msg.type === "lavish:noteStatus") updateNoteStatus(msg.noteId, msg.status);
     if (msg.type === "lavish:revealElement") revealElement(msg.selector);
+    // A note reworded in the Conversation panel says its new words on its chip.
+    if (msg.type === "lavish:noteText" && activeChip && activeChip.noteId === String(msg.noteId || "")) {
+      activeChip.text = String(msg.text || "");
+      activeChip.render();
+    }
+    // A send takes the open card's unfinished words with it. postMessage is ordered, so the note
+    // reaches the chrome before the answer that it is done.
+    if (msg.type === "lavish:commitDraft") {
+      const commitId = String(msg.commit_id || "");
+      const committed = activeCard ? activeCard.commit(commitId) : true;
+      postArtifactMessage("lavish:draftCommitted", { commit_id: commitId, committed });
+    }
+    if (msg.type === "lavish:clearSelection") {
+      if (activeCard) activeCard.cancel();
+      else closeCard();
+    }
+    // The chrome put a note from the Conversation box on what is selected here: an empty card
+    // gives way to that note's chip, as if it had been written in the card.
+    if (msg.type === "lavish:selectionNoted" && selectedNote && (!activeCard || activeCard.isEmpty())) {
+      const { target, options: noteOptions, context: c, label } = selectedNote;
+      showSentChip(target, noteOptions, c, label, String(msg.text || ""), String(msg.noteId || ""));
+    }
   });
 
   // Bring a warning's element into view and flash it. The marker is Lavish UI, so it is excluded
@@ -2960,9 +3016,10 @@ export function createArtifactSdk(
   // ---- The choices a page declares (src/page-choices.js) ----
   // Each declared question is drawn as the board's question card, where the declaration sits: a
   // plain radio list with the recommended option first and marked, Other for a written answer,
-  // and two buttons: Send, which keeps the review open, and End, which sends and ends it. A pick
-  // only selects. A card keeps its state here rather than in its controls, so a reload can
-  // restore it and a redraw never loses a half-made pick.
+  // and two buttons: Send, which keeps the review open, and End, which sends and ends it, both
+  // sending every note on the page. A pick joins those notes and sends nothing. A card keeps its
+  // state here rather than in its controls, so a reload can restore it and a redraw never loses a
+  // half-made pick.
   function createChoiceCard(question, host) {
     const form = document.createElement("form");
     form.className = "question-card";
@@ -3019,7 +3076,11 @@ export function createArtifactSdk(
         disabled +
         ">" +
         EXIT_ICON +
-        "End</button></div>"
+        'End</button></div><p class="question-pending question-outcome delivery" role="status"' +
+        (card.pending ? "" : " hidden") +
+        ">" +
+        CLOCK_ICON +
+        "In your notes: Send or End sends them all</p>"
       );
     }
 
@@ -3067,16 +3128,42 @@ export function createArtifactSdk(
       selection: "",
       written: "",
       answered: "",
+      // The answer waiting in the notes for a send, or "" when there is none.
+      pending: "",
       noteId: "",
       status: "queued",
       sawSending: false,
       render() {
         form.innerHTML = card.answered ? closedHtml() : openHtml();
       },
+      // What the chrome says of the answer's note. Taken out of the notes before it went, the
+      // question is open again; on its way, the card closes on what was chosen.
+      follow(status) {
+        if (status === "removed") {
+          card.answered = "";
+          card.pending = "";
+          card.selection = "";
+          card.status = "queued";
+          card.sawSending = false;
+          card.render();
+          scheduleReviewStateReport();
+          return;
+        }
+        if (status !== "queued" && status !== "sending" && status !== "delivered") return;
+        if (status === "sending") card.sawSending = true;
+        card.status = status;
+        if (!card.answered && status !== "queued" && card.pending) {
+          card.answered = card.pending;
+          scheduleReviewStateReport();
+        }
+        // An open card is not redrawn under the reader's cursor.
+        if (card.answered) card.render();
+      },
     };
 
-    // A pick or a keystroke changes two things only, so the card is not redrawn under the
-    // reader's cursor: whether the written answer shows, and whether there is an answer to send.
+    // A pick or a keystroke changes three things only, so the card is not redrawn under the
+    // reader's cursor: whether the written answer shows, whether there is an answer to send, and
+    // whether that answer is in the notes.
     function syncControls() {
       const written = /** @type {HTMLElement | null} */ (form.querySelector(".written-answer"));
       if (written) written.hidden = card.selection !== "other";
@@ -3085,12 +3172,42 @@ export function createArtifactSdk(
         const button = /** @type {HTMLButtonElement | null} */ (form.querySelector(selector));
         if (button) button.disabled = !hasAnswer;
       }
+      const pendingLine = /** @type {HTMLElement | null} */ (form.querySelector(".question-pending"));
+      if (pendingLine) pendingLine.hidden = !card.pending;
+    }
+
+    // The answer is one of his notes from the moment he gives it, so any Send carries it with the
+    // rest, and a new answer to the same question takes its place in the notes. The prompt is the
+    // answer exactly, the option as the page declared it or the words he wrote, with nothing
+    // appended: that text is what reaches whoever asked.
+    function noteAnswer() {
+      const answer = choiceAnswer(question, card.selection, card.written);
+      if (answer === card.pending) return;
+      const queueKey = "choice:" + question.id;
+      if (answer) {
+        if (!card.noteId) {
+          noteCounter += 1;
+          card.noteId = NOTE_ID_PREFIX + noteCounter;
+        }
+        queuePrompt(answer, {
+          element: host,
+          tag: "choice",
+          text: question.question,
+          selector: "script[data-lavish-choices]",
+          queueKey,
+          noteId: card.noteId,
+        });
+      } else {
+        postArtifactMessage("lavish:dropQueuedPrompt", { queueKey });
+      }
+      card.pending = answer;
     }
 
     form.addEventListener("change", (event) => {
       const control = /** @type {HTMLInputElement | null} */ (event.target);
       if (card.answered || !control || control.name !== "answer" || !control.checked) return;
       card.selection = String(control.value);
+      noteAnswer();
       syncControls();
       scheduleReviewStateReport();
     });
@@ -3098,29 +3215,19 @@ export function createArtifactSdk(
       const control = /** @type {HTMLTextAreaElement | null} */ (event.target);
       if (card.answered || !control || control.name !== "written") return;
       card.written = String(control.value);
+      noteAnswer();
       syncControls();
       scheduleReviewStateReport();
     });
+    // Send and End send every note, this answer with them; End ends the review in the same
+    // request.
     form.addEventListener("submit", (event) => {
       event.preventDefault();
-      const answer = choiceAnswer(question, card.selection, card.written);
-      if (!answer || card.answered) return;
+      if (!card.pending || card.answered) return;
       const isEnd = Boolean(event.submitter) && event.submitter === form.querySelector(".end-decision");
-      noteCounter += 1;
-      card.noteId = NOTE_ID_PREFIX + noteCounter;
-      card.answered = answer;
+      card.answered = card.pending;
       card.status = "queued";
       card.sawSending = false;
-      // The prompt is the answer exactly, the option as the page declared it or the words he
-      // wrote, with nothing appended: that text is what reaches whoever asked.
-      queuePrompt(answer, {
-        element: host,
-        tag: "choice",
-        text: question.question,
-        selector: "script[data-lavish-choices]",
-        queueKey: "choice:" + question.id,
-        noteId: card.noteId,
-      });
       sendQueuedPrompts(isEnd);
       card.render();
       scheduleReviewStateReport();

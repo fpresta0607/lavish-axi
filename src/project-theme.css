@@ -75,7 +75,9 @@ html[data-project-theme] .share-copy,
 html[data-project-theme] .share-note,
 html[data-project-theme] .bubble.note .note-draft,
 html[data-project-theme] .anchor-excerpt.text,
+html[data-project-theme] .queued-edit,
 html[data-project-theme] .queued-remove,
+html[data-project-theme] .composer-anchor-clear,
 html[data-project-theme] .bubble-attachment-more,
 html[data-project-theme] .panel-toggle {
   color: var(--theme-text);
@@ -108,7 +110,9 @@ html[data-project-theme] .revision-reveal:hover,
 html[data-project-theme] .button-danger:hover:not(:disabled),
 html[data-project-theme] .share-copy-btn:hover,
 html[data-project-theme] .share-cancel:hover,
+html[data-project-theme] .queued-edit:hover:not(:disabled),
 html[data-project-theme] .queued-remove:hover:not(:disabled),
+html[data-project-theme] .composer-anchor-clear:hover:not(:disabled),
 html[data-project-theme] .ended-action:hover:not(:disabled) {
   background: var(--theme-hover);
 }

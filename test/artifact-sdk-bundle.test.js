@@ -297,13 +297,19 @@ function bootSdk({
       assert.ok(card, "clicking an element opens an annotation card");
       return card;
     },
-    // The card's Send queues the note and sends the queue; what the note carried is the
-    // queuePrompt message, whatever followed it.
+    // The card's button adds the note to the page's notes; what the note carried is the
+    // queuePrompt message.
     queue(text) {
       const card = this.card();
       card.querySelector("textarea").value = text;
-      card.querySelector(".lavish-send").onclick();
+      card.querySelector(".lavish-add").onclick();
       return posted.findLast((message) => message.type === "lavish:queuePrompt");
+    },
+    // What the page last told the chrome is selected: a note's context, or null.
+    selection() {
+      const report = posted.findLast((message) => message.type === "lavish:selection");
+      assert.ok(report, "the SDK reports what is selected");
+      return report;
     },
     shadowChildren(className) {
       return documentElement.children
@@ -600,16 +606,31 @@ function pressEnter(textarea, modifiers = {}) {
 
 const postedTypes = (sdk) => sdk.posted.map((message) => message.type).filter((type) => /Prompt/.test(type));
 
-test("Enter sends the note: it is queued, then the queue is sent", () => {
+// Every note waits in the page's notes for Send or Send & End, which deliver them all together:
+// nothing a card does sends anything on its own (the Overlord, 2026-10-18).
+test("Enter, Ctrl+Enter and Cmd+Enter each add the note to the notes and send nothing", () => {
+  for (const modifier of [{}, { ctrlKey: true }, { metaKey: true }]) {
+    const sdk = bootSdk();
+    const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+    sdk.click(paragraph);
+    sdk.card().querySelector("textarea").value = "Reword this";
+    pressEnter(sdk.card().querySelector("textarea"), modifier);
+
+    assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt"]);
+    assert.equal(sdk.posted.find((message) => message.type === "lavish:queuePrompt").prompt.prompt, "Reword this");
+  }
+});
+
+test("the card's button adds the note to the notes and sends nothing", () => {
   const sdk = bootSdk();
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  sdk.card().querySelector("textarea").value = "Reword this";
-  pressEnter(sdk.card().querySelector("textarea"));
+  sdk.queue("Reword this");
 
-  assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt", "lavish:sendQueuedPrompts"]);
-  assert.equal(sdk.posted.find((message) => message.type === "lavish:queuePrompt").prompt.prompt, "Reword this");
+  assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt"]);
+  assert.equal(sdk.cards().length, 0, "the card has shrunk to its chip");
 });
 
 test("Shift+Enter is a new line and sends nothing", () => {
@@ -621,19 +642,6 @@ test("Shift+Enter is a new line and sends nothing", () => {
   pressEnter(sdk.card().querySelector("textarea"), { shiftKey: true });
 
   assert.deepEqual(postedTypes(sdk), []);
-});
-
-test("Ctrl+Enter and Cmd+Enter add the note to the queue without sending it", () => {
-  for (const modifier of [{ ctrlKey: true }, { metaKey: true }]) {
-    const sdk = bootSdk();
-    const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
-
-    sdk.click(paragraph);
-    sdk.card().querySelector("textarea").value = "One of several";
-    pressEnter(sdk.card().querySelector("textarea"), modifier);
-
-    assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt"]);
-  }
 });
 
 test("Enter on an empty card closes it and sends nothing", () => {
@@ -719,8 +727,22 @@ test("a note that falls back to the queue after a failed send says so on its chi
   assert.match(chip.innerHTML, /<span class="delivery uncertain" aria-hidden="true">/);
   assert.match(
     chip.innerHTML,
-    /<p class="comment-trouble lavish-hint-alert">Not sent\. It is still in the queue: Send to Agent tries again\.<\/p>/,
+    /<p class="comment-trouble lavish-hint-alert">Not sent\. It is still in your notes: Send to Agent tries again\.<\/p>/,
   );
+});
+
+test("a note reworded in the Conversation panel says its new words on its chip", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  const noteId = sdk.queue("Reword this").prompt._lavishNoteId;
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+  sdk.sendChromeMessage({ type: "lavish:noteText", noteId: "someone-else", text: "Not mine" });
+  sdk.sendChromeMessage({ type: "lavish:noteText", noteId, text: "Say <it> better" });
+
+  assert.match(chip.innerHTML, /<strong>&lt;p&gt;<\/strong> Say &lt;it&gt; better<\/p>/);
+  assert.doesNotMatch(chip.innerHTML, /Not mine/);
 });
 
 test("a chip ignores the status of a note that is not its own", () => {
@@ -735,16 +757,147 @@ test("a chip ignores the status of a note that is not its own", () => {
   assert.doesNotMatch(chip.innerHTML, /delivery succeeded/);
 });
 
-test("a note added to the queue without sending shows as queued on its chip", () => {
+test("an added note says on its chip that it waits in the notes for a send", () => {
   const sdk = bootSdk();
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
   sdk.card().querySelector("textarea").value = "One of several";
-  pressEnter(sdk.card().querySelector("textarea"), { ctrlKey: true });
+  pressEnter(sdk.card().querySelector("textarea"));
   const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
 
-  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Queued: Send to Agent sends it");
+  assert.equal(
+    chip.getAttribute("aria-label"),
+    "Comment on <p>. In your notes: Send to Agent or Send & End sends them all",
+  );
+});
+
+// ---- What is selected in the page, as the chrome's composer attaches its notes ----
+// A note written in the Conversation box while an element is selected belongs to that element, so
+// the page tells the chrome what is selected: the element of an open card or of a chip.
+
+test("an open card tells the chrome what is selected, and closing it clears the selection", () => {
+  const sdk = bootSdk();
+  const heading = appendTo(sdk.body, cell("h2", "Pricing"));
+
+  sdk.click(heading);
+  const opened = sdk.selection();
+  assert.equal(opened.selection.tag, "h2");
+  assert.equal(opened.selection.text, "Pricing");
+  assert.match(opened.selection.selector, /\S/);
+  assert.equal(opened.card, true);
+
+  pressEscape(sdk.card().querySelector("textarea"));
+  assert.equal(sdk.selection().selection, null);
+  assert.equal(sdk.selection().card, false);
+});
+
+test("an added note's chip keeps its element selected until the chip closes", () => {
+  const sdk = bootSdk();
+  const heading = appendTo(sdk.body, cell("h2", "Pricing"));
+
+  sdk.click(heading);
+  const noteId = sdk.queue("Make it bigger").prompt._lavishNoteId;
+  assert.equal(sdk.selection().selection.tag, "h2");
+  assert.equal(sdk.selection().card, false, "a chip is not a card with words to keep");
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
+  assert.equal(sdk.selection().selection, null);
+});
+
+test("the chrome can clear the selection, and a card's words are kept for its next card", () => {
+  const sdk = bootSdk();
+  const heading = appendTo(sdk.body, cell("h2", "Pricing"));
+
+  sdk.click(heading);
+  sdk.card().querySelector("textarea").value = "half a thought";
+  sdk.sendChromeMessage({ type: "lavish:clearSelection" });
+
+  assert.equal(sdk.cards().length, 0);
+  assert.equal(sdk.selection().selection, null);
+  sdk.click(heading);
+  assert.equal(sdk.card().querySelector("textarea").value, "half a thought");
+});
+
+test("a note the chrome added for the selection turns its empty card into that note's chip", () => {
+  const sdk = bootSdk();
+  const heading = appendTo(sdk.body, cell("h2", "Pricing"));
+
+  sdk.click(heading);
+  sdk.sendChromeMessage({ type: "lavish:selectionNoted", noteId: "chrome-note-1", text: "Dictated <words>" });
+
+  assert.equal(sdk.cards().length, 0, "the empty card gave way to the chip");
+  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
+  assert.match(chip.innerHTML, /<strong>&lt;h2&gt;<\/strong> Dictated &lt;words&gt;/);
+  assert.equal(postedTypes(sdk).includes("lavish:queuePrompt"), false, "the chrome already holds the note");
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId: "chrome-note-1", status: "delivered" });
+  assert.equal(sdk.shadowChildren("lavish-annotation-chip").length, 0);
+});
+
+test("a note the chrome added for the selection leaves a card with words of its own alone", () => {
+  const sdk = bootSdk();
+  const heading = appendTo(sdk.body, cell("h2", "Pricing"));
+
+  sdk.click(heading);
+  sdk.card().querySelector("textarea").value = "my own words";
+  sdk.sendChromeMessage({ type: "lavish:selectionNoted", noteId: "chrome-note-1", text: "Dictated" });
+
+  assert.equal(sdk.card().querySelector("textarea").value, "my own words");
+});
+
+// ---- Send & End takes a card's unfinished words with it ----
+
+test("committing the open card adds its words to the notes, then says it is done", () => {
+  const sdk = bootSdk();
+  const heading = appendTo(sdk.body, cell("h2", "Pricing"));
+
+  sdk.click(heading);
+  sdk.card().querySelector("textarea").value = "  unfinished thought  ";
+  const before = sdk.posted.length;
+  sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-1" });
+
+  const replies = sdk.posted.slice(before).filter((message) => message.type !== "lavish:selection");
+  assert.deepEqual(
+    replies.map((message) => message.type),
+    ["lavish:queuePrompt", "lavish:draftCommitted"],
+  );
+  assert.equal(replies[0].prompt.prompt, "unfinished thought");
+  assert.equal(replies[0].prompt.tag, "h2");
+  assert.equal(replies[0].commit_id, "commit-1");
+  assert.equal(replies[1].commit_id, "commit-1");
+  assert.equal(replies[1].committed, true);
+});
+
+test("committing with no card, or an empty one, adds nothing and still answers", () => {
+  for (const openCard of [false, true]) {
+    const sdk = bootSdk();
+    const heading = appendTo(sdk.body, cell("h2", "Pricing"));
+    if (openCard) sdk.click(heading);
+    sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-2" });
+
+    assert.equal(postedTypes(sdk).includes("lavish:queuePrompt"), false);
+    const reply = sdk.posted.findLast((message) => message.type === "lavish:draftCommitted");
+    assert.equal(reply.commit_id, "commit-2");
+    assert.equal(reply.committed, true, "nothing to add is not a failure");
+  }
+});
+
+test("committing a card whose image is still uploading keeps the card and says it could not", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+
+  sdk.click(paragraph);
+  const card = sdk.card();
+  card.querySelector("textarea").value = "see the picture";
+  const attachInput = card.querySelector(".lavish-attach-input");
+  attachInput.files = [{ name: "shot.png", type: "image/png", size: 10, arrayBuffer: () => new Promise(() => {}) }];
+  attachInput.listeners.find((entry) => entry.type === "change").handler();
+  sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-3" });
+
+  assert.equal(postedTypes(sdk).includes("lavish:queuePrompt"), false);
+  assert.equal(sdk.posted.findLast((message) => message.type === "lavish:draftCommitted").committed, false);
+  assert.equal(sdk.cards().length, 1, "his words and the upload stay on the card");
 });
 
 // The pin is the board's comment mark: it sits on the corner of whatever a click would annotate.
@@ -962,6 +1115,7 @@ test("a pick is sent as the exact option text, once", () => {
     messages.map((message) => message.type),
     ["lavish:queuePrompt", "lavish:sendQueuedPrompts"],
   );
+  assert.equal(messages[1].endSession, undefined);
   const { prompt } = messages[0];
   assert.equal(prompt.prompt, "Keep 300 s", "the prompt is the option and nothing else");
   assert.equal(prompt.tag, "choice");
@@ -984,7 +1138,10 @@ test("a pick is sent as the exact option text, once", () => {
   assert.equal(promptMessages(sdk).length, 2, "a second submit sends nothing");
 });
 
-test("choice selection stays local until Send or End submits it", () => {
+// A pick is one of his notes: it joins the page's notes at once, so Send & End in the
+// Conversation panel carries it with everything else, and a new pick on the same question takes
+// its place. Nothing is sent until a Send.
+test("a pick joins the notes at once, a new pick replaces it, and nothing is sent", () => {
   const sdk = bootSdk({ choices: PLAN_QUESTION });
   const [form] = sdk.choiceForms();
 
@@ -994,12 +1151,65 @@ test("choice selection stays local until Send or End submits it", () => {
   pick(form, "option:Keep 300 s");
   pick(form, "option:Fix it next");
 
-  assert.deepEqual(promptMessages(sdk), []);
+  const messages = promptMessages(sdk);
+  assert.deepEqual(
+    messages.map((message) => message.type),
+    ["lavish:queuePrompt", "lavish:queuePrompt"],
+  );
+  assert.deepEqual(
+    messages.map((message) => message.prompt.prompt),
+    ["Keep 300 s", "Fix it next"],
+  );
+  assert.equal(messages[1].prompt._lavishQueueKey, "choice:plan", "the same question replaces its earlier pick");
+  assert.equal(messages[1].prompt._lavishNoteId, messages[0].prompt._lavishNoteId);
   assert.equal(form.querySelector(".send-decision").disabled, false);
   assert.equal(form.querySelector(".end-decision").disabled, false);
-  fire(form, "submit");
-  assert.equal(promptMessages(sdk)[0].prompt.prompt, "Fix it next");
-  assert.equal(promptMessages(sdk)[1].endSession, undefined);
+  assert.equal(form.querySelector(".question-pending").hidden, false, "the card says its answer is in the notes");
+  assert.match(form.innerHTML, /<p class="question-pending[^>]*>.*In your notes: Send or End sends them all<\/p>/);
+  assert.match(form.innerHTML, /type="radio"/, "the question stays open to another pick");
+});
+
+test("switching to an empty Other takes the earlier pick out of the notes", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+
+  pick(form, "option:Keep 300 s");
+  pick(form, "other");
+  const dropped = sdk.posted.at(-1);
+  assert.equal(dropped.type, "lavish:dropQueuedPrompt");
+  assert.equal(dropped.queueKey, "choice:plan");
+  assert.equal(form.querySelector(".question-pending").hidden, true);
+
+  write(form, "Something else");
+  assert.equal(promptMessages(sdk).at(-1).prompt.prompt, "Something else");
+  write(form, "   ");
+  assert.equal(sdk.posted.at(-1).type, "lavish:dropQueuedPrompt");
+});
+
+test("an answer sent from the Conversation panel closes its card on what was chosen", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "option:Fix it next");
+  const noteId = promptMessages(sdk)[0].prompt._lavishNoteId;
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  assert.doesNotMatch(form.innerHTML, /type="radio"/);
+  assert.match(form.innerHTML, /<label class="question-choice chosen">.*<span>Fix it next<\/span>/);
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
+  assert.match(form.innerHTML, /<p class="question-outcome delivery succeeded" role="status">.*Delivered<\/p>/);
+});
+
+test("a pick taken out of the notes in the Conversation panel opens its question again", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "option:Fix it next");
+  const noteId = promptMessages(sdk)[0].prompt._lavishNoteId;
+
+  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "removed" });
+
+  assert.doesNotMatch(form.innerHTML, / checked>/, "no option is picked any more");
+  assert.match(form.innerHTML, /class="primary send-decision"[^>]*disabled>/);
 });
 
 test("choice End sends the selected answer with an atomic end intent exactly once", () => {
@@ -1096,13 +1306,27 @@ test("a pick survives a reload of the page: its state is reported and restored",
   const sdk = bootSdk({ choices: PLAN_QUESTION });
   const [form] = sdk.choiceForms();
   pick(form, "option:Keep 300 s");
+  const noteId = promptMessages(sdk)[0].prompt._lavishNoteId;
   sdk.runTimers();
   const report = sdk.posted.findLast((message) => message.type === "lavish:reviewState");
   // Compared as JSON: the report was built inside the SDK's own realm.
   assert.equal(
     JSON.stringify(report.state.choices),
-    JSON.stringify([{ id: "plan", selection: "option:Keep 300 s", written: "", answered: "" }]),
+    JSON.stringify([{ id: "plan", selection: "option:Keep 300 s", written: "", answered: "", noteId }]),
   );
+
+  // The pick is still in the notes after a reload, so its card says so and follows that note.
+  const pending = bootSdk({ choices: PLAN_QUESTION });
+  const [stillOpen] = pending.choiceForms();
+  pending.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: { card: null, fields: [], choices: [{ id: "plan", selection: "option:Keep 300 s", written: "", noteId }] },
+  });
+  assert.match(stillOpen.innerHTML, /value="option:Keep 300 s" checked>/);
+  assert.equal(stillOpen.querySelector(".question-pending").hidden, false);
+  pending.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
+  assert.doesNotMatch(stillOpen.innerHTML, /type="radio"/, "the restored pick follows its note");
+  assert.deepEqual(promptMessages(pending), [], "restoring adds nothing to the notes");
 
   const reloaded = bootSdk({ choices: PLAN_QUESTION });
   const [restored] = reloaded.choiceForms();
