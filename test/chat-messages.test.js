@@ -145,17 +145,16 @@ test("empty and non-string input render nothing", () => {
 
 const at = "2026-09-15T12:00:00.000Z";
 
-test("a composer message becomes a user entry with no anchor", () => {
+// A note written with nothing selected is about the whole page, and its bubble says so.
+test("a composer message becomes a user entry anchored to the whole page", () => {
   assert.deepEqual(
-    chatEntryForPrompt(
-      { uid: "", prompt: "Keep the table", selector: "", tag: "message", text: "Freeform message" },
-      at,
-    ),
+    chatEntryForPrompt({ uid: "", prompt: "Keep the table", selector: "", tag: "message", text: "Whole page" }, at),
     {
       role: "user",
       kind: "message",
       text: "Keep the table",
       at,
+      anchor: { kind: "page", label: "whole page" },
     },
   );
 });

@@ -761,7 +761,9 @@ body.lavish {
   border-style: dashed;
   border-color: var(--glass-border-hover);
 }
-.queued-remove {
+.queued-edit,
+.queued-remove,
+.composer-anchor-clear {
   display: grid;
   place-items: center;
   width: 30px;
@@ -771,15 +773,41 @@ body.lavish {
   border-radius: 50%;
   color: #dfe9ef;
 }
-.queued-remove:hover:not(:disabled) {
+.queued-edit:hover:not(:disabled),
+.queued-remove:hover:not(:disabled),
+.composer-anchor-clear:hover:not(:disabled) {
   background: #ffffff0f;
 }
+.queued-edit:disabled,
 .queued-remove:disabled {
   cursor: not-allowed;
 }
-.queued-remove .icon {
+.queued-edit .icon,
+.queued-remove .icon,
+.composer-anchor-clear .icon {
   width: 16px;
   height: 16px;
+}
+/* A note reworded in place keeps the bubble's width; Enter saves and Escape keeps the old words. */
+.bubble.queued.editing {
+  align-self: stretch;
+}
+.queued-edit-input {
+  width: 100%;
+  min-height: 60px;
+  box-sizing: border-box;
+  resize: none;
+  field-sizing: content;
+}
+.queued-edit-actions {
+  display: flex;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.queued-edit-actions button {
+  min-height: 36px;
+  padding: 4px 16px;
 }
 /* The anchor line names what a note is attached to, in the annotation card's words. */
 .anchor {
@@ -940,6 +968,23 @@ body.lavish {
   display: flex;
   align-items: center;
   gap: 8px;
+}
+/* What a note written in the box goes on, while something is selected in the page: the bubble's
+   anchor line, with a way back to the whole page. Above the box, so the box keeps its place. */
+.composer-anchor {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  color: var(--muted);
+  font-size: 0.9375rem;
+}
+.composer-anchor-target {
+  min-width: 0;
+  flex: 1;
+}
+.composer-anchor .anchor {
+  margin-bottom: 0;
 }
 /* The message box is one bordered field: the text, then a row inside the border with the paperclip
    at the bottom left and the voice bubble at the bottom right. The text grows to its cap and then

@@ -2359,7 +2359,7 @@ test("every accepted prompt enters the chat history with its anchor, in batch or
             end: { selector: "main > p", path: [], offset: 14 },
           },
         },
-        { uid: "", prompt: "Keep the table", selector: "", tag: "message", text: "Freeform message" },
+        { uid: "", prompt: "Keep the table", selector: "", tag: "message", text: "Whole page" },
       ],
     });
 
@@ -2380,7 +2380,7 @@ test("every accepted prompt enters the chat history with its anchor, in batch or
           text: "Say design system",
           anchor: { kind: "text", label: "text", excerpt: "marketing site", selector: "main > p" },
         },
-        { role: "user", kind: "message", text: "Keep the table" },
+        { role: "user", kind: "message", text: "Keep the table", anchor: { kind: "page", label: "whole page" } },
       ],
     );
   });

@@ -32,6 +32,7 @@ import {
   writeTextFileAtomically,
 } from "../src/plugin.js";
 import { validateSkillMarkdown } from "../src/skill.js";
+import { symlinkSkip } from "./symlink-support.js";
 
 // Closed manifest schema from agent-plugins.org/schemas/1.0.0/plugin.schema.json.
 const ALLOWED_MANIFEST_FIELDS = [
@@ -53,21 +54,6 @@ function tempDir(prefix = "lavish-plugin-") {
   test.after(() => rmSync(dir, { recursive: true, force: true }));
   return dir;
 }
-
-// Creating a directory symlink needs a privilege an ordinary Windows account lacks, so
-// the tests that assert on a *real* on-disk link skip there rather than failing. The
-// link-creation logic itself stays covered everywhere through injected operations.
-const symlinkSupport = (() => {
-  const probe = mkdtempSync(path.join(os.tmpdir(), "lavish-symlink-probe-"));
-  try {
-    symlinkSync(path.join(probe, "target"), path.join(probe, "link"));
-    return { supported: true, skip: false };
-  } catch (error) {
-    return { supported: false, skip: `symlink creation unavailable: ${error.code || error.message}` };
-  } finally {
-    rmSync(probe, { recursive: true, force: true });
-  }
-})();
 
 function writePlugin(root, name) {
   mkdirSync(root, { recursive: true });
@@ -190,7 +176,7 @@ test("a removed install directory is only treated as stale when it was ours", ()
   assert.equal(isStalePluginLocation(path.join(dir, "gone", "someone-else"), "lavish-axi"), false);
 });
 
-test("Cursor registration links, no-ops, and repairs the local plugin slot", { skip: symlinkSupport.skip }, () => {
+test("Cursor registration links, no-ops, and repairs the local plugin slot", { skip: symlinkSkip }, () => {
   const dir = tempDir();
   const localPlugins = path.join(dir, "local");
   const pluginRoot = writePlugin(path.join(dir, "pkg", "lavish-axi"), "lavish-axi");
@@ -222,7 +208,7 @@ test("Cursor registration refuses to clobber a real directory in the slot", () =
   assert.equal(existsSync(path.join(occupied, "keep.txt")), true, "user content survives");
 });
 
-test("Cursor registration replaces a dangling symlink", { skip: symlinkSupport.skip }, () => {
+test("Cursor registration replaces a dangling symlink", { skip: symlinkSkip }, () => {
   const dir = tempDir();
   const localPlugins = path.join(dir, "local");
   mkdirSync(localPlugins, { recursive: true });
@@ -235,7 +221,7 @@ test("Cursor registration replaces a dangling symlink", { skip: symlinkSupport.s
   assert.equal(path.resolve(readlinkSync(result.target)), pluginRoot);
 });
 
-test("Cursor registration preserves the old link when replacement fails", { skip: symlinkSupport.skip }, async () => {
+test("Cursor registration preserves the old link when replacement fails", { skip: symlinkSkip }, async () => {
   const dir = tempDir();
   const localPlugins = path.join(dir, "local");
   const original = writePlugin(path.join(dir, "old", "lavish-axi"), "lavish-axi");

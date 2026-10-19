@@ -37,6 +37,7 @@ import {
 } from "../src/server.js";
 import { buildSelfContainedHtml } from "../src/export-bundle.js";
 import { canonicalFile, sessionKey, SessionStore } from "../src/session-store.js";
+import { symlinkTest } from "./symlink-support.js";
 
 async function chromeClientSource() {
   return readFile(new URL("../src/chrome-client.js", import.meta.url), "utf8");
@@ -519,7 +520,7 @@ test("artifact assets resolve within the artifact directory", async () => {
   assert.equal(await resolveArtifactAsset(root, "../secret.txt"), null);
 });
 
-test("artifact assets reject a symlink that escapes the artifact directory", async () => {
+symlinkTest("artifact assets reject a symlink that escapes the artifact directory", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   try {
@@ -535,7 +536,7 @@ test("artifact assets reject a symlink that escapes the artifact directory", asy
   }
 });
 
-test("artifact assets reject a path that escapes through an intermediate directory symlink", async () => {
+symlinkTest("artifact assets reject a path that escapes through an intermediate directory symlink", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   try {
@@ -550,7 +551,7 @@ test("artifact assets reject a path that escapes through an intermediate directo
   }
 });
 
-test("artifact assets still resolve a symlink that stays inside the artifact directory", async () => {
+symlinkTest("artifact assets still resolve a symlink that stays inside the artifact directory", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   try {
     const real = path.join(dir, "real.css");
@@ -565,7 +566,7 @@ test("artifact assets still resolve a symlink that stays inside the artifact dir
   }
 });
 
-test("artifact asset resolution fails closed when realpath errors", async () => {
+symlinkTest("artifact asset resolution fails closed when realpath errors", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   try {
     const linkA = path.join(dir, "loop-a");
@@ -615,21 +616,20 @@ test("artifact SDK isolates Lavish annotation UI in Shadow DOM", () => {
   assert.match(js, /lavish-annotation-root/);
 });
 
-test("annotation card does not block its own Queue button", () => {
+test("annotation card does not block its own add button", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /sendButton\.onclick\s*=\s*\(\)\s*=>/);
+  assert.match(js, /addButton\.onclick\s*=\s*\(\)\s*=>/);
   assert.doesNotMatch(js, /card\.addEventListener\('click',event=>event\.stopPropagation\(\),true\)/);
 });
 
-test("annotation card labels its submit action as sending to the agent", () => {
+test("annotation card labels its button as adding the note to his notes", () => {
   const js = createSdkJs("abc");
 
   assert.match(
     js,
-    /class="icon-button send lavish-send" type="button" aria-label="Send to the agent" data-tip="Send\. '/,
+    /class="icon-button send lavish-add" type="button" aria-label="Add to your notes" data-tip="Add to your notes\. Send to Agent sends them all" data-tip-align="end">/,
   );
-  assert.match(js, /\+Enter only queues it" data-tip-align="end">/);
   assert.doesNotMatch(js, /Queue Prompt/);
 });
 
@@ -2685,7 +2685,7 @@ test("/artifact serves files copied under the artifact directory", async () => {
   }
 });
 
-test("/artifact refuses to serve a symlink that escapes the artifact directory", async () => {
+symlinkTest("/artifact refuses to serve a symlink that escapes the artifact directory", async () => {
   const parent = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   const dir = path.join(parent, ".lavish");
@@ -2715,7 +2715,7 @@ test("/artifact refuses to serve a symlink that escapes the artifact directory",
   }
 });
 
-test("/artifact refuses a path that escapes through an intermediate directory symlink", async () => {
+symlinkTest("/artifact refuses a path that escapes through an intermediate directory symlink", async () => {
   const parent = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   const dir = path.join(parent, ".lavish");
@@ -2774,7 +2774,7 @@ test("/artifact still rejects lexical .. traversal that reaches the server unnor
   }
 });
 
-test("/whiteboard-assets refuses escaping symlinks and .. traversal but still serves its bundle", async () => {
+symlinkTest("/whiteboard-assets refuses escaping symlinks and .. traversal but still serves its bundle", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const outside = await mkdtemp(path.join(tmpdir(), "lavish-outside-"));
   const assetsDir = path.join(dir, "whiteboard-assets");
@@ -6952,23 +6952,21 @@ test("layout gate curtain reuses the ended overlay card styling", async () => {
   assert.match(noGateHtml, /"layoutGateEnabled":false/);
 });
 
-test("annotation card sends on Enter and inserts newline on Shift+Enter, as the board's comment box does", () => {
+test("annotation card adds its note on Enter and inserts a newline on Shift+Enter", () => {
   const js = createSdkJs("abc");
 
   assert.match(js, /textarea\.addEventListener\(["']keydown["']/);
   assert.match(js, /event\.key === ["']Enter["'] && !event\.shiftKey/);
   assert.match(js, /event\.preventDefault\(\)/);
-  // Enter routes through tryQueue(), which gates on in-flight uploads (R2.4).
-  assert.match(js, /const queued = tryQueue\(!queueOnly\)/);
-  assert.match(js, /if \(queued && !queueOnly\) sendQueuedPrompts\(\)/);
-  // The hint is the board's, word for word.
-  assert.match(js, /Enter sends &middot; Shift\+Enter new line &middot; Esc cancels/);
+  // Enter routes through tryQueue(), which gates on in-flight uploads (R2.4), and sends nothing.
+  assert.match(js, /together \(the Overlord, 2026-10-18\)\.\s*tryQueue\(\);/);
+  assert.match(js, /Enter adds it to your notes &middot; Shift\+Enter new line &middot; Esc cancels/);
 });
 
-test("annotation card only queues on Ctrl+Enter or Cmd+Enter, for notes that go together", () => {
+test("annotation card treats Ctrl+Enter and Cmd+Enter as Enter", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /const queueOnly = event\.ctrlKey \|\| event\.metaKey/);
+  assert.doesNotMatch(js, /queueOnly/);
   assert.match(js, /class="muted lavish-hint"/);
   assert.match(js, /\.lavish-hint\{flex:1;font-size:\.9375rem\}/);
 });
@@ -7246,7 +7244,7 @@ test("the live transcript carries rendered html for agent replies and never for 
       method: "POST",
       headers: { "content-type": "application/json", origin: base },
       body: JSON.stringify({
-        prompts: [{ uid: "", prompt: "<b>keep</b>", selector: "", tag: "message", text: "Freeform message" }],
+        prompts: [{ uid: "", prompt: "<b>keep</b>", selector: "", tag: "message", text: "Whole page" }],
       }),
     });
 
@@ -7257,7 +7255,7 @@ test("the live transcript carries rendered html for agent replies and never for 
       chat.map(({ at: _at, ...entry }) => entry),
       [
         { role: "agent", text: "Done.\n\n- one\n- two", html: "<p>Done.</p><ul><li>one</li><li>two</li></ul>" },
-        { role: "user", kind: "message", text: "<b>keep</b>" },
+        { role: "user", kind: "message", text: "<b>keep</b>", anchor: { kind: "page", label: "whole page" } },
       ],
     );
 

@@ -397,7 +397,8 @@ function withSelector(anchor, selector) {
 // transcript says `<h2>`, `text`, `cell`, `node`. A cell without a provable row or column label
 // falls back to the element form rather than inventing a name, the rule the card follows too.
 function promptAnchor(prompt, kind) {
-  if (kind === "message") return null;
+  // A note written with nothing selected in the page is about the whole page.
+  if (kind === "message") return { kind: "page", label: "whole page" };
   const target = prompt.target && typeof prompt.target === "object" ? prompt.target : null;
   const selector = bound(prompt.selector, SELECTOR_MAX);
   if (kind === "whiteboard") {
@@ -466,7 +467,8 @@ export function chatEntryForPrompt(prompt, at) {
           : "annotation";
   const promptId = normalizePromptId(prompt.prompt_id);
   const anchor = promptAnchor(prompt, kind);
-  if (!text && attachments.length === 0 && !promptId && !anchor) return null;
+  // Naming the whole page says nothing on its own; an element's anchor does.
+  if (!text && attachments.length === 0 && !promptId && (!anchor || kind === "message")) return null;
   const entry = { role: "user", kind, text, at: String(at || new Date().toISOString()) };
   if (promptId) entry.prompt_id = promptId;
   if (anchor) entry.anchor = anchor;

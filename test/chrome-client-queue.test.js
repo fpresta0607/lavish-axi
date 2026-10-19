@@ -203,12 +203,17 @@ async function createChromeHarness({
         if (handler) handler(event);
       },
       querySelectorAll(selector) {
-        if (id === "queuedLog" && selector === ".queued-remove") {
-          return [...this.innerHTML.matchAll(/class="queued-remove"[^>]*data-index="(\d+)"/g)].map((match) => {
-            const close = element(`queued-remove-${match[1]}`);
-            close.dataset.index = match[1];
-            return close;
-          });
+        // A queued note's controls are drawn from markup, so they are found in it by class; each
+        // keeps one stub per note index, as the same control in a redrawn list would.
+        if (id === "queuedLog" && /^\.queued-[\w-]+$/.test(selector)) {
+          const className = selector.slice(1);
+          return [...this.innerHTML.matchAll(new RegExp(`class="${className}"[^>]*data-index="(\\d+)"`, "g"))].map(
+            (match) => {
+              const control = element(`${className}-${match[1]}`);
+              control.dataset.index = match[1];
+              return control;
+            },
+          );
         }
         const matches = [];
         const walk = (node) => {
@@ -862,7 +867,7 @@ test("a queued send falls back without a snapshot and ignores a late snapshot", 
               prompt: "Deliver even if the artifact navigated away",
               selector: "",
               tag: "message",
-              text: "Freeform message",
+              text: "Whole page",
             },
           ],
           domSnapshot: "",
@@ -5924,12 +5929,14 @@ test("an external listener does not claim that feedback was received", async () 
   assert.doesNotMatch(work().innerHTML, /Received|role="progressbar"/);
 });
 
-for (const { name, shiftKey, isComposing, shouldSend } of [
-  { name: "Enter", shiftKey: false, isComposing: false, shouldSend: true },
-  { name: "Shift+Enter", shiftKey: true, isComposing: false, shouldSend: false },
-  { name: "composing Enter", shiftKey: false, isComposing: true, shouldSend: false },
+// Enter in the Conversation box adds what he wrote to his notes; only Send to Agent or Send & End
+// sends, and then every note together (the Overlord, 2026-10-18).
+for (const { name, shiftKey, isComposing, shouldAdd } of [
+  { name: "Enter", shiftKey: false, isComposing: false, shouldAdd: true },
+  { name: "Shift+Enter", shiftKey: true, isComposing: false, shouldAdd: false },
+  { name: "composing Enter", shiftKey: false, isComposing: true, shouldAdd: false },
 ]) {
-  test(`the chat composer sends only on plain Enter: ${name}`, async () => {
+  test(`the chat composer adds a note only on plain Enter, and never sends: ${name}`, async () => {
     const posts = [];
     const chrome = await createChromeHarness({
       fetchImpl: async (url, init) => {
@@ -5950,20 +5957,580 @@ for (const { name, shiftKey, isComposing, shouldSend } of [
       },
     });
     await flushPromises();
-    if (shouldSend) chrome.sendSnapshot("uid=1 body");
-    await flushPromises();
 
-    assert.equal(isDefaultPrevented, shouldSend);
-    assert.equal(posts.length, shouldSend ? 1 : 0);
-    if (shouldSend) {
-      assert.equal(posts[0].url, "/api/abc/prompts");
-      assert.equal(posts[0].body.prompts[0].prompt, "Revise the plan");
-      assert.notEqual(posts[0].body.endSession, true);
+    assert.equal(isDefaultPrevented, shouldAdd);
+    assert.equal(posts.length, 0, "nothing reaches the server note by note");
+    assert.equal(
+      chrome.postedToFrame.some((message) => message.type === "lavish:requestSnapshot"),
+      false,
+    );
+    if (shouldAdd) {
+      assert.deepEqual(publicQueued(chrome), [
+        { uid: "", prompt: "Revise the plan", selector: "", tag: "message", text: "Whole page" },
+      ]);
+      assert.equal(input.value, "");
     } else {
+      assert.deepEqual(chrome.queued(), []);
       assert.equal(input.value, "Revise the plan");
     }
   });
 }
+
+// ---- Every note is chained to one send ----
+
+function postRecorder() {
+  const posts = [];
+  return {
+    posts,
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/prompts")) posts.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, json: async () => ({}) };
+    },
+  };
+}
+
+function writeNote(chrome, words) {
+  const input = chrome.element("chatInput");
+  input.value = words;
+  input.dispatch("keydown", { key: "Enter", preventDefault() {} });
+}
+
+const HEADING_SELECTION = { uid: "u-7", selector: "section > h2#pricing", tag: "h2", text: "Pricing" };
+
+test("Send & End delivers every note in one request, in the order written, then ends", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: { prompt: "Bigger", selector: "h1", tag: "h1", text: "Checkout" },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: {
+      prompt: "Wrong total",
+      selector: "td",
+      tag: "td",
+      text: "$40",
+      target: { type: "table-cell", rowLabel: "Q1", columnLabel: "Revenue", text: "$40" },
+    },
+  });
+  writeNote(chrome, "Overall it reads well");
+  await flushPromises();
+  assert.equal(posts.length, 0, "nothing is delivered before the send");
+
+  chrome.element("sendAndEnd").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1, "one delivery");
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(publicPostedBody(posts[0].body).prompts, [
+    { prompt: "Bigger", selector: "h1", tag: "h1", text: "Checkout" },
+    {
+      prompt: "Wrong total",
+      selector: "td",
+      tag: "td",
+      text: "$40",
+      target: { type: "table-cell", rowLabel: "Q1", columnLabel: "Revenue", text: "$40" },
+    },
+    { uid: "", prompt: "Overall it reads well", selector: "", tag: "message", text: "Whole page" },
+  ]);
+});
+
+test("Send to Agent delivers every note in one request and keeps the review open", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "First");
+  writeNote(chrome, "Second");
+  chrome.element("chatInput").value = "Third, still in the box";
+
+  chrome.element("send").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.notEqual(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["First", "Second", "Third, still in the box"],
+  );
+  assert.equal(chrome.closeCount(), 0);
+});
+
+test("a note written while an element is selected goes on that element, cell and all", async () => {
+  const chrome = await createChromeHarness();
+  const cellTarget = { type: "table-cell", rowLabel: "Q1", columnLabel: "Revenue", text: "$40" };
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: { uid: "u-9", selector: "tbody td:nth-child(2)", tag: "td", text: "$40", target: cellTarget },
+    card: true,
+  });
+  assert.match(chrome.element("chatAnchorTarget").innerHTML, /<span class="anchor-kind">cell<\/span>/);
+  assert.match(chrome.element("chatAnchorTarget").innerHTML, /“Q1 → Revenue”/);
+  assert.equal(chrome.element("chatAnchor").hidden, false);
+  assert.match(chrome.element("chatInput").placeholder, /selected/);
+
+  writeNote(chrome, "Check this number");
+
+  assert.deepEqual(
+    publicQueued(chrome).map(({ _lavishNoteId, ...prompt }) => prompt),
+    [
+      {
+        uid: "u-9",
+        prompt: "Check this number",
+        selector: "tbody td:nth-child(2)",
+        tag: "td",
+        text: "$40",
+        target: cellTarget,
+      },
+    ],
+  );
+  const noted = chrome.postedToFrame.findLast((message) => message.type === "lavish:selectionNoted");
+  assert.ok(noted, "the page is told, so the card shows the note's chip");
+  assert.equal(noted.text, "Check this number");
+  assert.equal(noted.noteId, chrome.queued()[0]._lavishNoteId);
+});
+
+test("a note written with nothing selected is about the whole page and says so", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: false,
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: null,
+    card: false,
+  });
+  assert.equal(chrome.element("chatAnchor").hidden, true);
+  assert.match(chrome.element("chatInput").placeholder, /whole page/);
+
+  writeNote(chrome, "Tone it down");
+
+  assert.equal(chrome.queued()[0].text, "Whole page");
+  assert.match(
+    chrome.element("queuedLog").innerHTML,
+    /<div class="anchor" title=""><span class="anchor-kind">whole page<\/span><\/div><div class="bubble-text">Tone it down<\/div>/,
+  );
+});
+
+test("clearing the selection from the Conversation box puts the next note on the whole page", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+  chrome.element("chatAnchorClear").click();
+
+  assert.ok(chrome.postedToFrame.some((message) => message.type === "lavish:clearSelection"));
+  writeNote(chrome, "About everything");
+  assert.equal(chrome.queued()[0].tag, "message");
+});
+
+test("a new artifact load forgets the old document's selection", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: false,
+  });
+  chrome.eventSource().listeners.get("reload")({ data: "{}" });
+  await flushPromises();
+
+  writeNote(chrome, "After the reload");
+  assert.equal(chrome.queued()[0].tag, "message");
+});
+
+function answerCommit(chrome, prompt) {
+  const request = chrome.postedToFrame.findLast((message) => message.type === "lavish:commitDraft");
+  assert.ok(request?.commit_id, "the chrome asked the page for the open card's words");
+  if (prompt) {
+    chrome.sendFrameMessage({
+      type: "lavish:queuePrompt",
+      artifact_load_token: chrome.artifactLoadToken(),
+      prompt,
+      commit_id: request.commit_id,
+    });
+  }
+  chrome.sendFrameMessage({
+    type: "lavish:draftCommitted",
+    artifact_load_token: chrome.artifactLoadToken(),
+    commit_id: request.commit_id,
+    committed: true,
+  });
+}
+
+test("Send & End takes the open card's unfinished words with the other notes", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Whole-page first");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("sendAndEnd").click();
+  await flushPromises();
+  assert.equal(posts.length, 0, "the send waits for the card");
+  answerCommit(chrome, { prompt: "Unfinished", selector: "section > h2#pricing", tag: "h2", text: "Pricing" });
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Whole-page first", "Unfinished"],
+  );
+});
+
+test("Send to Agent takes the open card's unfinished words too", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("send").click();
+  answerCommit(chrome, { prompt: "Card words", selector: "section > h2#pricing", tag: "h2", text: "Pricing" });
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Card words"],
+  );
+});
+
+test("an empty open card does not stop an empty Send & End from approving the page", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("sendAndEnd").click();
+  answerCommit(chrome, null);
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Approved as shown."],
+  );
+});
+
+// A page too busy to answer may still add the card's words later, after an end that went without
+// them, so the send stops and says so; sending again goes without the card.
+test("a page that does not answer the commit holds the send once, and the next send goes without it", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Sent on the second click");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("sendAndEnd").click();
+  chrome.runTimers(2000);
+  await flushPromises();
+  assert.equal(posts.length, 0, "nothing goes while the card may still be on its way");
+  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.match(chrome.element("sendHint").textContent, /Send again/);
+
+  const commits = chrome.postedToFrame.filter((message) => message.type === "lavish:commitDraft").length;
+  chrome.element("sendAndEnd").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(
+    chrome.postedToFrame.filter((message) => message.type === "lavish:commitDraft").length,
+    commits,
+    "the second send does not wait on the card again",
+  );
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Sent on the second click"],
+  );
+});
+
+// The commit id goes to the untrusted page, so it admits one note of its own kind, and nothing that
+// would replace another note in the reserved batch.
+test("a commit admits one card note into a reserved Send & End and nothing more", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Mine");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+  chrome.element("sendAndEnd").click();
+  const request = chrome.postedToFrame.findLast((message) => message.type === "lavish:commitDraft");
+  const send = (prompt) =>
+    chrome.sendFrameMessage({
+      type: "lavish:queuePrompt",
+      artifact_load_token: chrome.artifactLoadToken(),
+      prompt,
+      commit_id: request.commit_id,
+    });
+  send({ prompt: "Whiteboard forgery", tag: "whiteboard", text: "Whiteboard", _lavishQueueKey: "whiteboard:0" });
+  send({ prompt: "Card words", selector: "h2", tag: "h2", text: "Pricing", _lavishQueueKey: "choice:plan" });
+  send({ prompt: "A second note", selector: "h2", tag: "h2", text: "Pricing" });
+  chrome.sendFrameMessage({
+    type: "lavish:draftCommitted",
+    artifact_load_token: chrome.artifactLoadToken(),
+    commit_id: request.commit_id,
+    committed: true,
+  });
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Mine", "Card words"],
+  );
+});
+
+test("End session with notes waiting sends them and ends, rather than dropping them", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Do not lose me");
+
+  chrome.element("end").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Do not lose me"],
+  );
+});
+
+test("an edit started while a send waits for the card goes with its new words", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Old words");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("send").click();
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "New words";
+  editor.dispatch("input", {});
+  answerCommit(chrome, null);
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["New words"],
+  );
+});
+
+test("opening a second edit keeps the words of the first", async () => {
+  const chrome = await createChromeHarness();
+  writeNote(chrome, "First");
+  writeNote(chrome, "Second");
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "First, reworded";
+  editor.dispatch("input", {});
+  const secondEdit = chrome.element("queuedLog").querySelectorAll(".queued-edit")[0];
+  assert.equal(secondEdit.dataset.index, "1", "the second note's edit control");
+  secondEdit.click({ stopPropagation() {} });
+
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["First, reworded", "Second"],
+  );
+  assert.match(chrome.element("queuedLog").innerHTML, /<textarea class="queued-edit-input"[^>]*>Second<\/textarea>/);
+});
+
+test("a card still uploading its image keeps Send & End from ending the review", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Not yet");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("sendAndEnd").click();
+  const request = chrome.postedToFrame.findLast((message) => message.type === "lavish:commitDraft");
+  chrome.sendFrameMessage({
+    type: "lavish:draftCommitted",
+    artifact_load_token: chrome.artifactLoadToken(),
+    commit_id: request.commit_id,
+    committed: false,
+  });
+  await flushPromises();
+
+  assert.equal(posts.length, 0);
+  assert.equal(chrome.element("send").disabled, false, "the review stays open and editable");
+  assert.equal(chrome.element("sendHint").hidden, false);
+  assert.match(chrome.element("sendHint").textContent, /note on the page/);
+
+  // A page that refuses every time cannot hold the review: sending again goes without its card.
+  chrome.element("sendAndEnd").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+});
+
+test("a page's choice can take its answer back out of the notes by its key, and nothing else", async () => {
+  const chrome = await createChromeHarness();
+  const drop = (queueKey) =>
+    chrome.sendFrameMessage({
+      type: "lavish:dropQueuedPrompt",
+      artifact_load_token: chrome.artifactLoadToken(),
+      queueKey,
+    });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: { prompt: "Fix it next", tag: "choice", text: "Which plan?", _lavishQueueKey: "choice:plan" },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: { prompt: "Keyed by the page", selector: "h2", tag: "h2", text: "Pricing", _lavishQueueKey: "pricing" },
+  });
+  writeNote(chrome, "Keep me");
+  drop("pricing");
+  drop("choice:plan");
+
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["Keyed by the page", "Keep me"],
+  );
+});
+
+// ---- A pending note can be edited before it is sent ----
+
+function queuedControl(chrome, className) {
+  const control = chrome.element("queuedLog").querySelectorAll("." + className)[0];
+  assert.ok(control, `the queued note has a ${className} control`);
+  return control;
+}
+
+test("an edited note is delivered with its new words", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Make it red");
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  assert.match(
+    chrome.element("queuedLog").innerHTML,
+    /<textarea class="queued-edit-input"[^>]*>Make it red<\/textarea>/,
+  );
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "Make it blue";
+  editor.dispatch("input", {});
+  editor.dispatch("keydown", { key: "Enter", preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(chrome.queued()[0].prompt, "Make it blue");
+  assert.doesNotMatch(chrome.element("queuedLog").innerHTML, /queued-edit-input/);
+  assert.match(chrome.element("queuedLog").innerHTML, /<div class="bubble-text">Make it blue<\/div>/);
+
+  chrome.element("send").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Make it blue"],
+  );
+});
+
+test("Escape leaves a note being edited as it was", async () => {
+  const chrome = await createChromeHarness();
+  writeNote(chrome, "Keep these words");
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "Throw these away";
+  editor.dispatch("input", {});
+  editor.dispatch("keydown", { key: "Escape", preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(chrome.queued()[0].prompt, "Keep these words");
+  assert.doesNotMatch(chrome.element("queuedLog").innerHTML, /queued-edit-input/);
+});
+
+test("an edit survives a redraw of the notes while it is open", async () => {
+  const chrome = await createChromeHarness();
+  writeNote(chrome, "Original");
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "Half edited";
+  editor.dispatch("input", {});
+
+  writeNote(chrome, "Another note arrives");
+
+  assert.match(
+    chrome.element("queuedLog").innerHTML,
+    /<textarea class="queued-edit-input"[^>]*>Half edited<\/textarea>/,
+  );
+});
+
+test("a choice, a layout batch and a whiteboard note offer no edit, only removal", async () => {
+  const chrome = await createChromeHarness();
+  for (const prompt of [
+    { prompt: "Fix it next", tag: "choice", text: "Which plan?" },
+    {
+      prompt: "Fix these",
+      tag: "layout-warnings",
+      text: "1 layout issue",
+      target: { type: "layout-warnings", warnings: [] },
+    },
+    { prompt: "Edits", tag: "whiteboard", text: "Whiteboard", target: { type: "excalidraw-scene", diagramIndex: 0 } },
+  ]) {
+    chrome.sendFrameMessage({ type: "lavish:queuePrompt", artifact_load_token: chrome.artifactLoadToken(), prompt });
+  }
+
+  assert.doesNotMatch(chrome.element("queuedLog").innerHTML, /queued-edit/);
+  assert.equal(chrome.element("queuedLog").querySelectorAll(".queued-remove").length, 3);
+});
 
 test("a choice End from the artifact sends the answer and ends in one request", async () => {
   const posts = [];
@@ -7591,7 +8158,10 @@ test("a queued note is a dashed bubble at the end of the conversation with its a
   });
 
   const html = chrome.element("queuedLog").innerHTML;
-  assert.match(html, /^<div class="bubble user queued"><small>Queued <button class="queued-remove"[^>]*data-index="0"/);
+  assert.match(
+    html,
+    /^<div class="bubble user queued"><small>Queued <button class="queued-edit"[^>]*data-index="0"[^>]*>.*?<\/button> <button class="queued-remove"[^>]*data-index="0"/,
+  );
   assert.match(
     html,
     /<span class="anchor-kind">&lt;h2&gt;<\/span><span class="anchor-excerpt">“Phase 1: Inventory”<\/span>/,
@@ -7677,7 +8247,7 @@ test("the chrome's queued anchor agrees with the server's transcript anchor for 
       text: "2 layout issues",
       target: { type: "layout-warnings", warnings: [{ id: "a" }, { id: "b" }] },
     },
-    { prompt: "note", selector: "", tag: "message", text: "Freeform message" },
+    { prompt: "note", selector: "", tag: "message", text: "Whole page" },
   ];
   const unescape = (value) =>
     value
@@ -7699,7 +8269,11 @@ test("the chrome's queued anchor agrees with the server's transcript anchor for 
     }
     assert.ok(rendered, `${fixture.tag}: anchor rendered`);
     assert.equal(unescape(rendered[2]), expected.label, `${fixture.tag}: label`);
-    assert.equal(unescape(rendered[3] || ""), "“" + expected.excerpt + "”", `${fixture.tag}: excerpt`);
+    assert.equal(
+      unescape(rendered[3] || ""),
+      expected.excerpt ? "“" + expected.excerpt + "”" : "",
+      `${fixture.tag}: excerpt`,
+    );
     assert.equal(
       unescape(rendered[1]),
       [expected.excerpt, expected.selector].filter(Boolean).join("\n"),

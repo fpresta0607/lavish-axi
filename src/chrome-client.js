@@ -119,6 +119,9 @@ const chatLog = /** @type {HTMLDivElement} */ (document.getElementById("chatLog"
 const chatComposer = /** @type {HTMLDivElement} */ (document.getElementById("chatComposer"));
 const chatInput = /** @type {HTMLTextAreaElement} */ (document.getElementById("chatInput"));
 const chatField = /** @type {HTMLDivElement} */ (document.getElementById("chatField"));
+const chatAnchor = /** @type {HTMLDivElement} */ (document.getElementById("chatAnchor"));
+const chatAnchorTarget = /** @type {HTMLSpanElement} */ (document.getElementById("chatAnchorTarget"));
+const chatAnchorClear = /** @type {HTMLButtonElement} */ (document.getElementById("chatAnchorClear"));
 const chatAttachments = /** @type {HTMLDivElement} */ (document.getElementById("chatAttachments"));
 const chatAttachButton = /** @type {HTMLButtonElement} */ (document.getElementById("chatAttach"));
 const chatAttachInput = /** @type {HTMLInputElement} */ (document.getElementById("chatAttachInput"));
@@ -210,6 +213,15 @@ const whiteboardError = /** @type {HTMLDivElement} */ (document.getElementById("
 const artifactSrc = frame.dataset.artifactSrc || frame.getAttribute?.("data-artifact-src") || frame.src || "";
 
 const queued = loadQueuedPrompts();
+// The queued note being reworded in place, by its identity, with the words typed so far.
+/** @type {{ id: string, text: string } | null} */
+let editingNote = null;
+// What is selected in the page, as the SDK last reported it: the context a note from the
+// Conversation box goes on, or null for the whole page. `pageCardOpen` says an annotation card
+// is open there, whose unfinished words a send takes along.
+/** @type {{ uid: string, selector: string, tag: string, text: string, target?: object } | null} */
+let pageSelection = null;
+let pageCardOpen = false;
 let annotation = true;
 let ended = false;
 let agentPresence = "waiting";
@@ -526,6 +538,7 @@ function boardIconSvg(path) {
   return '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
 }
 const REMOVE_ICON_SVG = boardIconSvg("M6 6l12 12M18 6 6 18");
+const EDIT_ICON_SVG = boardIconSvg("m4 16-1 5 5-1L20 8l-4-4ZM14 6l4 4");
 const COPY_ICON_SVG = boardIconSvg("M9 9h10v11H9ZM5 15V4h10");
 const CHECK_ICON_SVG = boardIconSvg("M5 12.5 9.5 17 19 7.5");
 const PASTE_ICON_SVG = boardIconSvg(
@@ -558,7 +571,8 @@ function boundAnchorText(value, max) {
 // two against the same fixtures. A bubble must not change its anchor when it settles.
 function promptAnchor(prompt) {
   const tag = String(prompt?.tag || "");
-  if (tag === "message") return null;
+  // A note written with nothing selected in the page is about the whole page.
+  if (tag === "message") return { kind: "page", label: "whole page" };
   const target = prompt?.target && typeof prompt.target === "object" ? prompt.target : null;
   const selector = boundAnchorText(prompt?.selector, ANCHOR_SELECTOR_MAX);
   const withSelector = (anchor) => (selector ? { ...anchor, selector } : anchor);
@@ -639,23 +653,55 @@ function userBubbleTextHtml(entry, text) {
   return displayText ? '<div class="bubble-text">' + escapeHtml(displayText) + "</div>" : "";
 }
 
+// The notes he wrote can be reworded before they go. A choice is the option as the page declared
+// it, and a layout batch or whiteboard note is generated, so those are only removed.
+function isEditableNote(prompt) {
+  return !["choice", "layout-warnings", "whiteboard"].includes(String(prompt?.tag || ""));
+}
+
 // A queued note is the user bubble in its not-yet-sent state: dashed, labelled Queued (Sending
-// while its batch is in flight), and removable until then. It settles in place as a sent bubble
-// once the server's transcript carries it, so nothing moves between regions.
+// while its batch is in flight), and editable and removable until then. It settles in place as a
+// sent bubble once the server's transcript carries it, so nothing moves between regions.
 function queuedBubbleHtml(prompt, index) {
   const sending = isPromptSending(prompt);
-  return (
-    '<div class="bubble user queued"><small>' +
-    (sending ? SENDING_MARK_HTML + "Sending\u2026" : "Queued") +
-    ' <button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
+  const id = escapeHtml(promptIdentity(prompt));
+  const editing = !sending && editingNote !== null && editingNote.id === promptIdentity(prompt);
+  const control = (className, label, focusKey, content) =>
+    '<button class="' +
+    className +
+    '" type="button" aria-label="' +
+    label +
+    '" data-index="' +
     index +
-    '" data-focus-key="remove:' +
-    escapeHtml(promptIdentity(prompt)) +
+    '" data-focus-key="' +
+    focusKey +
+    ":" +
+    id +
     '">' +
-    REMOVE_ICON_SVG +
-    "</button></small>" +
+    content +
+    "</button>";
+  return (
+    '<div class="bubble user queued' +
+    (editing ? " editing" : "") +
+    '"><small>' +
+    (sending ? SENDING_MARK_HTML + "Sending\u2026" : "Queued") +
+    (isEditableNote(prompt) && !editing ? " " + control("queued-edit", "Edit note", "edit", EDIT_ICON_SVG) : "") +
+    " " +
+    control("queued-remove", "Remove queued prompt", "remove", REMOVE_ICON_SVG) +
+    "</small>" +
     anchorHtml(promptAnchor(prompt)) +
-    userBubbleTextHtml(prompt, prompt.prompt) +
+    (editing
+      ? '<textarea class="queued-edit-input" rows="3" aria-label="Edit note" data-index="' +
+        index +
+        '" data-focus-key="editing:' +
+        id +
+        '">' +
+        escapeHtml(editingNote?.text || "") +
+        '</textarea><div class="queued-edit-actions">' +
+        control("queued-edit-cancel", "Keep the note as it was", "cancel", "Cancel") +
+        control("queued-edit-save primary", "Save the note", "save", "Save") +
+        "</div>"
+      : userBubbleTextHtml(prompt, prompt.prompt)) +
     bubbleAttachmentsHtml(prompt) +
     "</div>"
   );
@@ -694,6 +740,16 @@ function reportNoteStatus(prompt, status) {
 }
 
 function render() {
+  // An edit whose note was sent or removed has nothing left to save.
+  if (editingNote && !queued.some((prompt) => promptIdentity(prompt) === editingNote?.id && !isPromptSending(prompt))) {
+    editingNote = null;
+  }
+  // The list is rebuilt from markup, so an open editor's caret is put back where it was.
+  const openEditor = /** @type {HTMLTextAreaElement | undefined} */ (
+    queuedLog.querySelectorAll(".queued-edit-input")[0]
+  );
+  const caret =
+    openEditor && document.activeElement === openEditor ? [openEditor.selectionStart, openEditor.selectionEnd] : null;
   rebuildKeepingFocus(queuedLog, () => {
     queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
   });
@@ -705,9 +761,87 @@ function render() {
     removeButton.disabled = terminalSubmission !== null || isPromptSending(prompt);
     removeButton.addEventListener("click", (event) => removeQueuedPrompt(Number(removeButton.dataset.index), event));
   }
+  for (const button of queuedLog.querySelectorAll(".queued-edit")) {
+    const editButton = /** @type {HTMLButtonElement} */ (button);
+    const prompt = queued[Number(editButton.dataset.index)];
+    editButton.disabled = terminalSubmission !== null || isPromptSending(prompt);
+    editButton.addEventListener("click", (event) => startEditingNote(Number(editButton.dataset.index), event));
+  }
+  const editor = /** @type {HTMLTextAreaElement | undefined} */ (queuedLog.querySelectorAll(".queued-edit-input")[0]);
+  if (editor && editingNote) {
+    editor.value = editingNote.text;
+    if (caret) editor.setSelectionRange(caret[0], caret[1]);
+    editor.addEventListener("input", () => {
+      if (editingNote) editingNote.text = editor.value;
+      syncEditSave();
+    });
+    editor.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        saveEditedNote();
+      } else if (event.key === "Escape" && !event.isComposing) {
+        // Escape belongs to the edit here, not to the menus and sheet the page-wide handler closes.
+        event.preventDefault();
+        event.stopPropagation();
+        stopEditingNote();
+      }
+    });
+    for (const button of queuedLog.querySelectorAll(".queued-edit-cancel")) {
+      /** @type {HTMLButtonElement} */ (button).onclick = stopEditingNote;
+    }
+    for (const button of queuedLog.querySelectorAll(".queued-edit-save")) {
+      /** @type {HTMLButtonElement} */ (button).onclick = saveEditedNote;
+    }
+    syncEditSave();
+  }
   updateSendState();
   scrollPanelToBottom();
   renderSheetSummary();
+}
+
+function editedPrompt() {
+  return editingNote ? queued.find((prompt) => promptIdentity(prompt) === editingNote?.id) : undefined;
+}
+
+// A note with neither words nor images is not saved: it is removed with its own control.
+function syncEditSave() {
+  const prompt = editedPrompt();
+  const canSave = Boolean(editingNote?.text.trim() || (prompt && attachmentCount(prompt)));
+  for (const button of queuedLog.querySelectorAll(".queued-edit-save")) {
+    /** @type {HTMLButtonElement} */ (button).disabled = !canSave;
+  }
+}
+
+function startEditingNote(index, event) {
+  if (event) event.stopPropagation();
+  const prompt = queued[index];
+  if (!prompt || terminalSubmission || isPromptSending(prompt) || !isEditableNote(prompt)) return;
+  // One note is edited at a time; the one already open keeps its words.
+  settleOpenEdit();
+  editingNote = { id: promptIdentity(prompt), text: String(prompt.prompt || "") };
+  render();
+  const editor = /** @type {HTMLTextAreaElement | undefined} */ (queuedLog.querySelectorAll(".queued-edit-input")[0]);
+  if (!editor) return;
+  editor.focus();
+  editor.setSelectionRange(editor.value.length, editor.value.length);
+}
+
+function stopEditingNote() {
+  editingNote = null;
+  render();
+}
+
+function saveEditedNote() {
+  const prompt = editedPrompt();
+  const text = editingNote ? editingNote.text.trim() : "";
+  if (!prompt || (!text && !attachmentCount(prompt))) return;
+  prompt.prompt = text;
+  editingNote = null;
+  persistQueuedPrompts();
+  // The note's chip in the page says what the note says now.
+  const noteId = promptNoteId(prompt);
+  if (noteId) postToFrame({ type: "lavish:noteText", noteId, text });
+  render();
 }
 
 function updateSendState() {
@@ -796,6 +930,8 @@ chatLog.addEventListener("error", replaceExpiredThumbnail, true);
 
 const DEFAULT_SEND_HINT = "Write a message or annotate an element first.";
 const APPROVED_AS_SHOWN = "Approved as shown.";
+// What a note written with nothing selected in the page says it is about.
+const WHOLE_PAGE = "Whole page";
 
 function showSendHint(message = DEFAULT_SEND_HINT, holdMs = 2600, focusInput = true) {
   sendHint.textContent = message;
@@ -1464,6 +1600,48 @@ function removeQueuedPrompt(index, event) {
 
 function promptQueueKey(prompt) {
   return prompt && typeof prompt[internalQueueKeyField] === "string" ? prompt[internalQueueKeyField].trim() : "";
+}
+
+// A choice takes its answer back out of the notes when the answer is cleared. Only a choice's own
+// answer can be taken back this way: the page is untrusted, and every other note is his to remove.
+// The page already knows, so it is not told the note was removed.
+function dropQueuedPrompt(queueKey) {
+  if (!queueKey.startsWith("choice:") || terminalSubmission) return;
+  const index = queued.findIndex((prompt) => promptQueueKey(prompt) === queueKey && prompt.tag === "choice");
+  if (index === -1 || isPromptSending(queued[index])) return;
+  reportedNoteStatuses.delete(promptNoteId(queued[index]));
+  queued.splice(index, 1);
+  persistQueuedPrompts();
+  if (!queued.length) {
+    clearSendAcknowledgementWarning();
+    if (sendFailureOwner?.kind !== "preparation") clearPersistentSendFailure();
+  }
+  render();
+}
+
+// The page says what is selected in it. Only the fields a note carries are kept: it comes from the
+// sandboxed artifact, and the server checks them again like any note's.
+function setPageSelection(selection, cardOpen) {
+  pageSelection =
+    selection && typeof selection === "object"
+      ? {
+          uid: String(selection.uid || ""),
+          selector: String(selection.selector || ""),
+          tag: String(selection.tag || ""),
+          text: String(selection.text || ""),
+          ...(selection.target && typeof selection.target === "object" ? { target: selection.target } : {}),
+        }
+      : null;
+  pageCardOpen = Boolean(pageSelection) && cardOpen;
+  renderComposerAnchor();
+}
+
+// The line above the message box names what a note written there goes on; with nothing selected
+// there is no line, and the box itself says the note is about the whole page.
+function renderComposerAnchor() {
+  chatAnchor.hidden = !pageSelection;
+  chatAnchorTarget.innerHTML = pageSelection ? anchorHtml(promptAnchor({ ...pageSelection, prompt: "" })) : "";
+  chatInput.placeholder = pageSelection ? "Write a note on what is selected..." : "Write a note on the whole page...";
 }
 
 function beginFeedbackPreparation() {
@@ -2270,6 +2448,97 @@ function handleVoiceKey(event) {
   if (meaning.action === "stop") voiceDictation.stop();
 }
 
+// Puts what the Conversation box holds into his notes, on what is selected in the page or else on
+// the whole page. Nothing is sent: every note waits for Send to Agent or Send & End. Returns false
+// when a pending or failed image chip holds the words back, so they stay in the box with it.
+function addComposerNote() {
+  if (chatAttachmentController.hasPending() || chatAttachmentController.hasErrors()) {
+    chatAttachmentController.noteSendBlocked();
+    return false;
+  }
+  const text = chatInput.value.trim();
+  const attachments = chatAttachmentController.collectReady();
+  if (!text && !attachments.length) return true;
+  /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: object, attachments?: Array<{ id: string, name?: string }> }} */
+  const prompt = pageSelection
+    ? { ...pageSelection, prompt: text }
+    : { uid: "", prompt: text, selector: "", tag: "message", text: WHOLE_PAGE };
+  if (attachments.length) prompt.attachments = attachments;
+  assignPromptIdentity(prompt, false);
+  // A note on what is selected gets the chip a card's note gets, so the page shows it too.
+  if (pageSelection) prompt[internalNoteIdField] = "chrome-" + createPromptIdentity();
+  queued.push(prompt);
+  persistQueuedPrompts();
+  // Render the durable queued bubble before clearing the editor. If anything after this point
+  // fails, the user's words are already both stored and visibly recoverable in the tab. It
+  // becomes a sent bubble only when the server's transcript carries it (see submitQueuedOnce).
+  render();
+  chatInput.value = "";
+  chatAttachmentController.reset();
+  if (pageSelection) postToFrame({ type: "lavish:selectionNoted", noteId: promptNoteId(prompt), text });
+  return true;
+}
+
+// A send takes the open card's unfinished words with it, as a note like any other: the page adds
+// them to the notes under this request's id, then says it is done. A card that holds its note
+// back, or a page that does not answer in time (and might still add the words after an end that
+// went without them), stops the send and says so; the next send then goes without the card, so
+// no page can hold the review.
+const DRAFT_COMMIT_TIMEOUT_MS = 2000;
+const DRAFT_HELD_COPY =
+  "Finish the note on the page first: its image is still uploading or could not be attached. Nothing was sent. Send again to go without it.";
+const DRAFT_SILENT_COPY =
+  "The page did not answer, so its open note could not be added. Nothing was sent. Send again to go without it.";
+// What a page may add under a commit: the one note of its open card, never a note the chrome or a
+// page control owns.
+const CHROME_OWNED_TAGS = new Set(["choice", "layout-warnings", "message", "whiteboard"]);
+/** @type {Map<string, { preparation: FeedbackPreparation, admitted: boolean }>} */
+const draftCommits = new Map();
+let skipNextDraftCommit = false;
+
+function commitPageDraft() {
+  if (skipNextDraftCommit) {
+    skipNextDraftCommit = false;
+    return null;
+  }
+  const preparation = beginFeedbackPreparation();
+  if (!preparation) return null;
+  const commitId = "commit-" + createPromptIdentity();
+  draftCommits.set(commitId, { preparation, admitted: false });
+  const timeout = setTimeout(() => settleDraftCommit(commitId, false, DRAFT_SILENT_COPY), DRAFT_COMMIT_TIMEOUT_MS);
+  preparation.done.then(() => clearTimeout(timeout));
+  postToFrame({ type: "lavish:commitDraft", commit_id: commitId });
+  return preparation;
+}
+
+// The commit id went to the untrusted page, so it admits one card note, unkeyed, and nothing else.
+function admitCommittedPrompt(commitId, rawPrompt) {
+  const commit = draftCommits.get(commitId);
+  if (!commit || commit.admitted || !rawPrompt || CHROME_OWNED_TAGS.has(String(rawPrompt.tag || ""))) return null;
+  commit.admitted = true;
+  const prompt = { ...rawPrompt };
+  delete prompt[internalQueueKeyField];
+  return { prompt, preparation: commit.preparation };
+}
+
+function settleDraftCommit(commitId, committed, heldCopy = DRAFT_HELD_COPY) {
+  const commit = draftCommits.get(commitId);
+  if (!commit) return;
+  draftCommits.delete(commitId);
+  if (!committed) {
+    skipNextDraftCommit = true;
+    showSendHint(heldCopy, 6000, false);
+  }
+  commit.preparation.finish(committed);
+}
+
+// Puts an open edit's words on its note before a send takes the notes, or drops an emptied edit.
+function settleOpenEdit() {
+  if (!editingNote) return;
+  if (editingNote.text.trim()) saveEditedNote();
+  else stopEditingNote();
+}
+
 function sendQueued(endAfter) {
   if (ended) return;
   if (terminalSubmission) {
@@ -2277,48 +2546,19 @@ function sendQueued(endAfter) {
     return;
   }
   closeMenus();
+  // A note being reworded goes with the words it has now.
+  settleOpenEdit();
 
   // A pending or failed chip holds back only the COMPOSER message (and an
   // explicit end, which would strand the chips) - queued annotation prompts
   // still deliver, mirroring how the annotation card holds only its own card
   // open. Gating the whole pipeline here made Send and Send & End silently
   // deliver nothing while the only signal sat in the composer toolbar.
-  const chipsBlocked = chatAttachmentController.hasPending() || chatAttachmentController.hasErrors();
-  if (chipsBlocked) chatAttachmentController.noteSendBlocked();
-
-  if (!chipsBlocked) {
-    const text = chatInput.value.trim();
-    const attachments = chatAttachmentController.collectReady();
-    if (text || attachments.length) {
-      const prompt = { uid: "", prompt: text, selector: "", tag: "message", text: "Freeform message" };
-      if (attachments.length) prompt.attachments = attachments;
-      assignPromptIdentity(prompt, false);
-      queued.push(prompt);
-      persistQueuedPrompts();
-      // Render the durable queued bubble before clearing the editor. If anything after this point
-      // fails, the user's words are already both stored and visibly recoverable in the tab. It
-      // becomes a sent bubble only when the server's transcript carries it (see submitQueuedOnce).
-      render();
-      chatInput.value = "";
-      chatAttachmentController.reset();
-    } else if (endAfter && !queued.length && feedbackPreparations.size === 0) {
-      // Send & End with nothing written approves the page as shown, and is delivered as that,
-      // never as nothing (the Overlord, 2026-10-01).
-      const prompt = { uid: "", prompt: APPROVED_AS_SHOWN, selector: "", tag: "message", text: "Freeform message" };
-      assignPromptIdentity(prompt, false);
-      queued.push(prompt);
-      persistQueuedPrompts();
-      render();
-    }
-  }
+  const chipsBlocked = !addComposerNote();
+  const draftCommit = pageCardOpen ? commitPageDraft() : null;
   const shouldEnd = Boolean(endAfter && !chipsBlocked);
-  const preparations = shouldEnd ? [...feedbackPreparations] : [];
-  if (!queued.length && preparations.length === 0) {
-    if (!chipsBlocked && !sendFailureOwner) showSendHint();
-    return;
-  }
-  if (!sendFailureOwner) hideSendHint(true);
   if (shouldEnd) {
+    if (!sendFailureOwner) hideSendHint(true);
     const terminal = {
       prompts: [],
       inFlight: true,
@@ -2326,9 +2566,26 @@ function sendQueued(endAfter) {
     };
     terminalSubmission = terminal;
     updateSendState();
-    finishTerminalPreparation(terminal, preparations);
+    finishTerminalPreparation(terminal, [...feedbackPreparations]);
     return;
   }
+  if (!draftCommit) {
+    submitNotes(chipsBlocked);
+    return;
+  }
+  draftCommit.done.then((committed) => {
+    if (committed && !ended && !terminalSubmission) submitNotes(chipsBlocked);
+  });
+}
+
+function submitNotes(chipsBlocked) {
+  // An edit opened while the send waited for the card goes with its new words too.
+  settleOpenEdit();
+  if (!queued.length) {
+    if (!chipsBlocked && !sendFailureOwner) showSendHint();
+    return;
+  }
+  if (!sendFailureOwner) hideSendHint(true);
   requestSnapshot("submit", queued.slice(), false, null);
   render();
 }
@@ -2360,13 +2617,16 @@ function completeTerminalPreparation(terminal, results) {
     releaseTerminalSubmission(terminal);
     return;
   }
+  if (!queued.length) {
+    // Send & End with nothing written approves the page as shown, and is delivered as that,
+    // never as nothing (the Overlord, 2026-10-01).
+    const prompt = { uid: "", prompt: APPROVED_AS_SHOWN, selector: "", tag: "message", text: WHOLE_PAGE };
+    assignPromptIdentity(prompt, false);
+    queued.push(prompt);
+    persistQueuedPrompts();
+  }
   terminal.prompts = queued.slice();
   clearPreparationFailure("terminal");
-  if (!terminal.prompts.length) {
-    releaseTerminalSubmission(terminal);
-    if (!sendFailureOwner) showSendHint();
-    return;
-  }
   // Only make the reservation durable once every preparation has joined the exact
   // batch. A reload before this point must restore an ordinary editable queue, not
   // an incomplete terminal submission.
@@ -3412,6 +3672,12 @@ async function refreshLayoutWarnings() {
   }
 }
 
+// Ending the review never drops his notes: with any waiting, the end goes with them, as Send & End.
+function endReview() {
+  if (queued.length) sendQueued(true);
+  else endSession();
+}
+
 async function endSession(terminal = null) {
   if (ended || (terminalSubmission && terminal !== terminalSubmission)) return;
   const response = await fetch("/api/" + key + "/end", { method: "POST" });
@@ -3745,6 +4011,8 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
     // Only clear it here, right before the frame is actually replaced - a preserved
     // load (superseded/out-of-order/exhausted retries below) must leave it intact.
     resetRevisionLegend();
+    // Nothing in the next document is selected until it says so.
+    setPageSelection(null, false);
     pendingScrollRestore = lastScroll.x || lastScroll.y ? { ...lastScroll } : null;
     startLayoutGateCycle();
     const currentSrc = frame.src || "about:blank";
@@ -3866,6 +4134,8 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
   // The next document reports its own registry once it loads; until then the
   // previous revision's legend would point at blocks that may no longer exist.
   resetRevisionLegend();
+  // Nothing in the next document is selected until it says so.
+  setPageSelection(null, false);
   frame.src = artifactFrameSrcForLoad({ revision, token });
   return true;
 }
@@ -4570,10 +4840,16 @@ window.addEventListener("message", (event) => {
   }
   // The artifact spoke, so it rendered and ran its SDK - there is nothing fatal to probe for.
   if (msg.type === "lavish:queuePrompt") {
-    enqueuePrompt(msg.prompt);
+    // A card's words committed for a send join that send, even once its batch is reserved.
+    const committed = admitCommittedPrompt(String(msg.commit_id || ""), msg.prompt);
+    if (committed) enqueuePrompt(committed.prompt, committed.preparation);
+    else enqueuePrompt(msg.prompt);
     // Queued from inside the artifact, where the closed dock is the only sign it landed.
     pulseSheetDock();
   }
+  if (msg.type === "lavish:draftCommitted") settleDraftCommit(String(msg.commit_id || ""), msg.committed !== false);
+  if (msg.type === "lavish:dropQueuedPrompt") dropQueuedPrompt(String(msg.queueKey || ""));
+  if (msg.type === "lavish:selection") setPageSelection(msg.selection, msg.card === true);
   if (msg.type === "lavish:snapshot") {
     completeSnapshotRequest(msg.snapshot_request_id, msg.snapshot || "");
   }
@@ -4598,7 +4874,7 @@ window.addEventListener("message", (event) => {
   // removal note below: the iframe cannot be trusted to decide a delete, and the
   // chrome cannot see every live reference, so reclamation is the sweeper's job.
   if (msg.type === "lavish:sendQueuedPrompts") sendQueued(msg.endSession === true);
-  if (msg.type === "lavish:endSession") endSession();
+  if (msg.type === "lavish:endSession") endReview();
   if (msg.type === "lavish:revisions") applyRevisionMessage(msg);
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();
 });
@@ -4842,12 +5118,18 @@ chatAttachments.addEventListener("click", (event) => {
   const retry = /** @type {HTMLElement | null} */ (target?.closest?.("[data-chat-attachment-retry]") || null);
   if (retry) chatAttachmentController.retry(String(retry.dataset.chatAttachmentRetry || ""));
 });
+// Enter adds what he wrote to his notes; Send to Agent or Send & End sends them all together.
 chatInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    sendQueued(false);
+    if (!ended && !terminalSubmission) addComposerNote();
   }
 });
+chatAnchorClear.onclick = () => {
+  postToFrame({ type: "lavish:clearSelection" });
+  setPageSelection(null, false);
+  chatInput.focus();
+};
 chatInput.addEventListener("input", () => hideSendHint());
 chatVoiceButton.onclick = () => setVoiceRecentOpen(!voiceRecentOpen);
 chatVoiceRecentClose.onclick = closeVoiceRecent;
@@ -4889,7 +5171,7 @@ copyShareSiteIdButton.onclick = () => copyToButton(shareSiteIdInput.value, copyS
 shareGenerateInput.onchange = syncSharePasswordInput;
 endButton.onclick = () => {
   closeMenus();
-  endSession();
+  endReview();
 };
 handoffTakeoverButton.onclick = () => location.reload();
 if (outdatedReloadButton) outdatedReloadButton.onclick = () => reloadChromeForOutdatedBanner();
