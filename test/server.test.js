@@ -5899,20 +5899,32 @@ test("a poll dropped before it arms never leaves presence listening", async () =
     });
     const { key } = await open.json();
 
-    // Send a real poll request, then drop the socket while the handler is still inside its
-    // startup awaits - before it can register the long poll. A cleanup hook attached after
-    // that point never runs, so the poll would arm "listening" with nobody left to release it.
-    await new Promise((resolve, reject) => {
-      const socket = netConnect(server.port, "127.0.0.1", () => {
-        const target = `/api/poll?file=${encodeURIComponent(artifact)}`;
-        socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`, () => {
-          socket.destroy();
-          resolve();
+    // The dropped poll holds the listener until its take returns, then lingers for the release
+    // grace, so a fixed sleep loses to a slow take. Watch presence from before the poll is sent
+    // instead: its only event is the release back to "waiting", while a poll that armed with
+    // nobody left to release it announces "listening".
+    const releasePresence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await releasePresence.next(), "waiting");
+
+      // Send a real poll request, then drop the socket while the handler is still inside its
+      // startup awaits - before it can register the long poll. A cleanup hook attached after
+      // that point never runs, so the poll would arm "listening" with nobody left to release it.
+      await new Promise((resolve, reject) => {
+        const socket = netConnect(server.port, "127.0.0.1", () => {
+          const target = `/api/poll?file=${encodeURIComponent(artifact)}`;
+          socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`, () => {
+            socket.destroy();
+            resolve();
+          });
         });
+        socket.on("error", reject);
       });
-      socket.on("error", reject);
-    });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+
+      assert.equal(await releasePresence.next(), "waiting");
+    } finally {
+      await releasePresence.close();
+    }
 
     const presence = await startPresenceStream(base, key);
     try {
