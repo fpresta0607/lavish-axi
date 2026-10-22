@@ -4,7 +4,8 @@ import test from "node:test";
 import vm from "node:vm";
 
 import { chatEntryForPrompt } from "../src/chat-messages.js";
-import { createChromeHtml } from "../src/server.js";
+import * as messageBox from "../src/message-box.js";
+import { createChromeHtml, createChromeMessageBoxJs } from "../src/server.js";
 
 const sourceUrl = new URL("../src/chrome-client.js", import.meta.url);
 
@@ -542,6 +543,8 @@ async function createChromeHarness({
   if (insecure) context.window.isSecureContext = false;
   if (!clipboard) delete context.navigator.clipboard;
 
+  // The server serves the message box's helpers ahead of the client, as the browser runs them.
+  vm.runInNewContext(createChromeMessageBoxJs(), context, { filename: "message-box.js" });
   vm.runInNewContext(source, context, { filename: "chrome-client.js" });
   await flushPromises();
   // A frame fires load only once something was loaded into it: a superseded first load never is.
@@ -9585,9 +9588,10 @@ const voiceKey = (type, code, changes = {}) => ({
   ...changes,
 });
 
+// The client's own voice helpers, and the message box's, which it shares with the page's box.
 async function voiceHelpers() {
   const chrome = await createChromeHarness();
-  return /** @type {any} */ (chrome.context);
+  return /** @type {any} */ (Object.assign(Object.create(chrome.context), messageBox));
 }
 
 /** @param {Parameters<typeof createChromeHarness>[0] & { getUserMedia?: any }} [options] */
@@ -9921,7 +9925,7 @@ test("voice input: holding Ctrl+Shift+Space dictates into the message box at the
   const recognizer = FakeRecognizer.made[0];
   assert.equal(recognizer.started, true);
   assert.equal(voice.classList.contains("recording"), true);
-  assert.equal(chrome.element("chatComposer").classList.contains("is-dictating"), true);
+  assert.equal(chrome.element("chatField").classList.contains("is-dictating"), true);
   assert.equal(note.textContent, "Listening · release Ctrl+Shift+Space to type");
   chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space", { repeat: true }));
   assert.equal(FakeRecognizer.made.length, 1);
@@ -9934,7 +9938,7 @@ test("voice input: holding Ctrl+Shift+Space dictates into the message box at the
   assert.deepEqual([input.selectionStart, input.selectionEnd], [26, 26]);
   assert.equal(input.focused, true);
   assert.equal(voice.classList.contains("recording"), false);
-  assert.equal(chrome.element("chatComposer").classList.contains("is-dictating"), false);
+  assert.equal(chrome.element("chatField").classList.contains("is-dictating"), false);
   assert.equal(note.textContent, "");
   await flushPromises();
   assert.deepEqual(
@@ -10319,5 +10323,135 @@ test("voice input: ending the session while listening drops the dictation and di
     JSON.parse(chrome.context.localStorage.getItem("lavish-axi:dictations") || "{}"),
     {},
     "a dropped dictation is never kept",
+  );
+});
+
+// The page's annotation box opens, as the SDK says it does: the card is up on an element.
+function openPageCard(chrome) {
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: { uid: "u-1", selector: "h2", tag: "h2", text: "Step 2. Payment" },
+    card: true,
+  });
+}
+
+function pageDictate(chrome, action) {
+  chrome.sendFrameMessage({ type: "lavish:dictate", action, artifact_load_token: chrome.artifactLoadToken() });
+}
+
+const lastVoiceState = (chrome) => chrome.postedToFrame.findLast((message) => message.type === "lavish:voiceState");
+
+test("voice input: the page's open annotation box draws its bubble from the chrome's voice", async () => {
+  const { chrome } = await voiceHarness();
+  dictate(chrome, "make the header sticky");
+  assert.equal(lastVoiceState(chrome), undefined, "nothing is told to a page with no box open");
+
+  openPageCard(chrome);
+
+  const state = lastVoiceState(chrome);
+  assert.equal(state.supported, true);
+  assert.equal(state.listening, false);
+  assert.equal(state.canCopy, true);
+  assert.deepEqual(
+    [...state.dictations.map((dictation) => dictation.text)],
+    ["make the header sticky"],
+    "the box lists this review's recent dictations",
+  );
+});
+
+test("voice input: the held keys in the page's annotation box dictate into that box, not the Conversation box", async () => {
+  const { chrome, voice, posts } = await voiceHarness();
+  const input = chrome.element("chatInput");
+  openPageCard(chrome);
+  chrome.context.navigator.userActivation = { isActive: true };
+
+  pageDictate(chrome, "start");
+
+  const recognizer = FakeRecognizer.made[0];
+  assert.equal(recognizer?.started, true, "the chrome listens for the page");
+  assert.equal(lastVoiceState(chrome).listening, true, "the page's bubble records");
+  assert.equal(voice.classList.contains("recording"), false, "the Conversation box's bubble does not");
+  recognizer.hear("say which address is billed");
+  pageDictate(chrome, "stop");
+
+  assert.deepEqual(
+    chrome.postedToFrame.filter((message) => message.type === "lavish:dictated").map((message) => message.text),
+    ["say which address is billed"],
+  );
+  assert.equal(input.value, "", "the Conversation box is untouched");
+  assert.equal(lastVoiceState(chrome).listening, false);
+  assert.deepEqual(
+    [...lastVoiceState(chrome).dictations.map((dictation) => dictation.text)],
+    ["say which address is billed"],
+    "the dictation joins this review's recent dictations",
+  );
+  await flushPromises();
+  assert.deepEqual(
+    posts.filter((url) => url.endsWith("/prompts")),
+    [],
+    "dictation never sends by itself",
+  );
+});
+
+test("voice input: the page cannot listen without an open box or a key press the reader just made", async () => {
+  const { chrome } = await voiceHarness();
+  chrome.context.navigator.userActivation = { isActive: true };
+  pageDictate(chrome, "start");
+  assert.equal(FakeRecognizer.made.length, 0, "no box is open");
+
+  openPageCard(chrome);
+  chrome.context.navigator.userActivation = { isActive: false };
+  pageDictate(chrome, "start");
+  assert.equal(FakeRecognizer.made.length, 0, "no key press of the reader's");
+
+  delete chrome.context.navigator.userActivation;
+  pageDictate(chrome, "start");
+  assert.equal(FakeRecognizer.made.length, 0, "a browser that cannot say so is never trusted");
+});
+
+test("voice input: closing the page's annotation box stops its dictation", async () => {
+  const { chrome } = await voiceHarness();
+  openPageCard(chrome);
+  chrome.context.navigator.userActivation = { isActive: true };
+  pageDictate(chrome, "start");
+  const recognizer = FakeRecognizer.made[0];
+  recognizer.hear("half a thought");
+
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: null,
+    card: false,
+  });
+
+  assert.equal(chrome.postedToFrame.findLast((message) => message.type === "lavish:dictated")?.text, "half a thought");
+  openPageCard(chrome);
+  assert.equal(lastVoiceState(chrome).listening, false, "the next box opens on a chrome that is not listening");
+});
+
+test("voice input: Copy in the page's list copies only one of this review's own dictations", async () => {
+  const { chrome } = await voiceHarness();
+  dictate(chrome, "ship it");
+  openPageCard(chrome);
+  const copied = () => chrome.postedToFrame.filter((message) => message.type === "lavish:dictationCopied");
+
+  chrome.sendFrameMessage({
+    type: "lavish:copyDictation",
+    text: "ship it",
+    artifact_load_token: chrome.artifactLoadToken(),
+  });
+  await flushPromises();
+  chrome.sendFrameMessage({
+    type: "lavish:copyDictation",
+    text: "anything the page wants",
+    artifact_load_token: chrome.artifactLoadToken(),
+  });
+  await flushPromises();
+
+  assert.deepEqual(chrome.clipboardWrites, ["ship it"]);
+  assert.deepEqual(
+    copied().map((message) => message.ok),
+    [true, false],
   );
 });

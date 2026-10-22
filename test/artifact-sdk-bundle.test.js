@@ -19,7 +19,10 @@ function createElement(tag) {
     parentElement: null,
     children: [],
     style: {},
+    dataset: {},
     value: "",
+    selectionStart: 0,
+    selectionEnd: 0,
     innerHTML: "",
     textContent: "",
     offsetWidth: 100,
@@ -29,6 +32,7 @@ function createElement(tag) {
     classList: {
       add() {},
       remove() {},
+      toggle() {},
       contains() {
         return false;
       },
@@ -60,6 +64,14 @@ function createElement(tag) {
       child.parentElement = element;
       element.children.push(child);
       return child;
+    },
+    replaceChildren(...nodes) {
+      element.children = [];
+      for (const node of nodes) element.appendChild(node);
+    },
+    setSelectionRange(start, end) {
+      element.selectionStart = start;
+      element.selectionEnd = end;
     },
     get firstChild() {
       return element.children[0] ?? null;
@@ -282,6 +294,20 @@ function bootSdk({
       assert.fail("the SDK timer queue did not settle");
     },
     // The chrome is the only legitimate sender, so its messages arrive with `source: parent`.
+    // A key event as the page's capture-phase document listeners see it.
+    documentKey(type, init) {
+      const event = {
+        type,
+        defaultPrevented: false,
+        preventDefault() {
+          event.defaultPrevented = true;
+        },
+        stopPropagation() {},
+        ...init,
+      };
+      for (const entry of documentListeners.filter((listener) => listener.type === type)) entry.handler(event);
+      return event;
+    },
     sendChromeMessage(data) {
       const listeners = windowListeners.filter((entry) => entry.type === "message");
       assert.ok(listeners.length > 0, "the SDK registers a window message listener");
@@ -819,7 +845,7 @@ test("clearing the selection leaves a card holding an image open, and says it is
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  const attachInput = sdk.card().querySelector(".lavish-attach-input");
+  const attachInput = sdk.card().querySelector("#lavishCardAttachInput");
   attachInput.files = [{ name: "shot.png", type: "image/png", size: 10, arrayBuffer: () => new Promise(() => {}) }];
   attachInput.listeners.find((entry) => entry.type === "change").handler();
   const reports = sdk.posted.filter((message) => message.type === "lavish:selection").length;
@@ -915,7 +941,7 @@ test("committing a card whose image is still uploading keeps the card and says i
   sdk.click(paragraph);
   const card = sdk.card();
   card.querySelector("textarea").value = "see the picture";
-  const attachInput = card.querySelector(".lavish-attach-input");
+  const attachInput = card.querySelector("#lavishCardAttachInput");
   attachInput.files = [{ name: "shot.png", type: "image/png", size: 10, arrayBuffer: () => new Promise(() => {}) }];
   attachInput.listeners.find((entry) => entry.type === "change").handler();
   sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-3" });
@@ -952,7 +978,7 @@ test("Escape leaves an annotation card with an in-flight attachment open, even w
 
   sdk.click(paragraph);
   const card = sdk.card();
-  const attachInput = card.querySelector(".lavish-attach-input");
+  const attachInput = card.querySelector("#lavishCardAttachInput");
   // Never resolves - only the synchronous "uploading" status addFiles sets is needed here.
   attachInput.files = [{ name: "shot.png", type: "image/png", size: 10, arrayBuffer: () => new Promise(() => {}) }];
   const changeListener = attachInput.listeners.find((entry) => entry.type === "change");
@@ -1374,4 +1400,80 @@ test("a page with no declaration, or a malformed one, gets no card", () => {
   assert.equal(bootSdk().choicesHostIndex(), -1);
   assert.equal(bootSdk({ choices: "not json" }).choicesHostIndex(), -1);
   assert.equal(bootSdk({ choices: { id: "q", question: "Pick", options: ["only one"] } }).choicesHostIndex(), -1);
+});
+
+// The card's message box is the Conversation box, and the chrome is the one that listens for it.
+const dictationKeyEvent = { code: "Space", key: " ", ctrlKey: true, shiftKey: true };
+const dictateMessages = (sdk) =>
+  sdk.posted.filter((message) => message.type === "lavish:dictate").map((message) => message.action);
+
+test("the held keys in an open annotation card ask the chrome to listen, and what it heard lands at the caret", () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.click(paragraph);
+  const textarea = sdk.card().querySelector("textarea");
+  textarea.value = "Make cards";
+  textarea.setSelectionRange(5, 5);
+
+  const down = sdk.documentKey("keydown", dictationKeyEvent);
+  const up = sdk.documentKey("keyup", dictationKeyEvent);
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "the pricing" });
+
+  assert.deepEqual(dictateMessages(sdk), ["start", "stop"]);
+  assert.equal(down.defaultPrevented, true, "the held space never types into the card");
+  assert.equal(up.defaultPrevented, true);
+  assert.equal(textarea.value, "Make the pricing cards");
+  assert.deepEqual([textarea.selectionStart, textarea.selectionEnd], [16, 16]);
+  assert.equal(sdk.posted.filter((message) => /Prompt/.test(message.type)).length, 0, "dictation never adds a note");
+});
+
+test("with no annotation card open the held keys belong to the page", () => {
+  const sdk = bootSdk();
+
+  const down = sdk.documentKey("keydown", dictationKeyEvent);
+
+  assert.deepEqual(dictateMessages(sdk), []);
+  assert.equal(down.defaultPrevented, false);
+});
+
+test("the card's voice bubble draws what the chrome says, and its Copy asks the chrome", async () => {
+  const sdk = bootSdk();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  sdk.click(paragraph);
+  const card = sdk.card();
+  const bubble = card.querySelector("#lavishCardVoice");
+  const voiceState = {
+    type: "lavish:voiceState",
+    supported: true,
+    secure: true,
+    listening: true,
+    canCopy: true,
+    dictations: [{ text: "ship it", at: 1 }],
+  };
+
+  sdk.sendChromeMessage(voiceState);
+  assert.equal(bubble.getAttribute("aria-label"), "Listening");
+  assert.equal(bubble.disabled, false);
+  sdk.sendChromeMessage({ ...voiceState, listening: false });
+  assert.equal(bubble.getAttribute("aria-label"), "Recent dictations");
+
+  bubble.onclick();
+  const entry = card.querySelector("#lavishCardVoiceRecentList").children[0];
+  const actions = entry.children.find((child) => child.className === "voice-actions").children;
+  assert.deepEqual(
+    actions.map((button) => button.getAttribute("aria-label")),
+    ["Copy: ship it", "Paste into this box: ship it"],
+  );
+  actions[0].onclick();
+  assert.deepEqual(
+    sdk.posted.filter((message) => message.type === "lavish:copyDictation").map((message) => message.text),
+    ["ship it"],
+  );
+  sdk.sendChromeMessage({ type: "lavish:dictationCopied", ok: true });
+  await Promise.resolve();
+  const copied = card.querySelector("#lavishCardVoiceRecentList").children[0];
+  assert.equal(
+    copied.children.find((child) => child.className === "voice-actions").children[0].getAttribute("data-tip"),
+    "Copied",
+  );
 });

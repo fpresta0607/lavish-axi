@@ -47,6 +47,8 @@ await chmod("dist/server.mjs", 0o755);
 
 await copyFile("src/chrome-client.js", "dist/chrome-client.js");
 await copyFile("src/chrome.css", "dist/chrome.css");
+// The one message box, drawn by the chrome and inside the annotation box on the page.
+await copyFile("src/message-box.css", "dist/message-box.css");
 await copyFile("src/project-theme.css", "dist/project-theme.css");
 // The Code Goblins board's look, served beside the review page's own stylesheet.
 await copyFile("src/board-tokens.css", "dist/board-tokens.css");

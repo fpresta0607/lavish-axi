@@ -2,6 +2,7 @@
 
 import { readArtifactRevisions } from "./artifact-revisions.js";
 import { watchBoardTips } from "./board-tips.js";
+import { createVoiceBubble, dictationKey, insertDictation, messageBoxHtml } from "./message-box.js";
 import { pageDefaultsCss, pageSetsItsOwnColors } from "./page-colors.js";
 import * as mermaidHelpers from "./mermaid-node.js";
 import { choiceAnswer, orderedChoices, parsePageChoices } from "./page-choices.js";
@@ -508,9 +509,6 @@ export function createArtifactSdk(
     '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
   const SEND_ICON = boardIcon("M20.5 3.5 10.5 13.5M20.5 3.5l-6.5 17-3.5-7-7-3.5Z");
   const CLOSE_ICON = boardIcon("M6 6l12 12M18 6 6 18");
-  const PAPERCLIP_ICON = boardIcon(
-    "M19.24 12.32L12.88 18.69A4.75 4.75 0 0 1 6.16 11.97L13.23 4.9A3.25 3.25 0 0 1 17.83 9.49L11.11 16.21A1.75 1.75 0 0 1 8.64 13.74L14.29 8.08",
-  );
   const COMMENT_ICON = boardIcon(
     "M5 4.5h14A1.5 1.5 0 0 1 20.5 6v9a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V6A1.5 1.5 0 0 1 5 4.5Z",
   );
@@ -587,6 +585,23 @@ export function createArtifactSdk(
   // The controller for the currently open card, so upload results routed from the
   // chrome reach the right chips. Only one card is ever open at a time.
   let activeAttachments = null;
+  // What the chrome last said of dictation, which the open card's voice bubble is drawn from. The
+  // page has no microphone of its own, so the chrome listens for it and keeps the recent dictations.
+  let pageVoice = {
+    supported: false,
+    secure: true,
+    listening: false,
+    disabled: false,
+    problem: "",
+    canCopy: false,
+    dictations: [],
+  };
+  // The open card's voice bubble and the text it dictates into.
+  /** @type {{ bubble: ReturnType<typeof createVoiceBubble>, textarea: HTMLTextAreaElement, notify: (message: string) => void } | null} */
+  let activeVoice = null;
+  // A Copy in the card's list waits for the chrome, which has the clipboard, to say how it went.
+  /** @type {{ resolve: (value?: unknown) => void, reject: (reason?: unknown) => void } | null} */
+  let pendingCopy = null;
 
   // A clean, self-contained close glyph: the SVG path is inlined directly (no
   // <use>/sprite/symbol/CSS-mask reference), so it paints inside the sandboxed
@@ -2408,7 +2423,7 @@ export function createArtifactSdk(
     style.textContent =
       ":host{all:initial;position:fixed;z-index:2147483647;left:0;top:0}" +
       board.shadowCss +
-      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating,.lavish-annotation-chip.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.comment-mark.lavish-pin{position:fixed;opacity:1;pointer-events:none}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint{flex:1;font-size:.9375rem}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-field{display:grid;min-width:0;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg)}.lavish-field:has(textarea:focus-visible){outline:var(--focus-ring);outline-offset:3px}.lavish-field textarea{min-height:60px;border:0;background:transparent;resize:none;field-sizing:content}.lavish-field textarea:focus-visible{outline:none}.lavish-field-tools{display:flex;align-items:center;padding:0 6px 6px}.lavish-attach{width:40px;height:40px;min-height:40px;color:var(--muted)}.lavish-attach:hover:not(:disabled){color:inherit}.lavish-attach .icon{width:20px;height:20px}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
+      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating,.lavish-annotation-chip.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.comment-mark.lavish-pin{position:fixed;opacity:1;pointer-events:none}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint{flex:1;font-size:.9375rem}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
     shadow.appendChild(style);
     window.addEventListener("pagehide", watchBoardTips(shadow), { once: true });
     return shadow;
@@ -2417,6 +2432,7 @@ export function createArtifactSdk(
   function closeCard() {
     activeCardContext = null;
     activeCard = null;
+    activeVoice = null;
     selectedNote = null;
     if (activeAttachments) {
       activeAttachments.destroy();
@@ -2596,14 +2612,9 @@ export function createArtifactSdk(
     card.innerHTML =
       '<header><strong class="lavish-heading">' +
       heading +
-      '</strong></header><div class="lavish-field"><textarea rows="3" placeholder="' +
-      placeholder +
-      '"></textarea><div class="lavish-field-tools"><button class="icon-button lavish-attach" type="button"' +
-      ' aria-label="Attach image" data-tip="Attach image" data-tip-align="start">' +
-      PAPERCLIP_ICON +
-      '</button><input class="lavish-attach-input" type="file" accept="' +
-      ATTACHMENT_IMAGE_TYPES.accept +
-      '" multiple hidden></div></div><div class="lavish-attachments" data-attachments hidden></div>' +
+      "</strong></header>" +
+      messageBoxHtml({ id: "lavishCard", placeholder, accept: ATTACHMENT_IMAGE_TYPES.accept }) +
+      '<div class="lavish-attachments" data-attachments hidden></div>' +
       '<footer><span class="muted lavish-hint">Enter adds it to your notes &middot; Shift+Enter new line &middot; Esc cancels' +
       '</span><button class="icon-button send lavish-add" type="button" aria-label="Add to your notes" data-tip="Add to your notes. Send to Agent sends them all" data-tip-align="end">' +
       PLUS_ICON +
@@ -2628,8 +2639,8 @@ export function createArtifactSdk(
     const cancelButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-cancel"));
     const addButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-add"));
     const attachmentsList = /** @type {HTMLDivElement | null} */ (card.querySelector("[data-attachments]"));
-    const attachButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-attach"));
-    const attachInput = /** @type {HTMLInputElement | null} */ (card.querySelector(".lavish-attach-input"));
+    const attachButton = /** @type {HTMLButtonElement | null} */ (card.querySelector("#lavishCardAttach"));
+    const attachInput = /** @type {HTMLInputElement | null} */ (card.querySelector("#lavishCardAttachInput"));
     const attachNotice = /** @type {HTMLDivElement | null} */ (card.querySelector(".lavish-hint"));
     if (!textarea || !cancelButton || !addButton || !attachmentsList || !attachButton || !attachInput) return;
 
@@ -2651,6 +2662,30 @@ export function createArtifactSdk(
     };
     const attachments = makeAttachmentsController(attachmentsList, { notify, onLayout: positionCard });
     activeAttachments = attachments;
+    const voicePart = (part) => /** @type {HTMLElement} */ (card.querySelector("#lavishCard" + part));
+    const bubble = createVoiceBubble(
+      {
+        field: voicePart("Field"),
+        dock: voicePart("VoiceDock"),
+        button: /** @type {HTMLButtonElement} */ (voicePart("Voice")),
+        bars: voicePart("VoiceBars"),
+        card: voicePart("VoiceRecent"),
+        list: voicePart("VoiceRecentList"),
+        empty: voicePart("VoiceRecentEmpty"),
+        close: /** @type {HTMLButtonElement} */ (voicePart("VoiceRecentClose")),
+      },
+      {
+        dictations: () => pageVoice.dictations,
+        paste: (text) => insertDictatedText(textarea, text),
+        get copy() {
+          return pageVoice.canCopy ? copyThroughChrome : null;
+        },
+        fit: (voiceCard) => fitVoiceCard(voiceCard, voicePart("Field")),
+        rebuildKeepingFocus,
+      },
+    );
+    bubble.render(pageVoice);
+    activeVoice = { bubble, textarea, notify };
 
     attachButton.onclick = () => attachInput.click();
     attachInput.addEventListener("change", () => {
@@ -2764,6 +2799,54 @@ export function createArtifactSdk(
     setTimeout(() => textarea.focus(), 0);
   }
 
+  // Dictated words land at the caret, as in the Conversation box, and are review context like typing.
+  function insertDictatedText(textarea, text) {
+    const next = insertDictation(textarea.value, textarea.selectionStart, textarea.selectionEnd, text);
+    textarea.value = next.value;
+    textarea.focus();
+    textarea.setSelectionRange(next.caret, next.caret);
+    scheduleReviewStateReport();
+  }
+
+  function copyThroughChrome(text) {
+    pendingCopy?.reject();
+    return new Promise((resolve, reject) => {
+      pendingCopy = { resolve, reject };
+      postArtifactMessage("lavish:copyDictation", { text });
+    });
+  }
+
+  // The recent dictations open above the box, or below it when the page has more room there, and
+  // stop short of the page's edge, which clips them.
+  function fitVoiceCard(voiceCard, field) {
+    const box = field.getBoundingClientRect();
+    const above = box.top - 16;
+    const below = window.innerHeight - box.bottom - 16;
+    voiceCard.classList.toggle("opens-below", below > above);
+    voiceCard.style.maxHeight = Math.max(above, below) + "px";
+  }
+
+  // The chrome's word on dictation, drawn on the open card's bubble. A problem says so on the card.
+  function setPageVoice(msg) {
+    const problem = String(msg.problem || "");
+    if (activeVoice && problem !== pageVoice.problem) activeVoice.notify(problem);
+    pageVoice = {
+      supported: msg.supported === true,
+      secure: msg.secure !== false,
+      listening: msg.listening === true,
+      disabled: msg.disabled === true,
+      problem,
+      canCopy: msg.canCopy === true,
+      dictations: (Array.isArray(msg.dictations) ? msg.dictations : []).map((dictation) => ({
+        text: String(dictation?.text || ""),
+        at: Number(dictation?.at) || 0,
+      })),
+    };
+    if (!activeVoice) return;
+    activeVoice.bubble.render(pageVoice);
+    activeVoice.bubble.refresh();
+  }
+
   function dataTransferHasFiles(dataTransfer) {
     if (!dataTransfer) return false;
     if ((dataTransfer.files || []).length) return true;
@@ -2806,6 +2889,14 @@ export function createArtifactSdk(
     }
     if (msg.type === "lavish:restoreReviewState") restoreReviewState(msg.state);
     if (msg.type === "lavish:noteStatus") updateNoteStatus(msg.noteId, msg.status);
+    if (msg.type === "lavish:voiceState") setPageVoice(msg);
+    if (msg.type === "lavish:voiceLevels" && Array.isArray(msg.levels)) activeVoice?.bubble.showLevels(msg.levels);
+    if (msg.type === "lavish:dictated" && activeVoice) insertDictatedText(activeVoice.textarea, String(msg.text || ""));
+    if (msg.type === "lavish:dictationCopied" && pendingCopy) {
+      if (msg.ok === true) pendingCopy.resolve();
+      else pendingCopy.reject();
+      pendingCopy = null;
+    }
     if (msg.type === "lavish:revealElement") revealElement(msg.selector);
     // A note reworded in the Conversation panel says its new words on its chip.
     if (msg.type === "lavish:noteText" && activeChip && activeChip.noteId === String(msg.noteId || "")) {
@@ -2868,6 +2959,22 @@ export function createArtifactSdk(
     },
     true,
   );
+  // Holding Ctrl+Shift+Space dictates into the open card, as it does into the Conversation box: the
+  // chrome listens while the keys are held, so the page asks it to. Capture phase, so the held space
+  // never reaches the card's text or a focused button.
+  function handleDictationKey(event) {
+    if (!activeVoice) return;
+    const meaning = dictationKey(event);
+    if (!meaning) return;
+    if (meaning.swallow) event.preventDefault();
+    if (meaning.action) postArtifactMessage("lavish:dictate", { action: meaning.action });
+  }
+  document.addEventListener("keydown", handleDictationKey, true);
+  document.addEventListener("keyup", handleDictationKey, true);
+  // A page that loses focus may never see the held keys' release, so that stops listening.
+  window.addEventListener("blur", () => {
+    if (pageVoice.listening) postArtifactMessage("lavish:dictate", { action: "stop" });
+  });
 
   // Report scroll position to the chrome so it can be restored across hot reloads.
   // The iframe is sandboxed without same-origin, so the chrome can't read scrollY directly.

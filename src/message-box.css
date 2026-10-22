@@ -1,0 +1,86 @@
+/* The one message box (src/message-box.js), in the Conversation panel and in the annotation box on
+   the page alike: this file is served in the chrome's stylesheet and in the annotation box's shadow
+   root, so both draw it from the same rules.
+   The message box is one bordered field: the text, then a row inside the border with the paperclip
+   at the bottom left and the voice bubble at the bottom right. The text grows to its cap and then
+   scrolls in its own area above that row, so it never runs under either button. The board's voice
+   card opens above the field, so the field is what it is set against. */
+.composer-field {
+  position: relative;
+  display: grid;
+  min-width: 0;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--field-bg);
+}
+.composer-field:has(textarea:focus-visible) {
+  outline: var(--focus-ring);
+  outline-offset: 3px;
+}
+.composer-field textarea {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+  min-height: 60px;
+  max-height: 240px;
+  box-sizing: border-box;
+  border: 0;
+  background: transparent;
+  resize: none;
+  field-sizing: content;
+}
+.composer-field textarea:focus-visible {
+  outline: none;
+}
+.composer-tools {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  padding: 0 6px 6px;
+}
+.composer-tool {
+  width: 40px;
+  height: 40px;
+  min-height: 40px;
+  color: var(--muted);
+}
+.composer-tool:hover:not(:disabled) {
+  color: inherit;
+}
+.composer-tool .icon {
+  width: 20px;
+  height: 20px;
+}
+/* The microphone is the board's voice bubble, still while idle. Recording widens it, a recording
+   dot and bars that move only with the microphone's level. */
+.chat-voice:disabled {
+  cursor: not-allowed;
+}
+.chat-voice.recording svg,
+.chat-voice:not(.recording) .chat-voice-dot,
+.chat-voice:not(.recording) .chat-voice-bars {
+  display: none;
+}
+/* The recent dictations stop short of what clips them, the top of the panel or of the page (the
+   box sets the max-height to the room it has): the list scrolls between the card's title and its
+   foot instead. A box with more room under it than over it opens them below. */
+.chat-voice-dock .voice-card {
+  display: flex;
+  flex-direction: column;
+}
+.chat-voice-dock .voice-card > * {
+  flex: none;
+}
+.chat-voice-dock .voice-card.opens-below {
+  top: calc(100% + 8px);
+  bottom: auto;
+}
+.chat-voice-dock .voice-recent ul {
+  flex: 0 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.composer-field.is-dictating {
+  border-color: var(--accent-green);
+}
