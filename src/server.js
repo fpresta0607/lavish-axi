@@ -39,6 +39,8 @@ import {
 } from "./layout-warnings.js";
 import * as artifactRevisions from "./artifact-revisions.js";
 import * as boardTips from "./board-tips.js";
+import * as messageBox from "./message-box.js";
+import { messageBoxHtml } from "./message-box.js";
 import * as mermaidNode from "./mermaid-node.js";
 import * as pageChoices from "./page-choices.js";
 import * as tableCellHelpers from "./table-cell.js";
@@ -107,14 +109,17 @@ const projectThemeCssUrl = new URL("./project-theme.css", import.meta.url);
 // and its goblin. test/board-tokens.test.js fails when the copies differ from the board's.
 const boardTokensUrl = new URL("./board-tokens.css", import.meta.url);
 const boardComponentsUrl = new URL("./board-components.css", import.meta.url);
+// The one message box both the Conversation panel and the annotation box draw (src/message-box.js).
+const messageBoxCssUrl = new URL("./message-box.css", import.meta.url);
 const boardFontsUrl = new URL("./fonts/", import.meta.url);
 const boardGoblinUrl = new URL("./assets/goblin-app.png", import.meta.url);
 const BOARD_FONT_FILES = new Set(["pixelify-sans.woff2", "nunito.woff2", "jetbrains-mono.woff2"]);
 const BOARD_ASSET_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
 const boardTokensCss = readFileSync(boardTokensUrl, "utf8");
 const boardComponentsCss = readFileSync(boardComponentsUrl, "utf8");
+const messageBoxCss = readFileSync(messageBoxCssUrl, "utf8");
 // The copied board rules the annotation UI inside a reviewed page is drawn with: base controls,
-// the comment box and its chip, and the question card.
+// the comment box and its chip, the voice bubble and its card, and the question card.
 const BOARD_SDK_RULE_PREFIXES = [
   "*",
   "[data-tip",
@@ -127,6 +132,7 @@ const BOARD_SDK_RULE_PREFIXES = [
   ".muted",
   ".sr-only",
   ".icon",
+  ".voice-",
   ".primary",
   ".delivery",
   ".tip",
@@ -147,6 +153,7 @@ const SDK_BOARD = {
   shadowCss: [
     `:host{${boardTokenDeclarations(boardTokensCss)}}`,
     boardRulesFor(boardComponentsCss, BOARD_SDK_RULE_PREFIXES),
+    messageBoxCss,
   ].join("\n"),
   fontFaces: boardFontFaces(boardTokensCss),
   accent: boardTokenValue(boardTokensCss, "--accent-green"),
@@ -1717,7 +1724,12 @@ export async function serve({
   app.get("/chrome-client.js", async (req, res, next) => {
     try {
       const tips = `window.addEventListener("pagehide", (${boardTips.watchBoardTips.toString()})(document), {once:true});`;
-      sendText(req, res, "application/javascript", `${tips}\n${await readFile(chromeClientUrl, "utf8")}`);
+      sendText(
+        req,
+        res,
+        "application/javascript",
+        `${tips}\n${createChromeMessageBoxJs()}\n${await readFile(chromeClientUrl, "utf8")}`,
+      );
     } catch (error) {
       next(error);
     }
@@ -2644,7 +2656,9 @@ function sendText(req, res, type, body) {
 // that dresses them in a project's saved theme.
 async function readChromeCss() {
   const parts = await Promise.all(
-    [boardTokensUrl, boardComponentsUrl, chromeCssUrl, projectThemeCssUrl].map((url) => readFile(url, "utf8")),
+    [boardTokensUrl, boardComponentsUrl, messageBoxCssUrl, chromeCssUrl, projectThemeCssUrl].map((url) =>
+      readFile(url, "utf8"),
+    ),
   );
   return parts.join("\n");
 }
@@ -3053,12 +3067,6 @@ const chromeIcons = {
   ),
   pointer: chromeIcon("M6 4.5l12.5 6.5-5.5 1.7L11.3 18.5Z"),
   send: chromeIcon("M20.5 3.5 10.5 13.5M20.5 3.5l-6.5 17-3.5-7-7-3.5Z"),
-  paperclip: chromeIcon(
-    "M19.24 12.32L12.88 18.69A4.75 4.75 0 0 1 6.16 11.97L13.23 4.9A3.25 3.25 0 0 1 17.83 9.49L11.11 16.21A1.75 1.75 0 0 1 8.64 13.74L14.29 8.08",
-  ),
-  mic: chromeIcon(
-    "M12 3.5a3 3 0 0 0-3 3v5a3 3 0 0 0 6 0v-5a3 3 0 0 0-3-3ZM5.5 11a6.5 6.5 0 0 0 13 0M12 17.5V21M8.5 21h7",
-  ),
   // The mobile conversation sheet's only chevron: CSS rotates it when the sheet is open.
   chevronUp: chromeIcon("m6 15 6-6 6 6"),
 };
@@ -3286,7 +3294,7 @@ ${faviconTag}
 </head>
 <body class="${bodyClass}">
 <header class="bar topbar"><div class="brand"><img src="/assets/goblin-app.png" width="48" height="48" alt=""><h1 class="brand-mark">${escapeHtml(brand)}</h1></div><div class="panel-pill mode-switch" role="group" aria-label="Mode"><button id="annotation" type="button" aria-pressed="true" title="${escapeHtml(modeToggleHint)}">${chromeIcons.comment}<span>Annotate</span></button><button id="explore" type="button" aria-pressed="false" title="${escapeHtml(modeToggleHint)}">${chromeIcons.pointer}<span>Explore</span></button></div><div class="topbar-controls"><div class="warnings-wrap" id="warningsWrap" hidden><button class="warnings-button icon-button raised" id="warningsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="warningsDrawer">${chromeIcons.warning}<span class="warnings-count count-badge" id="warningsCount">0</span></button><div class="menu warnings-drawer" id="warningsDrawer" role="dialog" aria-labelledby="warningsTitle" aria-describedby="warningsSummary" hidden><div class="warnings-head"><h2 class="warnings-title" id="warningsTitle">Layout issues</h2><p class="warnings-summary" id="warningsSummary"></p></div><div class="warnings-toolbar"><label class="warnings-selectall"><input type="checkbox" id="warningsSelectAll"><span>Select all</span></label><span class="warnings-selected" id="warningsSelected" role="status" aria-live="polite"></span></div><div class="warnings-list" id="warningsList"></div><div class="warnings-foot"><p class="warnings-note">Queueing sends a repair request with your next feedback. An issue is marked resolved only after a newer artifact load and a complete check at the same viewport no longer finds it.</p><button class="button primary" id="warningsQueueButton" type="button" disabled>Queue selected fixes</button></div></div></div><div class="revisions-wrap" id="revisionsWrap" hidden><button class="revisions-button icon-button raised pill-link" id="revisionsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="revisionsDrawer">${chromeIcons.clock}<span class="revisions-button-text">Revisions</span><span class="revisions-count count-pill" id="revisionsCount">0</span></button><div class="menu revisions-drawer" id="revisionsDrawer" role="dialog" aria-labelledby="revisionsTitle" aria-describedby="revisionsSummary" hidden><div class="revisions-head"><h2 class="revisions-title" id="revisionsTitle">Revisions</h2><p class="revisions-summary" id="revisionsSummary"></p></div><div class="revisions-list" id="revisionsList"></div><div class="revisions-foot"><p class="revisions-note">The agent declares these in the artifact itself. Reveal flashes the next block it marked for that revision; nothing about the page is restyled, so the saved file still looks the way it does here.</p></div></div></div><div class="more-wrap" id="moreWrap"><button class="more-button icon-button raised" id="moreButton" type="button" aria-label="More" data-tip="More" data-tip-align="end" aria-haspopup="menu" aria-expanded="false">${chromeIcons.more}</button><div class="menu more-menu" id="moreMenu" hidden><div class="menu-head"><div class="menu-label">Editing</div><button class="menu-file" id="copyPath" type="button" title="Copy path · ${escapeHtml(session.file)}">${chromeIcons.file}<span class="menu-file-text"><span class="path-head">${escapeHtml(pathHead)}</span><span class="path-tail">${escapeHtml(pathTail)}</span></span><span class="copy-hint" id="copyHint"><span class="icon-copy">${chromeIcons.copy}</span><span class="icon-check">${chromeIcons.check}</span><span id="copyHintText">Copy</span></span></button></div><div class="menu-rule"></div><button class="menu-item" id="reloadArtifact" type="button">${chromeIcons.refresh}<span>Reload artifact</span></button><button class="menu-item" id="copySnapshot" type="button">${chromeIcons.camera}<span>Copy DOM snapshot</span></button><button class="menu-item" id="exportArtifact" type="button">${chromeIcons.download}<span>Export standalone HTML</span></button><button class="menu-item" id="shareArtifact" type="button">${chromeIcons.external}<span>Publish link</span></button><div class="menu-rule"></div><button class="menu-item danger" id="end" type="button">${chromeIcons.exit}<span>End session</span></button></div></div></div></header>
-<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" data-artifact-src="/artifact/${session.key}/index.html"></iframe><div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"${layoutGateHidden}><div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"></span><h3 class="ended-title" id="layoutGateTitle">Opening this artifact.<br>One moment.</h3><p class="ended-copy" id="layoutGateCopy">${safeProduct} shows it as soon as it has loaded, then checks its layout on screen.</p><button class="button ended-action" id="layoutGateAction" type="button">Show anyway</button><button class="button ended-action layout-gate-bypass" id="layoutGateBypass" type="button" hidden>Show anyway</button></div></div></div><div class="panel-scrim" id="panelScrim"></div><aside class="panel" id="panel"><div class="panel-head" id="panelHead"><span class="panel-handle" aria-hidden="true"></span><div class="panel-head-row panel-header compact"><span class="goblin-avatar" aria-hidden="true"></span><div class="panel-identity"><h2>Conversation</h2><span class="panel-summary" id="panelSummary" role="status" aria-live="polite"></span></div><button class="panel-toggle" id="panelToggle" type="button" aria-expanded="false" aria-controls="panel" aria-label="Show conversation">${chromeIcons.chevronUp}</button></div></div><div class="panel-scroll" id="panelScroll"><div class="chat" id="chatLog"></div><div class="chat chat-queued" id="queuedLog"></div></div><div class="composer" id="chatComposer"><div class="presence-banner handoff-banner update-banner" id="handoffBanner" hidden><span>This review is open in another ${safeProduct} tab.</span><button class="handoff-takeover primary" id="handoffTakeover" type="button">Take over here</button></div><div class="presence-banner handoff-banner update-banner" id="outdatedBanner" hidden><span id="outdatedText">The ${safeProduct} server this page was connected to is no longer running. Reloading will work once it is running again.</span><span class="outdated-actions"><button class="handoff-takeover primary" id="outdatedReload" type="button">Check and reload</button><button class="handoff-takeover" id="outdatedDismiss" type="button">Dismiss</button></span></div><div class="composer-anchor" id="chatAnchor" hidden><span class="composer-anchor-on">On</span><span class="composer-anchor-target" id="chatAnchorTarget"></span><button class="icon-button composer-anchor-clear" id="chatAnchorClear" type="button" aria-label="Write about the whole page instead" data-tip="Whole page instead" data-tip-align="end">${chromeIcons.close}</button></div><div class="composer-field" id="chatField"><textarea id="chatInput" placeholder="Write a note on the whole page..."></textarea><div class="composer-tools"><button class="icon-button composer-tool" id="chatAttach" type="button" aria-label="Attach images" data-tip="Attach images" data-tip-align="start">${chromeIcons.paperclip}</button><input id="chatAttachInput" type="file" accept="${escapeHtml(acceptedMime.join(","))}" multiple hidden><div class="voice-dock chat-voice-dock" id="chatVoiceDock"><button class="voice-bubble chat-voice" id="chatVoice" type="button" aria-label="Recent dictations" aria-expanded="false" aria-controls="chatVoiceRecent" data-tip-align="end">${chromeIcons.mic}<span class="chat-voice-dot voice-dot" aria-hidden="true"></span><span class="chat-voice-bars voice-bars" id="chatVoiceBars" aria-hidden="true">${"<span></span>".repeat(9)}</span></button><section class="voice-card voice-recent" id="chatVoiceRecent" role="dialog" aria-label="Recent dictations" hidden><p class="voice-card-title">Recent dictations</p><button class="icon-button pixel-icon voice-close" id="chatVoiceRecentClose" type="button" aria-label="Close recent dictations" data-tip="Close">${chromeIcons.close}</button><ul id="chatVoiceRecentList"></ul><p class="voice-empty" id="chatVoiceRecentEmpty">Nothing dictated yet.</p><p class="voice-footer">Hold Ctrl+Shift+Space, speak, release. Heard by this browser&#39;s speech recognition, which sends your voice to the browser&#39;s maker.</p></section></div></div></div><div class="chat-attachments" id="chatAttachments"></div><span class="chat-attachment-notice" id="chatAttachmentNotice" role="status"></span><div class="chat-voice-note" id="chatVoiceNote" role="status"></div><div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first.</div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">${chromeIcons.exit}<span>Send &amp; End</span></button><button class="button primary send-decision" id="send">${chromeIcons.send}<span>Send to Agent</span></button></div></div></aside></div>
+<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" data-artifact-src="/artifact/${session.key}/index.html"></iframe><div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"${layoutGateHidden}><div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"></span><h3 class="ended-title" id="layoutGateTitle">Opening this artifact.<br>One moment.</h3><p class="ended-copy" id="layoutGateCopy">${safeProduct} shows it as soon as it has loaded, then checks its layout on screen.</p><button class="button ended-action" id="layoutGateAction" type="button">Show anyway</button><button class="button ended-action layout-gate-bypass" id="layoutGateBypass" type="button" hidden>Show anyway</button></div></div></div><div class="panel-scrim" id="panelScrim"></div><aside class="panel" id="panel"><div class="panel-head" id="panelHead"><span class="panel-handle" aria-hidden="true"></span><div class="panel-head-row panel-header compact"><span class="goblin-avatar" aria-hidden="true"></span><div class="panel-identity"><h2>Conversation</h2><span class="panel-summary" id="panelSummary" role="status" aria-live="polite"></span></div><button class="panel-toggle" id="panelToggle" type="button" aria-expanded="false" aria-controls="panel" aria-label="Show conversation">${chromeIcons.chevronUp}</button></div></div><div class="panel-scroll" id="panelScroll"><div class="chat" id="chatLog"></div><div class="chat chat-queued" id="queuedLog"></div></div><div class="composer" id="chatComposer"><div class="presence-banner handoff-banner update-banner" id="handoffBanner" hidden><span>This review is open in another ${safeProduct} tab.</span><button class="handoff-takeover primary" id="handoffTakeover" type="button">Take over here</button></div><div class="presence-banner handoff-banner update-banner" id="outdatedBanner" hidden><span id="outdatedText">The ${safeProduct} server this page was connected to is no longer running. Reloading will work once it is running again.</span><span class="outdated-actions"><button class="handoff-takeover primary" id="outdatedReload" type="button">Check and reload</button><button class="handoff-takeover" id="outdatedDismiss" type="button">Dismiss</button></span></div><div class="composer-anchor" id="chatAnchor" hidden><span class="composer-anchor-on">On</span><span class="composer-anchor-target" id="chatAnchorTarget"></span><button class="icon-button composer-anchor-clear" id="chatAnchorClear" type="button" aria-label="Write about the whole page instead" data-tip="Whole page instead" data-tip-align="end">${chromeIcons.close}</button></div>${messageBoxHtml({ id: "chat", placeholder: "Write a note on the whole page...", accept: acceptedMime.join(",") })}<div class="chat-attachments" id="chatAttachments"></div><span class="chat-attachment-notice" id="chatAttachmentNotice" role="status"></span><div class="chat-voice-note" id="chatVoiceNote" role="status"></div><div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first.</div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">${chromeIcons.exit}<span>Send &amp; End</span></button><button class="button primary send-decision" id="send">${chromeIcons.send}<span>Send to Agent</span></button></div></div></aside></div>
 <div class="share-overlay" id="shareDialog" role="dialog" aria-modal="true" aria-labelledby="shareTitleText" hidden><form class="share-card" id="shareForm"><header class="command-center-heading share-head"><span class="goblin-avatar" aria-hidden="true"></span><h2 id="shareTitleText">Publish artifact<span class="share-kicker">to <a class="share-link" href="https://ht-ml.app" target="_blank" rel="noopener noreferrer">ht-ml.app</a></span></h2><button class="share-close icon-button" id="shareClose" type="button" aria-label="Close publish dialog" data-tip="Close" data-tip-align="end">${chromeIcons.close}</button></header><p class="share-note">ht-ml.app is a separate, third-party hosting service, not part of ${safeProduct}. Publishing sends this artifact to its servers.</p><p class="share-copy">This uploads this artifact to ht-ml.app with local assets inlined. Without a password, the page is PUBLIC and anyone with the link can open it. With a password, the page is PRIVATE and viewers must supply the password to view.</p><p class="share-note">Do not publish secrets. The ${safeProduct} annotation SDK is not included.</p><div class="share-grid"><label class="share-check"><input id="shareGenerate" type="checkbox"><span>Generate a password (makes this page private)</span></label><label>Password (optional)<input id="sharePassword" name="password" type="password" autocomplete="new-password" placeholder="Leave blank for a public page"></label></div><div class="share-status" id="shareStatus" role="status"></div><div class="share-result" id="shareResult" hidden><label id="shareUrlResult">Share URL<div class="share-copy-row"><input id="shareUrl" readonly><button class="share-copy-btn" id="copyShareUrl" type="button">Copy URL</button></div></label><label id="sharePasswordResult" hidden>Password (shared secret)<div class="share-copy-row"><input id="sharePasswordOut" readonly><button class="share-copy-btn" id="copySharePassword" type="button">Copy password</button></div></label><label id="shareSiteIdResult" hidden>Site ID<div class="share-copy-row"><input id="shareSiteId" readonly><button class="share-copy-btn" id="copyShareSiteId" type="button">Copy site ID</button></div></label><label id="shareUpdateKeyResult">Update key (secret)<div class="share-copy-row"><input id="shareUpdateKey" readonly><button class="share-copy-btn" id="copyUpdateKey" type="button">Copy key</button></div></label><p class="share-note" id="shareUpdateKeyNote">Keep the update key private. ht-ml.app returns it once and it is the only way to update this page later; the service has no delete. Republish this page&#39;s HTML with <code>lavish-axi share &lt;file&gt; --site &lt;site id&gt; --update-key &lt;key&gt;</code>, and add <code>--private</code> to also lock it behind a new generated password.</p></div><div class="share-actions"><button class="share-cancel" id="shareCancel" type="button">Cancel</button><button class="button primary" id="sharePublish" type="submit">Publish</button></div></form></div>
 <div class="ended-overlay" id="endedOverlay" hidden><div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"></span><h3 class="ended-title">Session ended.<br>Return to your agent to continue.</h3><div class="ended-replies" id="endedReplies" role="region" aria-label="Latest from your agent" hidden></div><p class="ended-copy">${escapeHtml(session.file)}</p></div></div>
 <div class="whiteboard-overlay" id="whiteboardOverlay" hidden><div class="whiteboard-shell"><div class="whiteboard-error" id="whiteboardError" hidden></div><button class="whiteboard-close icon-button raised" id="whiteboardClose" type="button" aria-label="Close whiteboard">${chromeIcons.close}</button><iframe id="whiteboardFrame" title="Excalidraw whiteboard" sandbox="allow-scripts allow-popups"></iframe></div></div>
@@ -3334,6 +3342,13 @@ function serializeModuleHelpers(module) {
   };
 }
 
+// The message box's helpers for the chrome client, which is served as it is on disk and cannot
+// import them: they arrive as `window.lavishMessageBox`, from the same module the SDK serializes.
+export function createChromeMessageBoxJs() {
+  const helpers = serializeModuleHelpers(messageBox);
+  return `window.lavishMessageBox=(() => {\n${helpers.declarations}\nreturn { ${helpers.names.join(", ")} };\n})();`;
+}
+
 /**
  * @param {string} key
  * @param {number} [artifactRevision]
@@ -3353,6 +3368,7 @@ export function createSdkJs(
   const choiceHelperSource = serializeModuleHelpers(pageChoices);
   const tipHelperSource = serializeModuleHelpers(boardTips);
   const pageColorHelperSource = serializeModuleHelpers(pageColors);
+  const messageBoxHelperSource = serializeModuleHelpers(messageBox);
   const revisionNumber = Number(artifactRevision);
   const revision = Number.isFinite(revisionNumber) && revisionNumber >= 0 ? Math.trunc(revisionNumber) : 0;
   const loadToken = String(artifactLoadToken || "").slice(0, 200);
@@ -3396,6 +3412,7 @@ ${revisionHelperSource.declarations}
 ${choiceHelperSource.declarations}
 ${tipHelperSource.declarations}
 ${pageColorHelperSource.declarations}
+${messageBoxHelperSource.declarations}
 (${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken, key, ${JSON.stringify(sdkOptions)});
 })();`;
 }

@@ -39,7 +39,7 @@ test("the project theme layer re-colours every colour the frame's rules write ou
   }
 
   const missing = [];
-  for (const file of ["board-components.css", "chrome.css"]) {
+  for (const file of ["board-components.css", "message-box.css", "chrome.css"]) {
     for (const rule of rules(await read(file))) {
       for (const selector of rule.selectors) {
         if (selector.startsWith(":root") || /^(\d+%|from|to)$/.test(selector)) continue;

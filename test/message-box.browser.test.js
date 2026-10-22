@@ -7,10 +7,10 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-// Both message boxes, measured in a real browser: the Conversation box keeps its paperclip at the
-// bottom left and the board's square voice bubble at the bottom right, and the annotation box its
-// paperclip at the bottom left and no microphone, each inside the box the reader sees, as an icon
-// with a name and a tooltip but no words. The text ends above the buttons however long it grows.
+// Both message boxes, measured in a real browser: the Conversation box and the annotation box each
+// keep their paperclip at the bottom left and the board's square voice bubble at the bottom right,
+// inside the box the reader sees, as an icon with a name and a tooltip but no words. The text ends
+// above the buttons however long it grows.
 // The box is found the way a reader finds it, as the nearest element around the text that draws a
 // border, so a button drawn under or beside the box fails whatever the markup calls it. The bubble
 // is held to the board's look by what it draws: the stepped pixel frame, its leather fill and bone
@@ -86,16 +86,13 @@ ${MEASURE_BOX}
     card = host && host.shadowRoot ? host.shadowRoot.querySelector(".lavish-annotation-card") : null;
   }
   var textarea = card.querySelector("textarea");
-  var controls = { attach: card.querySelector(".lavish-attach") };
-  var buttons = Array.prototype.map.call(card.querySelectorAll("button"), function (button) {
-    return button.getAttribute("aria-label") || button.textContent.trim();
-  });
+  var controls = { attach: card.querySelector("#lavishCardAttach"), voice: card.querySelector("#lavishCardVoice") };
   var empty = measureBox(textarea, controls);
   textarea.value = longNote();
   textarea.dispatchEvent(new Event("input", { bubbles: true }));
   await new Promise(function (resolve) { requestAnimationFrame(function () { requestAnimationFrame(resolve); }); });
   var full = measureBox(textarea, controls);
-  document.getElementById("card-report").textContent = "card-report:" + encodeURIComponent(JSON.stringify({ empty: empty, full: full, buttons: buttons }));
+  document.getElementById("card-report").textContent = "card-report:" + encodeURIComponent(JSON.stringify({ empty: empty, full: full }));
 })();
 </script>
 </body></html>`;
@@ -298,13 +295,11 @@ function assertConversationBox(where, measured, listening = false) {
 }
 
 function assertAnnotationBox(where, measured) {
-  for (const state of ["empty", "full"]) assertInBox(`${where}, ${state}`, measured[state], "attach", "left");
+  for (const state of ["empty", "full"]) {
+    assertInBox(`${where}, ${state}`, measured[state], "attach", "left");
+    assertInBox(`${where}, ${state}`, measured[state], "voice", "right");
+  }
   assert.equal(measured.full.textScrolls, true, `${where}: sixty lines scroll inside the box`);
-  assert.deepEqual(
-    measured.buttons.filter((name) => /voice|dictat|listen|microphone/i.test(name)),
-    [],
-    `${where}: the annotation box has no microphone`,
-  );
 }
 
 // The card opens above the box, inside its width and on screen, in the board's frame, newest

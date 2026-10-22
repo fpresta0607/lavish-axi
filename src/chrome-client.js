@@ -117,6 +117,11 @@ const panelScroll = /** @type {HTMLDivElement} */ (document.getElementById("pane
 const queuedLog = /** @type {HTMLDivElement} */ (document.getElementById("queuedLog"));
 const chatLog = /** @type {HTMLDivElement} */ (document.getElementById("chatLog"));
 const chatComposer = /** @type {HTMLDivElement} */ (document.getElementById("chatComposer"));
+// The one message box (src/message-box.js), which the server serves ahead of this script because
+// this file is served as it is on disk and cannot import it. The annotation box on the page is
+// drawn by the same module.
+/** @type {typeof import("./message-box.js")} */
+const messageBox = /** @type {any} */ (window).lavishMessageBox;
 const chatInput = /** @type {HTMLTextAreaElement} */ (document.getElementById("chatInput"));
 const chatField = /** @type {HTMLDivElement} */ (document.getElementById("chatField"));
 const chatAnchor = /** @type {HTMLDivElement} */ (document.getElementById("chatAnchor"));
@@ -539,11 +544,6 @@ function boardIconSvg(path) {
 }
 const REMOVE_ICON_SVG = boardIconSvg("M6 6l12 12M18 6 6 18");
 const EDIT_ICON_SVG = boardIconSvg("m4 16-1 5 5-1L20 8l-4-4ZM14 6l4 4");
-const COPY_ICON_SVG = boardIconSvg("M9 9h10v11H9ZM5 15V4h10");
-const CHECK_ICON_SVG = boardIconSvg("M5 12.5 9.5 17 19 7.5");
-const PASTE_ICON_SVG = boardIconSvg(
-  "M8.5 5H6.5A1.5 1.5 0 0 0 5 6.5v13A1.5 1.5 0 0 0 6.5 21h11a1.5 1.5 0 0 0 1.5-1.5v-13A1.5 1.5 0 0 0 17.5 5h-2M9 3.5h6v3H9ZM12 10v7M9 14l3 3 3-3",
-);
 // A note's delivery reads as the board's comment chip does: one check while it is on its way,
 // two once the transcript carries it.
 const SENDING_MARK_HTML =
@@ -1634,6 +1634,9 @@ function setPageSelection(selection, cardOpen) {
       : null;
   pageCardOpen = Boolean(pageSelection) && cardOpen;
   renderComposerAnchor();
+  // An open box draws its voice bubble from the chrome's state; once it closes, it stops listening.
+  if (pageCardOpen) postPageVoice(true);
+  else if (voiceTarget === VOICE_TO_PAGE) voiceDictation.stop();
 }
 
 // The line above the message box names what a note written there goes on; with nothing selected
@@ -1952,27 +1955,26 @@ function createChatAttachmentsController() {
 
 const chatAttachmentController = createChatAttachmentsController();
 
-// Voice input: the browser's own speech recognition dictates into the message box. Holding
+// Voice input: the browser's own speech recognition dictates into a message box. Holding
 // Ctrl+Shift+Space listens until one of those keys is released. What was heard lands at the caret
 // for the reviewer to read and send; it is never sent by itself. Nothing is installed and the
 // chrome makes no request of its own. The microphone is the board's voice bubble: a click opens
 // this review's recent dictations, each with Copy and Paste into this box.
-const VOICE_UNSUPPORTED_COPY = "Voice input needs Chrome or Edge";
-// Browsers refuse the microphone to a plain-http page anywhere but localhost, so the page's link,
-// not a site setting, is what has to change.
-const VOICE_INSECURE_COPY = "Voice input needs this page's https link";
-const VOICE_IDLE_HINT = "Hold Ctrl+Shift+Space to dictate";
-const VOICE_HELD_HINT = "Listening · release Ctrl+Shift+Space to type";
-const VOICE_RECENT_LABEL = "Recent dictations";
-// The board's voice bubble keeps each box's own dictations in this browser only: the newest
+// The chrome is the one that listens, for the Conversation box and for the annotation box the page
+// draws: the page is sandboxed and has no microphone of its own, so its box asks the chrome to
+// listen while its keys are held and the chrome hands it what was heard.
+const {
+  unsupported: VOICE_UNSUPPORTED_COPY,
+  insecure: VOICE_INSECURE_COPY,
+  held: VOICE_HELD_HINT,
+} = messageBox.voiceCopy();
+// The board's voice bubble keeps each review's dictations in this browser only: the newest
 // KEPT_DICTATIONS of each of the KEPT_DICTATION_REVIEWS reviews used most recently, so reviews that
 // come and go never grow what it keeps. Its list shows LISTED_DICTATIONS of them.
 const DICTATIONS_STORAGE_KEY = "lavish-axi:dictations";
 const KEPT_DICTATIONS = 10;
 const KEPT_DICTATION_REVIEWS = 20;
 const LISTED_DICTATIONS = 5;
-// A copied dictation says so this long.
-const VOICE_COPIED_MS = 1400;
 // The card opens 8px above the box, as the board's rule places it, and keeps as much again clear of
 // the top of the panel.
 const VOICE_CARD_CLEARANCE = 16;
@@ -1980,37 +1982,18 @@ const VOICE_CARD_CLEARANCE = 16;
 const VOICE_NOTE_MS = 6000;
 // While listening, the waveform takes the microphone's level this often.
 const VOICE_SAMPLE_MS = 70;
+// The box a dictation types into: the Conversation box, or the annotation box open on the page.
+const VOICE_TO_CHAT = "chat";
+const VOICE_TO_PAGE = "page";
 
 function speechRecognitionClass() {
   const scope = /** @type {any} */ (window);
   return scope.SpeechRecognition || scope.webkitSpeechRecognition || null;
 }
 
-// What a key event means for dictation: whether it starts or stops listening, and whether the page
-// must not see it. Releasing Ctrl or Shift first also stops, and that release still reaches the page.
-function dictationKey(event) {
-  if (event.code === "Space" && event.ctrlKey && event.shiftKey && !event.altKey && !event.metaKey) {
-    if (event.type === "keyup") return { action: "stop", swallow: true };
-    return { action: event.repeat ? null : "start", swallow: true };
-  }
-  if (event.type === "keyup" && (event.code === "Space" || event.key === "Control" || event.key === "Shift")) {
-    return { action: "stop", swallow: false };
-  }
-  return null;
-}
-
 // The phrases heard, as one line of plain words.
 function spokenText(phrases) {
   return phrases.join(" ").replace(/\s+/g, " ").trim();
-}
-
-// Dictated text replaces the selection in the message box, a space apart from the words beside it,
-// and the caret lands right after it.
-function insertDictation(value, start, end, text) {
-  const before = value.slice(0, start);
-  const after = value.slice(end);
-  const inserted = before + (/\S$/.test(before) ? " " : "") + text;
-  return { value: inserted + (/^[\p{L}\p{N}]/u.test(after) ? " " : "") + after, caret: inserted.length };
 }
 
 // How loud a frame of microphone samples is, from 0 for silence to 1: the root mean square of the
@@ -2023,12 +2006,6 @@ function voiceLevel(samples) {
     sum += offset * offset;
   }
   return Math.min(1, Math.sqrt(sum / samples.length) * 4);
-}
-
-// A waveform bar's height for a level: a fifth of full height in silence, so it stays visible, up to
-// full height at the loudest.
-function voiceBarScale(level) {
-  return (1 + 4 * level) / 5;
 }
 
 function dictationProblem(error) {
@@ -2232,24 +2209,48 @@ function rememberDictation(text, at) {
 }
 
 let voiceListening = false;
+let voiceTarget = VOICE_TO_CHAT;
 let voiceProblem = "";
 let voiceProblemTimer;
 let voiceFrame = 0;
 let voiceSampledAt = 0;
-const voiceBars = /** @type {HTMLElement[]} */ (Array.from(chatVoiceBars.children));
 // One recent level per bar, newest on the right.
-const voiceLevels = voiceBars.map(() => 0);
+const voiceLevels = Array.from(chatVoiceBars.children, () => 0);
 let voiceDictations = readKeptDictations()[key] || [];
-let voiceRecentOpen = false;
-// The entry whose Copy just worked, which shows a check for a moment.
-let voiceCopied = "";
-let voiceCopiedTimer;
+// What the page's annotation box was last told, so it hears only what changed.
+let pageVoiceSent = "";
+const chatVoice = messageBox.createVoiceBubble(
+  {
+    field: chatField,
+    dock: chatVoiceDock,
+    button: chatVoiceButton,
+    bars: chatVoiceBars,
+    card: chatVoiceRecent,
+    list: chatVoiceRecentList,
+    empty: chatVoiceRecentEmpty,
+    close: chatVoiceRecentClose,
+  },
+  {
+    dictations: () => voiceDictations,
+    paste: insertDictatedText,
+    // A page served over plain http, such as an old tailnet link, has no clipboard.
+    copy: navigator.clipboard ? (text) => navigator.clipboard.writeText(text) : null,
+    // The room above the box, down from the top of the panel, which clips anything past it.
+    fit(card) {
+      card.style.maxHeight =
+        chatField.getBoundingClientRect().top - panel.getBoundingClientRect().top - VOICE_CARD_CLEARANCE + "px";
+    },
+    rebuildKeepingFocus,
+  },
+);
 const voiceDictation = createDictation(
   {
     heard(text) {
       voiceDictations = rememberDictation(text, Date.now());
-      insertDictatedText(text);
-      renderVoiceRecent();
+      if (voiceTarget === VOICE_TO_PAGE) postToFrame({ type: "lavish:dictated", text });
+      else insertDictatedText(text);
+      chatVoice.refresh();
+      postPageVoice();
     },
     listening(on) {
       voiceListening = on;
@@ -2263,7 +2264,7 @@ const voiceDictation = createDictation(
 );
 
 function insertDictatedText(text) {
-  const next = insertDictation(chatInput.value, chatInput.selectionStart, chatInput.selectionEnd, text);
+  const next = messageBox.insertDictation(chatInput.value, chatInput.selectionStart, chatInput.selectionEnd, text);
   chatInput.value = next.value;
   chatInput.focus();
   chatInput.setSelectionRange(next.caret, next.caret);
@@ -2287,36 +2288,24 @@ function drawVoiceLevel(now) {
     voiceSampledAt = now;
     voiceLevels.shift();
     voiceLevels.push(voiceDictation.level());
-    voiceBars.forEach((bar, index) => {
-      bar.style.transform = "scaleY(" + voiceBarScale(voiceLevels[index]) + ")";
-    });
+    if (voiceTarget === VOICE_TO_PAGE) postToFrame({ type: "lavish:voiceLevels", levels: voiceLevels });
+    else chatVoice.showLevels(voiceLevels);
   }
   voiceFrame = window.requestAnimationFrame(drawVoiceLevel);
 }
 
-// The button, the composer, and the note under it are derived from the dictation's state on every
-// render; the waveform runs only while listening.
+// The bubble, the composer, and the note under it are derived from the dictation's state on every
+// render; the waveform runs only while listening. Only the box being dictated into listens.
 function renderVoice() {
-  const supported = Boolean(speechRecognitionClass());
-  chatVoiceButton.disabled = !supported || chatInput.disabled;
-  chatVoiceButton.setAttribute(
-    "aria-label",
-    !supported ? VOICE_UNSUPPORTED_COPY : voiceListening ? "Listening" : VOICE_RECENT_LABEL,
-  );
-  chatVoiceButton.setAttribute(
-    "data-tip",
-    !supported
-      ? VOICE_UNSUPPORTED_COPY
-      : window.isSecureContext === false
-        ? VOICE_INSECURE_COPY
-        : voiceListening
-          ? VOICE_HELD_HINT
-          : VOICE_IDLE_HINT,
-  );
-  chatVoiceButton.classList.toggle("recording", voiceListening);
-  chatComposer.classList.toggle("is-dictating", voiceListening);
-  chatVoiceNote.textContent = voiceProblem || (voiceListening ? VOICE_HELD_HINT : "");
-  chatVoiceNote.classList.toggle("is-problem", Boolean(voiceProblem));
+  const toChat = voiceTarget === VOICE_TO_CHAT;
+  chatVoice.render({
+    supported: Boolean(speechRecognitionClass()),
+    secure: window.isSecureContext !== false,
+    listening: voiceListening && toChat,
+    disabled: chatInput.disabled,
+  });
+  chatVoiceNote.textContent = toChat ? voiceProblem || (voiceListening ? VOICE_HELD_HINT : "") : "";
+  chatVoiceNote.classList.toggle("is-problem", toChat && Boolean(voiceProblem));
   if (voiceListening && !voiceFrame) {
     voiceLevels.fill(0);
     voiceFrame = window.requestAnimationFrame(drawVoiceLevel);
@@ -2325,113 +2314,32 @@ function renderVoice() {
     window.cancelAnimationFrame(voiceFrame);
     voiceFrame = 0;
   }
-  // A box that can no longer take text has no dictations to paste.
-  if (chatVoiceButton.disabled && voiceRecentOpen) setVoiceRecentOpen(false);
+  postPageVoice();
 }
 
-function setVoiceRecentOpen(open) {
-  voiceRecentOpen = open;
-  chatVoiceRecent.hidden = !open;
-  chatVoiceButton.setAttribute("aria-expanded", String(open));
-  renderVoiceRecent();
+// The page's annotation box draws the same bubble from what the chrome tells it, while one is open:
+// whether it listens, the problem it hit, and this review's recent dictations.
+function postPageVoice(force = false) {
+  if (!pageCardOpen) return;
+  const toPage = voiceTarget === VOICE_TO_PAGE;
+  const state = {
+    supported: Boolean(speechRecognitionClass()),
+    secure: window.isSecureContext !== false,
+    listening: voiceListening && toPage,
+    disabled: chatInput.disabled,
+    problem: toPage ? voiceProblem : "",
+    canCopy: Boolean(navigator.clipboard),
+    dictations: voiceDictations.slice(0, LISTED_DICTATIONS),
+  };
+  const sent = JSON.stringify(state);
+  if (!force && sent === pageVoiceSent) return;
+  pageVoiceSent = sent;
+  postToFrame({ type: "lavish:voiceState", ...state });
 }
 
-// The recent dictations card, as the board's voice bubble draws it: the newest first, each with
-// when it was said, its words, Copy where the page has a clipboard, and Paste into this box.
-function renderVoiceRecent() {
-  if (!voiceRecentOpen) return;
-  fitVoiceRecent();
-  const listed = voiceDictations.slice(0, LISTED_DICTATIONS);
-  chatVoiceRecentList.hidden = listed.length === 0;
-  chatVoiceRecentEmpty.hidden = listed.length > 0;
-  rebuildKeepingFocus(chatVoiceRecentList, () =>
-    chatVoiceRecentList.replaceChildren(...listed.map(recentDictationItem)),
-  );
-}
-
-// The room above the box, down from the top of the panel, which clips anything past it.
-function fitVoiceRecent() {
-  const room = chatField.getBoundingClientRect().top - panel.getBoundingClientRect().top - VOICE_CARD_CLEARANCE;
-  chatVoiceRecent.style.maxHeight = room + "px";
-}
-
-function recentDictationItem(dictation, index) {
-  const entry = dictation.at + ":" + index;
-  const item = document.createElement("li");
-  if (dictation.at > 0) {
-    const said = document.createElement("span");
-    said.className = "voice-meta";
-    said.textContent = new Date(dictation.at).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
-    item.appendChild(said);
-  }
-  const words = document.createElement("p");
-  words.className = "voice-text";
-  words.textContent = dictation.text;
-  item.appendChild(words);
-  const actions = document.createElement("span");
-  actions.className = "voice-actions";
-  // A page served over plain http, such as an old tailnet link, has no clipboard.
-  if (navigator.clipboard) {
-    const copied = voiceCopied === entry;
-    actions.appendChild(
-      voiceAction(
-        "copy:" + entry,
-        "Copy: " + dictation.text,
-        copied ? "Copied" : "Copy",
-        copied ? CHECK_ICON_SVG : COPY_ICON_SVG,
-        () => copyDictation(dictation.text, entry),
-      ),
-    );
-  }
-  actions.appendChild(
-    voiceAction("paste:" + entry, "Paste into this box: " + dictation.text, "Paste into this box", PASTE_ICON_SVG, () =>
-      pasteDictation(dictation.text),
-    ),
-  );
-  item.appendChild(actions);
-  return item;
-}
-
-function voiceAction(focusKey, label, tip, icon, act) {
-  const button = document.createElement("button");
-  button.type = "button";
-  button.className = "icon-button pixel-icon";
-  button.dataset.focusKey = focusKey;
-  button.setAttribute("aria-label", label);
-  button.setAttribute("data-tip", tip);
-  button.innerHTML = icon;
-  button.onclick = act;
-  return button;
-}
-
-// A copy the browser refuses shows no check.
-function copyDictation(text, entry) {
-  navigator.clipboard.writeText(text).then(
-    () => {
-      voiceCopied = entry;
-      clearTimeout(voiceCopiedTimer);
-      voiceCopiedTimer = setTimeout(() => {
-        voiceCopied = "";
-        renderVoiceRecent();
-      }, VOICE_COPIED_MS);
-      renderVoiceRecent();
-    },
-    () => {},
-  );
-}
-
-function pasteDictation(text) {
-  insertDictatedText(text);
-  setVoiceRecentOpen(false);
-}
-
-function closeVoiceRecent() {
-  setVoiceRecentOpen(false);
-  chatVoiceButton.focus();
-}
-
-function startVoice() {
-  if (chatInput.disabled) return;
+function startVoice(target) {
+  if (chatInput.disabled || voiceListening) return;
+  voiceTarget = target;
   if (window.isSecureContext === false) {
     showVoiceProblem(VOICE_INSECURE_COPY + ": browsers refuse the microphone on plain http.");
     return;
@@ -2441,11 +2349,32 @@ function startVoice() {
 }
 
 function handleVoiceKey(event) {
-  const meaning = dictationKey(event);
+  const meaning = messageBox.dictationKey(event);
   if (!meaning) return;
   if (meaning.swallow) event.preventDefault();
-  if (meaning.action === "start") startVoice();
+  if (meaning.action === "start") startVoice(VOICE_TO_CHAT);
   if (meaning.action === "stop") voiceDictation.stop();
+}
+
+// The page's annotation box asks to listen while its keys are held. The page is untrusted, so the
+// chrome listens only for an open box and only on a press the reader just made, and stops once the
+// box closes.
+function handlePageDictation(action) {
+  if (action === "start" && pageCardOpen && navigator.userActivation?.isActive) startVoice(VOICE_TO_PAGE);
+  if (action === "stop" && voiceTarget === VOICE_TO_PAGE) voiceDictation.stop();
+}
+
+// Copy in the page's list goes through the chrome, which has the clipboard, and only for one of
+// this review's own dictations.
+function copyPageDictation(text) {
+  const copied =
+    navigator.clipboard && voiceDictations.some((dictation) => dictation.text === text)
+      ? navigator.clipboard.writeText(text)
+      : Promise.reject(new Error("not a dictation"));
+  copied.then(
+    () => postToFrame({ type: "lavish:dictationCopied", ok: true }),
+    () => postToFrame({ type: "lavish:dictationCopied", ok: false }),
+  );
 }
 
 // Puts what the Conversation box holds into his notes, on what is selected in the page or else on
@@ -4850,6 +4779,8 @@ window.addEventListener("message", (event) => {
   if (msg.type === "lavish:draftCommitted") settleDraftCommit(String(msg.commit_id || ""), msg.committed !== false);
   if (msg.type === "lavish:dropQueuedPrompt") dropQueuedPrompt(String(msg.queueKey || ""));
   if (msg.type === "lavish:selection") setPageSelection(msg.selection, msg.card === true);
+  if (msg.type === "lavish:dictate") handlePageDictation(String(msg.action || ""));
+  if (msg.type === "lavish:copyDictation") copyPageDictation(String(msg.text || ""));
   if (msg.type === "lavish:snapshot") {
     completeSnapshotRequest(msg.snapshot_request_id, msg.snapshot || "");
   }
@@ -5131,18 +5062,7 @@ chatAnchorClear.onclick = () => {
   chatInput.focus();
 };
 chatInput.addEventListener("input", () => hideSendHint());
-chatVoiceButton.onclick = () => setVoiceRecentOpen(!voiceRecentOpen);
-chatVoiceRecentClose.onclick = closeVoiceRecent;
-window.addEventListener("resize", () => {
-  if (voiceRecentOpen) fitVoiceRecent();
-});
-// Escape from the bubble or from inside the list closes it, closes nothing else, and puts the
-// keyboard back on the bubble. Escape from anywhere else closes it too (see the keydown below).
-chatVoiceDock.addEventListener("keydown", (event) => {
-  if (!voiceRecentOpen || event.key !== "Escape") return;
-  event.stopPropagation();
-  closeVoiceRecent();
-});
+window.addEventListener("resize", () => chatVoice.refresh());
 // Capture phase, like the mode hotkey, so the voice shortcut works wherever focus is in the chrome
 // and the held space never reaches the message box or a focused button.
 document.addEventListener("keydown", handleVoiceKey, true);
@@ -5213,8 +5133,10 @@ document.addEventListener("keydown", (event) => {
       closeRevisionsDrawer({ restoreFocus: true });
     } else if (warningsDrawerOpen) {
       closeWarningsDrawer({ restoreFocus: true });
-    } else if (voiceRecentOpen) {
-      setVoiceRecentOpen(false);
+    } else if (chatVoice.isOpen()) {
+      // Escape from anywhere else closes the recent dictations too; from inside them, the bubble's
+      // own Escape has already closed them and put the keyboard back on it.
+      chatVoice.setOpen(false);
     } else if (!moreMenu.hidden) {
       closeMenus();
     } else if (sheetOpen && isMobileSheet()) {

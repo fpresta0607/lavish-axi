@@ -45,7 +45,7 @@ async function chromeClientSource() {
 
 async function chromeCssSource() {
   const parts = await Promise.all(
-    ["board-tokens.css", "board-components.css", "chrome.css"].map((name) =>
+    ["board-tokens.css", "board-components.css", "message-box.css", "chrome.css"].map((name) =>
       readFile(new URL("../src/" + name, import.meta.url), "utf8"),
     ),
   );
