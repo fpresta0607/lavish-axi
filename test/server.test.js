@@ -807,9 +807,12 @@ test("annotation card shadow styles are the board's tokens and its copied rules"
   assert.match(js, /\.comment-overlay \{ display: grid;/);
   assert.match(js, /\.comment-overlay \.send:not\(:disabled\) \{ background: var\(--accent-green\)/);
   assert.match(js, /outline: var\(--focus-ring\); outline-offset: 3px;/);
-  // None of the board's shell-only rules ride along into the page.
+  // None of the board's shell-only rules ride along into the page. The board draws the voice card's
+  // pixel buttons in rules it shares with its dialogue, which come along whole for the voice card.
   assert.doesNotMatch(js, /\.topbar \{/);
-  assert.doesNotMatch(js, /\.dialogue-box/);
+  assert.doesNotMatch(js, /\.dialogue-box \{/);
+  assert.doesNotMatch(js, /\.dialogue \{/);
+  assert.match(js, /\.voice-bubble::before \{ background: var\(--hide\)/);
   assert.doesNotMatch(js, /#f4c95d/);
 });
 
@@ -1193,7 +1196,7 @@ test("composer textarea is sized within the right panel", async () => {
   assert.match(css, /\.chat\{[^}]*min-height:0/);
   assert.match(css, /\.composer\{[^}]*min-width:0/);
   assert.match(css, /\.composer\{[^}]*flex-shrink:0/);
-  assert.match(css, /\.composer textarea\{[^}]*box-sizing:border-box/);
+  assert.match(css, /\.composer-field textarea\{[^}]*box-sizing:border-box/);
 });
 
 test("hot reload resets iframe src instead of crossing sandbox location", async () => {
