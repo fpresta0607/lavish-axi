@@ -153,3 +153,13 @@ test("boardTokenDeclarations keeps the :root declarations for a shadow root's :h
 
   assert.equal(declarations, "--one: 1;color: #fff;");
 });
+
+// The board keeps its goblin palette in a second, one-line :root rule. The annotation box's voice
+// bubble is drawn from it, so a shadow root without it shows the bubble with no frame or fill.
+test("boardTokenDeclarations keeps every :root rule of the token block, the goblin palette too", () => {
+  const declarations = boardTokenDeclarations(
+    '@font-face { font-family: "A"; }\n:root {\n  --one: 1;\n}\n.dialogue { --hide: #241C15; }\n:root { --hide: #0c1219; --pixel-corners: polygon(0 4px, 100% 0); }\n',
+  );
+
+  assert.equal(declarations, "--one: 1;--hide: #0c1219; --pixel-corners: polygon(0 4px, 100% 0);");
+});

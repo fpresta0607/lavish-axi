@@ -3706,6 +3706,10 @@ test("/chrome-client.js serves the extracted chrome client script", async () => 
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") || "", /application\/javascript/);
     assert.match(body, /const sessionData/);
+    // The message box the client draws arrives ahead of it, from the module the SDK serializes.
+    const helpers = body.indexOf("window.lavishMessageBox=");
+    assert.ok(helpers >= 0 && helpers < body.indexOf("const sessionData"), "the message box comes first");
+    assert.match(body, /const createVoiceBubble=/);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });

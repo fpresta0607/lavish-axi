@@ -95,20 +95,22 @@ export function boardRulesFor(css, prefixes) {
 }
 
 /**
- * The declarations inside the token block's `:root` rule, for a shadow root's `:host` rule: the
- * annotation card lives in one, where `:root` selects nothing.
+ * The declarations inside the token block's `:root` rules, for a shadow root's `:host` rule: the
+ * annotation card lives in one, where `:root` selects nothing. The board keeps its goblin palette
+ * in a second, one-line `:root` rule, which the card's voice bubble is drawn from.
  *
  * @param {string} css
  * @returns {string}
  */
 export function boardTokenDeclarations(css) {
-  const block = boardTokenBlock(css);
-  const root = block.indexOf(":root {");
-  return block
-    .slice(root + ":root {".length, block.indexOf("\n}\n", root))
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n")
-    .map((line) => line.trim())
-    .filter(Boolean)
+  const block = boardTokenBlock(css).replace(/\/\*[\s\S]*?\*\//g, "");
+  return [...block.matchAll(/^:root \{([^}]*)\}/gm)]
+    .map((rule) =>
+      rule[1]
+        .split("\n")
+        .map((line) => line.trim())
+        .filter(Boolean)
+        .join(""),
+    )
     .join("");
 }

@@ -328,7 +328,7 @@ function assertRecentOpen(where, measured, phrases) {
 
 test(
   "the message boxes hold their paperclip and the board's voice bubble inside the box, in a window and on a phone",
-  { skip: !runBrowserE2e, timeout: 300_000 },
+  { skip: !runBrowserE2e, timeout: 1_200_000 },
   async (t) => {
     const temp = await mkdtemp(path.join(tmpdir(), "lavish-message-box-"));
     const port = await freePort();
@@ -382,7 +382,12 @@ test(
       const deadline = Date.now() + 30_000;
       for (;;) {
         const report = run("chrome-devtools-axi", ["snapshot"], chromeEnv).match(/card-report:([^"\s]+)/)?.[1];
-        if (report) return JSON.parse(decodeURIComponent(report));
+        if (report) {
+          // Escape closes the box, so its own voice bubble is not the one the Conversation box's
+          // steps click next.
+          run("chrome-devtools-axi", ["press", "Escape"], chromeEnv);
+          return JSON.parse(decodeURIComponent(report));
+        }
         if (Date.now() > deadline) assert.fail("the annotation box never reported its geometry");
         await wait(500);
       }

@@ -61,6 +61,11 @@ const BOX_SHAPE = `function boxShape(textarea) {
     };
   }
   return box ? shape(box) : null;
+}
+function bubbleLook(button) {
+  var style = getComputedStyle(button);
+  var frame = getComputedStyle(button, "::before");
+  return { width: button.getBoundingClientRect().width, radius: style.borderTopLeftRadius, color: style.color, frame: frame.clipPath, fill: frame.backgroundColor, outline: frame.boxShadow };
 }`;
 
 // Runs in the reviewed page: the open annotation box, its parts by what a reader calls them.
@@ -115,6 +120,7 @@ function measure() {
     voice: control(named(card, /^(Recent dictations|Listening)$/)),
     picker: picker ? { accept: picker.accept, multiple: picker.multiple, capture: picker.hasAttribute("capture") } : null,
     shape: boxShape(textarea),
+    look: bubbleLook(named(card, /^(Recent dictations|Listening)$/)),
     chips: Array.prototype.map.call(card.querySelectorAll(".lavish-attachment-chip"), function (chip) { return chip.textContent.trim(); }),
     recent: Array.prototype.map.call(card.querySelectorAll('[role="dialog"][aria-label="Recent dictations"]:not([hidden]) li'), function (item) {
       return Array.prototype.map.call(item.querySelectorAll("button"), function (button) { return button.getAttribute("aria-label"); });
@@ -193,9 +199,10 @@ function assertInBox(where, measured, name, corner) {
   assert.ok(control.label && control.tip, `${where} ${name} has a name and a tooltip`);
 }
 
-// The annotation box is the Conversation box: the same parts in the same places, and a picker that
-// takes several images and leaves the phone's chooser, photo library included, to the phone.
-function assertSameBox(where, measured, conversationShape) {
+// The annotation box is the Conversation box: the same parts in the same places, its voice bubble
+// drawn the same, and a picker that takes several images and leaves the phone's chooser, photo
+// library included, to the phone.
+function assertSameBox(where, measured, conversation) {
   assert.equal(measured.card, true, `${where}: the annotation box is open`);
   assertInBox(where, measured, "attach", "left");
   assertInBox(where, measured, "voice", "right");
@@ -204,7 +211,9 @@ function assertSameBox(where, measured, conversationShape) {
     { accept: "image/png,image/jpeg,image/webp", multiple: true, capture: false },
     `${where}: the paperclip offers images, several at once, from wherever the device keeps them`,
   );
-  assert.deepEqual(measured.shape, conversationShape, `${where}: the annotation box is the Conversation box`);
+  assert.deepEqual(measured.shape, conversation.shape, `${where}: the annotation box is the Conversation box`);
+  assert.match(measured.look.frame, /^polygon\(/, `${where}: the bubble draws the board's pixel frame`);
+  assert.deepEqual(measured.look, conversation.look, `${where}: the bubble looks as the Conversation box's does`);
 }
 
 test(
@@ -284,8 +293,10 @@ test(
       return ask({ fixture: "measure" }, (measured) => measured.card);
     }
 
-    function conversationShape() {
-      return evaluate(`() => { ${BOX_SHAPE} return JSON.stringify(boxShape(document.getElementById("chatInput"))); }`);
+    function conversation() {
+      return evaluate(
+        `() => { ${BOX_SHAPE} return JSON.stringify({ shape: boxShape(document.getElementById("chatInput")), look: bubbleLook(document.getElementById("chatVoice")) }); }`,
+      );
     }
 
     // Send to Agent, then what the agent's next poll is handed, read as the supervisor reads it.
@@ -317,7 +328,7 @@ test(
       await wait(4000);
 
       await t.test("in his window the annotation box is the Conversation box", async () => {
-        assertSameBox("window", await openBox(/heading "Step 2\. Payment"/), conversationShape());
+        assertSameBox("window", await openBox(/heading "Step 2\. Payment"/), conversation());
       });
 
       await t.test("a pasted screenshot attaches and reaches the agent with the note", async () => {
@@ -367,7 +378,7 @@ test(
       await wait(4000);
       lastReport = 0;
       await t.test("on a phone the annotation box is the Conversation box", async () => {
-        assertSameBox("phone", await openBox(/heading "Step 2\. Payment"/), conversationShape());
+        assertSameBox("phone", await openBox(/heading "Step 2\. Payment"/), conversation());
       });
     } finally {
       run(process.execPath, ["bin/lavish-axi.js", "stop", "--port", String(port)], lavishEnv, 15_000);

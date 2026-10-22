@@ -229,7 +229,8 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
   `/assets/fonts/<name>` serves exactly the board's three `woff2` files, at the address the board's own font faces name, with `Access-Control-Allow-Origin: *` because the artifact frame's opaque origin makes font fetches CORS-gated; nothing else under `/assets/fonts` is served.
   No font service and no bundler step is involved; `scripts/build.js` copies the files into `dist`.
 - **The SDK takes the look from the server.**
-  `createSdkJs` hands the SDK `options.board`: the shadow-root stylesheet (the tokens on `:host`, plus the copied rules whose selectors start with a prefix in `BOARD_SDK_RULE_PREFIXES`), the font faces, the accent, and the scrollbar colours.
+  `createSdkJs` hands the SDK `options.board`: the shadow-root stylesheet (the tokens of every `:root` rule in the token block on `:host`, plus the copied rules whose selectors start with a prefix in `BOARD_SDK_RULE_PREFIXES`, plus the message box's own rules), the font faces, the accent, and the scrollbar colours.
+  The goblin palette (`--hide`, `--bone`, `--pixel-corners`) is a second, one-line `:root` rule: a shadow root without it draws the voice bubble with no frame or fill.
   A shadow root cannot declare a font face, so the SDK puts the three in the page itself, and only once Scrawl draws something there.
   The SDK holds no colour of the old palette; a test fails on one.
 - **Floating tips share one runtime.**
