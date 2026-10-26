@@ -50,11 +50,6 @@ button:focus:not(:focus-visible), summary:focus:not(:focus-visible), [tabindex]:
 .topbar-controls { display: flex; justify-content: flex-end; align-items: center; gap: 18px; min-width: 0; }
 .live-dot, .status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--accent-green); flex: none; }
 .live-dot.offline { background: var(--amber); }
-.panel-pill { display: flex; padding: 4px; border: 1px solid var(--glass-border); border-radius: 999px; background: var(--field-bg); box-shadow: inset 0 2px 6px #0007; }
-.panel-pill button { display: inline-flex; align-items: center; gap: 8px; min-height: 40px; padding: 6px 18px; border-color: transparent; border-radius: 999px; background: transparent; color: var(--muted); font-family: var(--font-display); font-size: 1.0625rem; }
-.panel-pill button .icon { width: 20px; height: 20px; }
-.panel-pill button:hover { color: #edf4f3; }
-.panel-pill button[aria-pressed="true"] { color: #f4fbff; border-color: transparent; background: var(--glass-bg-hover) padding-box, linear-gradient(var(--hero-surface), var(--hero-surface)) padding-box, var(--electric-ring) border-box; box-shadow: var(--electric-glow); }
 
 /* Status lines and their dots. */
 .plain-status { display: flex; align-items: center; gap: 8px; font-size: 1rem; font-weight: 700; line-height: 1.4; background: none; color: #c4d4df; }

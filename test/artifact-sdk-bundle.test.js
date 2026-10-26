@@ -911,13 +911,14 @@ test("committing the open card adds its words to the notes, then says it is done
   const replies = sdk.posted.slice(before).filter((message) => message.type !== "lavish:selection");
   assert.deepEqual(
     replies.map((message) => message.type),
-    ["lavish:queuePrompt", "lavish:draftCommitted"],
+    ["lavish:queuePrompt", "lavish:dictate", "lavish:draftCommitted"],
   );
   assert.equal(replies[0].prompt.prompt, "unfinished thought");
   assert.equal(replies[0].prompt.tag, "h2");
   assert.equal(replies[0].commit_id, "commit-1");
-  assert.equal(replies[1].commit_id, "commit-1");
-  assert.equal(replies[1].committed, true);
+  assert.equal(replies[1].action, "cancel");
+  assert.equal(replies[2].commit_id, "commit-1");
+  assert.equal(replies[2].committed, true);
 });
 
 test("committing with no card, or an empty one, adds nothing and still answers", () => {
@@ -1417,7 +1418,8 @@ test("the held keys in an open annotation card ask the chrome to listen, and wha
 
   const down = sdk.documentKey("keydown", dictationKeyEvent);
   const up = sdk.documentKey("keyup", dictationKeyEvent);
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "the pricing" });
+  const voiceId = sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id;
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "the pricing", voice_id: voiceId });
 
   assert.deepEqual(dictateMessages(sdk), ["start", "stop"]);
   assert.equal(down.defaultPrevented, true, "the held space never types into the card");
@@ -1434,6 +1436,25 @@ test("with no annotation card open the held keys belong to the page", () => {
 
   assert.deepEqual(dictateMessages(sdk), []);
   assert.equal(down.defaultPrevented, false);
+});
+
+test("dictated text belongs to the requesting annotation box and is inserted once", () => {
+  const sdk = bootSdk();
+  const first = appendTo(sdk.body, cell("p", "First"));
+  const second = appendTo(sdk.body, cell("p", "Second"));
+  sdk.click(first);
+  sdk.documentKey("keydown", dictationKeyEvent);
+  const firstId = sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id;
+  sdk.click(second);
+  sdk.documentKey("keydown", dictationKeyEvent);
+  const secondId = sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id;
+  const textarea = sdk.card().querySelector("textarea");
+
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "wrong box", voice_id: firstId });
+  assert.equal(textarea.value, "");
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId });
+  assert.equal(textarea.value, "right box");
 });
 
 test("the card's voice bubble draws what the chrome says, and its Copy asks the chrome", async () => {

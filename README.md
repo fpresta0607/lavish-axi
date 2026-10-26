@@ -229,10 +229,13 @@ pnpm link
   The chip offers a new comment on the same thing and a close button.
   Cmd+I or Ctrl+I toggles between annotate and explore mode from either the browser chrome or the artifact iframe, including while focus is in a textarea or control; the **Annotate** and **Explore** halves of the mode pill in the top bar choose a mode directly.
   The annotation card's text box is the composer's message box, drawn by the same component (`src/message-box.js`), with the same paperclip, voice bubble, pasted images and dictation.
-  Holding Ctrl+Shift+Space while focus is in the browser chrome dictates into the composer through the browser's own speech recognition (Chrome and Edge), with a live level meter while it listens; releasing any of those keys stops.
+  Holding Ctrl+Shift+Space while focus is in the browser chrome dictates into the composer through the browser's own speech recognition, with a live level meter where supported; releasing any of those keys stops.
   Holding it while an annotation card is open in the page dictates into that card instead: the chrome listens for the sandboxed page, and only on a key press the reader just made.
   What you said lands in the message box at the caret and becomes a note only when you add it; a browser without speech recognition shows the microphone disabled, and a blocked microphone is explained under the composer or on the card.
-  The microphone at the bottom right of each message box is the Code Goblins board's square voice bubble: a click opens the review's recent dictations, the newest five of the ten this browser keeps for each of the twenty reviews used most recently, each with Copy and Paste into the box, and Escape or its close button closes them.
+  On a touch screen, tap the microphone to start and tap again to finish, in either box; the first tap may ask for microphone permission, and another tap while permission is pending cancels.
+  Touch dictation uses the browser recognizer's own microphone, so its recording indicator does not measure audio levels.
+  Waiting for permission, listening, finishing and errors are shown on the owning box; closing that box, editing its draft, leaving the page or ending the review cancels unfinished dictation.
+  The microphone at the bottom right of each message box is the Code Goblins board's square voice bubble: a mouse click, a touch hold or its context menu opens the review's recent dictations, the newest five of the ten this browser keeps for each of the twenty reviews used most recently, each with Copy and Paste into the box, and Escape or its close button closes them.
 - **Agent presence** - The browser shows when an agent is listening or working, and never warns that none is: what you send waits for the next poll.
   A poll that ends keeps the page listening for 10 seconds, so a supervisor that polls in rounds never looks like it left between them.
   It keeps queued feedback for the next successful `lavish-axi poll` send even across reloads, and keeps human feedback actions available while the agent is working because the server queues them for the next poll.

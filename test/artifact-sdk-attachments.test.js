@@ -174,7 +174,8 @@ test("the count-cap notice reads as an error, not as the passive keyboard hint",
   // styling it reads as passive help text and a rejected drop goes unnoticed.
   assert.match(sdk, /lavish-hint-alert/);
   assert.match(sdk, /\.lavish-hint-alert\{[^}]*color:var\(--amber\)/);
-  assert.match(sdk, /attachNotice\.classList\.add\("lavish-hint-alert"\)/);
+  assert.match(sdk, /const notify = \(message, isProblem = true\)/);
+  assert.match(sdk, /attachNotice\.classList\.toggle\("lavish-hint-alert", isProblem\)/);
   // Clearing the notice restores the neutral hint instead of leaving stale red text.
   assert.match(sdk, /attachNotice\.classList\.remove\("lavish-hint-alert"\)/);
 });
@@ -193,7 +194,7 @@ test("the count-cap notice persists until attachment capacity is created", () =>
   assert.equal(deriveAttachmentNoticeState({ ...state, itemCount: 3 }), "");
 
   assert.match(sdk, /notify\(\s*deriveAttachmentNoticeState\(/);
-  assert.match(sdk, /attachNotice\.classList\.add\("lavish-hint-alert"\)/);
+  assert.match(sdk, /attachNotice\.classList\.toggle\("lavish-hint-alert", isProblem\)/);
   assert.match(sdk, /if \(items\.length < ATTACHMENT_MAX_COUNT\) capRejected = false/);
   assert.match(sdk, /if \(!hasPending\(\) && !hasErrors\(\)\) queueBlocked = false/);
 });
