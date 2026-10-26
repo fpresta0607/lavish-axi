@@ -1,4 +1,4 @@
-import { spawn, spawnSync } from "node:child_process";
+import { setMaxListeners } from "node:events";
 import {
   closeSync,
   createReadStream,
@@ -10,7 +10,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { access, readFile, writeFile } from "node:fs/promises";
-import { get as httpGet } from "node:http";
+import { get as httpGet, request as httpRequest } from "node:http";
 import { isIP } from "node:net";
 import os from "node:os";
 import path from "node:path";
@@ -18,6 +18,7 @@ import { fileURLToPath } from "node:url";
 
 import { AxiError, installSessionStartHooks, RESERVED_COMMANDS, runAxiCli } from "axi-sdk-js";
 
+import { spawn, spawnSync } from "./child-process.js";
 import { createDesignOutput, DESIGN_PRIORITY_RULE, DESIGN_SYSTEM_HINT } from "./design-reference.js";
 import {
   buildSelfContainedHtml,
@@ -40,9 +41,11 @@ import {
   ensureStateDir,
   hostForUrl,
   isWildcardHost,
+  linkUrlOrigin,
   LOOPBACK_HOST,
   resolveConcreteListenHosts,
   serverLogFile,
+  stateDir,
   stateFile,
   stateId,
 } from "./paths.js";
@@ -57,14 +60,34 @@ import {
   writeTextFileAtomically,
 } from "./plugin.js";
 import { findPlaybook, listPlaybooks, playbookIds, PLAYBOOK_ROUTER_HELP } from "./playbooks.js";
+import {
+  clearProjectTheme,
+  projectRootOf,
+  readProjectTheme,
+  saveProjectTheme,
+  SIQ_THEME,
+  themeScheme,
+} from "./project-theme.js";
 import { analyzeSelfPaint, SELF_PAINT_WARNING } from "./self-paint.js";
 import { resolveDesignAssetPath, serve } from "./server.js";
-import { canonicalFile, sessionKey, SessionStore } from "./session-store.js";
+import { canonicalFile, canonicalSessionFile, isFileGone, sessionKey, SessionStore } from "./session-store.js";
 import { generateSharePassword } from "./share-password.js";
 import { initDefaultTelemetry } from "./telemetry.js";
 
 const SHARE_VALUE_FLAGS = ["--password", "--token", "--site", "--update-key"];
-const COMMANDS = new Set(["open", "poll", "end", "stop", "server", "playbook", "design", "setup", "export", "share"]);
+const COMMANDS = new Set([
+  "open",
+  "poll",
+  "end",
+  "stop",
+  "server",
+  "playbook",
+  "design",
+  "theme",
+  "setup",
+  "export",
+  "share",
+]);
 // SDK-reserved built-ins (e.g. `update`) must reach runAxiCli untouched; otherwise
 // the bare-arg normalization below would rewrite them into the hidden `open` command.
 const RESERVED = new Set(RESERVED_COMMANDS);
@@ -211,6 +234,7 @@ export async function run(argv) {
         stop: stopCommand,
         playbook: playbookCommand,
         design: designCommand,
+        theme: themeCommand,
         setup: setupCommand,
         server: serverCommand,
         export: exportCommand,
@@ -268,6 +292,7 @@ export function createHomeOutput({ bin, sessions, includeSessions = true, agent 
             url: session.url,
             pending_prompts: session.pending_prompts || 0,
             listener: session.listener || "none",
+            file_gone: Boolean(session.file_gone),
           })),
         }
       : {}),
@@ -285,7 +310,7 @@ export function createHomeOutput({ bin, sessions, includeSessions = true, agent 
       "Lavish serves the html file through a local express.js server. If your html needs to reference other filesystem assets such as images, CSS, fonts, and local scripts, copy them into the same directory as the HTML file, then reference them with relative paths from that directory. Never prepend `/` to those asset paths - root paths won't work",
       `Run \`lavish-axi poll <html-file>\` to wait for user feedback. It long-polls and stays silent until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, so leave it running - never kill it. Detected layout issues never return this poll: the browser files them in the user's Layout issues inbox in the Lavish top bar, and they arrive as an ordinary tag "layout-warnings" prompt only when the user selects them and queues the fixes. Never edit the artifact to chase a layout issue the user has not queued. The only exception is a fatal artifact_failures response, which means the review surface itself could not be used. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}`,
       'Mermaid is the whiteboard opt-in, not the diagram default: only when the user asks for an editable whiteboard, author that diagram as Mermaid in a `.mermaid` container. Rendered Mermaid diagrams there become embedded, editable Excalidraw whiteboards in the browser (click a diagram to unlock editing; a Fullscreen action opens it over the whole viewport) - flowchart, sequence, class, ER, and state diagrams convert to editable shapes; other types embed as an image to draw on. Scenes autosave locally; an unmodified autosave silently re-converts when a reload changes the Mermaid source. If the reviewer edited the scene, they choose to re-convert and discard saved edits or keep editing the saved scene. Standalone and exported copies still render plain Mermaid. Queue feedback adds a prompt to the Conversation panel; when the user sends it, poll returns a tag "whiteboard" prompt carrying a bounded edit summary plus local scenePath (.excalidraw JSON) and previewPath (PNG) files - read the summary first, open the files only when needed, then apply the edits by updating the Mermaid source in the artifact (never try to write the scene back)',
-      "Run `lavish-axi end <html-file>` to end a session as the agent - ending it this way still allows a plain reopen later. When the user ends it from the browser instead, a later `lavish-axi <html-file>` refuses to reopen it without `--reopen`",
+      "Run `lavish-axi end <html-file>` to end a session as the agent - ending it this way still allows a plain reopen later. When the user ends it from the browser instead, a later `lavish-axi <html-file>` refuses to reopen it without `--reopen`. A session whose page file was deleted is listed with `file_gone: true`; `end` and `poll` still find it by its path, and `lavish-axi end --gone` ends every such session that holds no undelivered feedback",
       "Run `lavish-axi export <html-file> [--out <path>]` to write a portable copy of the artifact - one HTML file with its LOCAL assets inlined - so it opens with no Lavish server and no sibling files. Remote CDN/font references are left as links, so it needs network to render those. Users can also export from the browser chrome's overflow menu",
       "Run `lavish-axi share <html-file> [--private | --password <pw>]` to publish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of Lavish, and get back a visitable URL. Shares are PUBLIC by default, so anyone with the link can open them. Pass --private to publish a PRIVATE page behind a password Lavish generates and returns - hand the user that password with the URL and say it is a shared secret anyone they give it to can use; --password <pw> uses one you were already given instead. Local assets are inlined; remote refs load over the network. It also returns a secret update_key that can republish or lock the same URL later - run `lavish-axi share --help` before using it. Users can also publish from the browser chrome's overflow menu",
       "Run `lavish-axi stop` to shut down the background server (it also self-stops when idle or after the last session ends with nothing connected)",
@@ -421,7 +446,7 @@ async function pollCommand(args) {
   }
   const takeover = args.includes("--takeover");
   const agentReply = await resolveAgentReply(args);
-  const absolute = await canonicalFile(file);
+  const absolute = await canonicalSessionFile(file);
   const baseUrl = await ensureServer();
   const timeoutMs = flagValue(args, "--timeout-ms");
   const query = new URLSearchParams({ file: absolute });
@@ -466,7 +491,7 @@ async function pollCommand(args) {
       // can leave the first claim alive and make the retry reject itself as LISTENER_ACTIVE.
       retries: 0,
       onResponse: (pollResponse) => {
-        if (pollResponse.headers.get(POLL_STATE_HEADER) === "listening") notifyHerdrPollReady();
+        if (pollResponse.headers[POLL_STATE_HEADER] === "listening") notifyHerdrPollReady();
       },
     });
     if (response.code === "LISTENER_REPLACED") {
@@ -627,10 +652,32 @@ function createEndedNextStep(file, endedBy) {
 
 async function endCommand(args) {
   const file = firstPositionalArg(args);
-  if (!file) {
-    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", ["Run `lavish-axi end <html-file>`"]);
+  if (args.includes("--gone")) {
+    if (file) {
+      throw new AxiError("Pass an HTML file or --gone, not both", "VALIDATION_ERROR", [
+        "Run `lavish-axi end <html-file>` to end one session, or `lavish-axi end --gone` to end every session whose page file is gone",
+      ]);
+    }
+    const baseUrl = await ensureServer();
+    const { ended, pending } = await postJson(`${baseUrl}/api/end-gone`, {});
+    return {
+      ended,
+      pending,
+      ...(pending.length > 0
+        ? {
+            next_step:
+              "The pages listed under pending are gone but still hold feedback no poll has collected, so their sessions stay open. Run `lavish-axi poll <html-file>` on each to deliver it, then `lavish-axi end --gone` again.",
+          }
+        : {}),
+    };
   }
-  const absolute = await canonicalFile(file);
+  if (!file) {
+    throw new AxiError("HTML file path is required", "VALIDATION_ERROR", [
+      "Run `lavish-axi end <html-file>`",
+      "Run `lavish-axi end --gone` to end every session whose page file is gone",
+    ]);
+  }
+  const absolute = await canonicalSessionFile(file);
   const baseUrl = await ensureServer();
   const response = await postJson(`${baseUrl}/api/end`, { file: absolute });
   return { session: { file: absolute, status: response.status || "ended" } };
@@ -1250,6 +1297,57 @@ async function designCommand() {
   return createDesignOutput();
 }
 
+// The theme Scrawl's frame wears for every page of a project (src/project-theme.js). It needs no
+// server: themes are files in the state directory, read when a review page loads.
+async function themeCommand(args) {
+  const target = firstPositionalArg(args, ["--set"]);
+  if (!target) {
+    throw new AxiError("A directory or file in the project is required", "VALIDATION_ERROR", [
+      "Run `lavish-axi theme <project-dir>`",
+    ]);
+  }
+  const project = await projectRootOf(target);
+  if (!project) {
+    throw new AxiError(`${path.resolve(target)} is not inside a git checkout`, "VALIDATION_ERROR", [
+      "Pass a directory or file inside the project's git checkout or one of its worktrees",
+    ]);
+  }
+  const themesDir = path.dirname(stateFile());
+  const themeFile = flagValue(args, "--set");
+  if (themeFile && args.includes("--clear")) {
+    throw new AxiError("Pass --set or --clear, not both", "VALIDATION_ERROR", [
+      "Run `lavish-axi theme <project-dir> --set <file.json>` or `lavish-axi theme <project-dir> --clear`",
+    ]);
+  }
+  if (args.includes("--clear")) {
+    const cleared = await clearProjectTheme(themesDir, project);
+    return { theme: { project, saved: false, cleared, wears: SIQ_THEME.name } };
+  }
+  if (themeFile) {
+    let input;
+    try {
+      input = JSON.parse(await readFile(path.resolve(themeFile), "utf8"));
+    } catch (error) {
+      throw new AxiError(`Could not read ${themeFile} as JSON: ${error.message}`, "VALIDATION_ERROR", [
+        "Write the theme as a JSON file shaped like `lavish-axi design`'s frame_theme example",
+      ]);
+    }
+    let saved;
+    try {
+      saved = await saveProjectTheme(themesDir, project, input);
+    } catch (error) {
+      throw new AxiError(error.message, "VALIDATION_ERROR", ["Fix each listed field, then run the same command again"]);
+    }
+    return {
+      theme: { project, saved: true, name: saved.theme.name, scheme: themeScheme(saved.theme) },
+      next_step: "Review pages of this project wear the theme when they next load.",
+    };
+  }
+  const theme = await readProjectTheme(themesDir, project);
+  if (!theme) return { theme: { project, saved: false, wears: SIQ_THEME.name } };
+  return { theme: { project, saved: true, scheme: themeScheme(theme), ...theme } };
+}
+
 async function setupCommand(args) {
   if (args.length !== 1 || (args[0] !== "hooks" && args[0] !== "plugin")) {
     throw new AxiError("Unknown setup action", "VALIDATION_ERROR", [
@@ -1521,7 +1619,7 @@ export function createCopilotCliAmbientContextScript(command = "lavish-axi") {
   return [
     'const { spawnSync } = require("node:child_process");',
     `const command = ${JSON.stringify(command)};`,
-    'const result = spawnSync(command, [], { encoding: "utf8", shell: true });',
+    'const result = spawnSync(command, [], { encoding: "utf8", shell: true, windowsHide: true });',
     'const detail = result.error ? result.error.message : (result.stderr || result.stdout || "exit " + (result.status ?? "unknown"));',
     "const text = String(result.status === 0 ? result.stdout : detail).trim();",
     'if (!text) { console.log("{}"); process.exit(0); }',
@@ -1628,7 +1726,7 @@ async function serverCommand(args) {
 async function visibleSessions() {
   const store = new SessionStore(stateFile());
   const sessions = (await store.listSessions()).filter((session) => session.status !== "ended");
-  const { health } = await findRunningServer(defaultPort());
+  const { health } = await findRunningServer(defaultPort(), { isKept: () => true });
   const listeners = new Map(
     Array.isArray(health?.listeners)
       ? health.listeners
@@ -1636,7 +1734,17 @@ async function visibleSessions() {
           .map((listener) => [listener.key, listener.label || "agent-listener"])
       : [],
   );
-  return sessions.map((session) => ({ ...session, listener: listeners.get(session.key) || "none" }));
+  // A session keeps the link it was opened with, which may predate the https proxy; the running
+  // server says where its links point now.
+  const linkOrigin = typeof health?.link_origin === "string" ? health.link_origin : "";
+  return Promise.all(
+    sessions.map(async (session) => ({
+      ...session,
+      ...(linkOrigin ? { url: `${linkOrigin}/session/${session.key}` } : {}),
+      listener: listeners.get(session.key) || "none",
+      file_gone: await isFileGone(session.file),
+    })),
+  );
 }
 
 async function assertHtmlFile(file) {
@@ -1706,35 +1814,78 @@ function otherInstallationError(port, foreign) {
 // is probed in parallel and each probe is bounded, so a hanging or foreign address cannot mask
 // loopback, and a response whose app is lavish-axi wins over a foreign /health. When nothing
 // answers, the primary URL is still returned so callers have something to spawn against and report.
-async function findRunningServer(port, { reconcileNetwork = false } = {}) {
+//
+// A kept server proven to own the loopback port lock can return before slow adapter probes finish.
+// Replacement and stop still need the full sweep to retire duplicates and inherit their addresses.
+/**
+ * @param {number} port
+ * @param {{ reconcileNetwork?: boolean, isKept?: (health: object) => boolean }} [options]
+ */
+async function findRunningServer(port, { reconcileNetwork = false, isKept = (_health) => false } = {}) {
   const controlHosts = new Set([clientHost(), LOOPBACK_HOST]);
-  const probed = await Promise.all(
-    serverCandidateHosts().map(async (host) => {
+  const candidateHosts = serverCandidateHosts();
+  const sweep = new AbortController();
+  setMaxListeners(candidateHosts.length, sweep.signal);
+  try {
+    const probes = candidateHosts.map(async (host) => {
       const baseUrl = serverBaseUrl(host, port);
-      const health = await probeHealth(baseUrl, { reconcileNetwork: false, timeoutMs: HEALTH_PROBE_TIMEOUT_MS });
+      const health = await probeHealth(baseUrl, {
+        reconcileNetwork: false,
+        timeoutMs: HEALTH_PROBE_TIMEOUT_MS,
+        signal: sweep.signal,
+      });
       return health ? { host, baseUrl, health } : null;
-    }),
+    });
+    const loopback = await probes[candidateHosts.indexOf(LOOPBACK_HOST)];
+    let isLoopbackReconciled = false;
+    if (loopback && ownsPortLock(loopback.health)) {
+      if (reconcileNetwork) {
+        loopback.health =
+          (await probeHealth(loopback.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ??
+          loopback.health;
+        isLoopbackReconciled = true;
+      }
+      if (isKept(loopback.health))
+        return { baseUrl: loopback.baseUrl, health: loopback.health, duplicates: [], foreign: null };
+    }
+    const found = (await Promise.all(probes)).filter((entry) => entry !== null);
+    const owned = found.filter((entry) => isOwnedServer(entry, controlHosts));
+    const foreign =
+      found.find(
+        (entry) =>
+          controlHosts.has(entry.host) && entry.health.app === "lavish-axi" && !isOwnedServer(entry, controlHosts),
+      ) ?? null;
+    // A reconciled port-lock owner also serves the configured host, so keep its one health result.
+    const chosen = isLoopbackReconciled ? loopback : owned[0];
+    if (!chosen) {
+      const other = found.find((entry) => controlHosts.has(entry.host));
+      return other
+        ? { baseUrl: other.baseUrl, health: other.health, duplicates: [], foreign }
+        : { baseUrl: serverBaseUrl(clientHost(), port), health: null, duplicates: [], foreign };
+    }
+    let health = chosen.health;
+    if (reconcileNetwork && !isLoopbackReconciled) {
+      health =
+        (await probeHealth(chosen.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ??
+        health;
+    }
+    return { baseUrl: chosen.baseUrl, health, duplicates: ownedDuplicates(owned, chosen), foreign };
+  } finally {
+    sweep.abort();
+  }
+}
+
+// Loopback is the port lock: every server that reports a state_id binds it first and refuses to
+// start while another Lavish server holds it, so this installation's server there is the only one
+// of ours on the port. It must also hold this CLI's own host, where another server could otherwise
+// answer first.
+function ownsPortLock(health) {
+  const host = clientHost();
+  return (
+    health.app === "lavish-axi" &&
+    health.state_id === stateId() &&
+    (host === LOOPBACK_HOST || (Array.isArray(health.hosts) && health.hosts.includes(host)))
   );
-  const found = probed.filter((entry) => entry !== null);
-  const owned = found.filter((entry) => isOwnedServer(entry, controlHosts));
-  const foreign =
-    found.find(
-      (entry) =>
-        controlHosts.has(entry.host) && entry.health.app === "lavish-axi" && !isOwnedServer(entry, controlHosts),
-    ) ?? null;
-  const chosen = owned[0];
-  if (!chosen) {
-    const other = found.find((entry) => controlHosts.has(entry.host));
-    return other
-      ? { baseUrl: other.baseUrl, health: other.health, duplicates: [], foreign }
-      : { baseUrl: serverBaseUrl(clientHost(), port), health: null, duplicates: [], foreign };
-  }
-  let health = chosen.health;
-  if (reconcileNetwork) {
-    health =
-      (await probeHealth(chosen.baseUrl, { reconcileNetwork: true, timeoutMs: HEALTH_RECONCILE_TIMEOUT_MS })) ?? health;
-  }
-  return { baseUrl: chosen.baseUrl, health, duplicates: ownedDuplicates(owned, chosen), foreign };
 }
 
 // Other Lavish daemons of this installation on the same port. An address the chosen server itself
@@ -1825,17 +1976,36 @@ function hostsToServe(requiredHosts, duplicates) {
   );
 }
 
-async function probeHealth(baseUrl, { reconcileNetwork, timeoutMs }) {
-  const health = await fetchHealth(baseUrl, { reconcileNetwork, timeoutMs });
+async function probeHealth(baseUrl, { reconcileNetwork, timeoutMs, signal = undefined }) {
+  const health = await fetchHealth(baseUrl, { reconcileNetwork, timeoutMs, signal });
   return health && typeof health === "object" ? health : null;
 }
 
 // `reloadKey` names the session this invocation is about to open. A version-driven replacement
 // reloads that chrome only; every other open review page is told it is outdated and left alone.
 async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
+  // A server started with an invalid link URL exits at once; name the setting instead.
+  try {
+    linkUrlOrigin();
+  } catch (error) {
+    throw new AxiError(error instanceof Error ? error.message : String(error), "VALIDATION_ERROR", [
+      "Set LAVISH_AXI_LINK_URL to an origin such as https://review.example.ts.net:8443, or unset it",
+    ]);
+  }
   const port = defaultPort();
   const requiredHosts = await requiredServerHosts();
-  const { baseUrl, health: existing, duplicates, foreign } = await findRunningServer(port, { reconcileNetwork: true });
+  // The adoption check below, for a server discovery proved has no same-port duplicate.
+  const isKept = (health, force = false) =>
+    !shouldRestartServer(VERSION, health, force) && missingServerHosts(health, requiredHosts).length === 0;
+  const {
+    baseUrl,
+    health: existing,
+    duplicates,
+    foreign,
+  } = await findRunningServer(port, {
+    reconcileNetwork: true,
+    isKept: (health) => isKept(health, forceRestart),
+  });
   if (foreign) throw otherInstallationError(port, foreign);
   const missingHosts =
     existing?.app === "lavish-axi" ? missingServerHosts(existing, hostsToServe(requiredHosts, duplicates)) : [];
@@ -1882,7 +2052,7 @@ async function ensureServer({ forceRestart = false, reloadKey = "" } = {}) {
       health,
       duplicates: liveDuplicates,
       foreign: liveForeign,
-    } = await findRunningServer(port, { reconcileNetwork: true });
+    } = await findRunningServer(port, { reconcileNetwork: true, isKept });
     if (liveForeign) throw otherInstallationError(port, liveForeign);
     const liveMissing =
       health?.app === "lavish-axi" ? missingServerHosts(health, hostsToServe(requiredHosts, liveDuplicates)) : [];
@@ -1987,13 +2157,16 @@ async function canControlServerOnPort(baseUrl, healthBody, processMatchesLavish)
 
 /**
  * @param {string} baseUrl
- * @param {{ reconcileNetwork?: boolean, timeoutMs?: number }} [options]
+ * @param {{ reconcileNetwork?: boolean, timeoutMs?: number, signal?: AbortSignal }} [options]
  */
 // Plain node:http with the socket destroyed on every exit path, not fetch: an aborted fetch leaves
 // its TCP connect running, and discovery dials every local address - including a Tailscale IPv6
 // address that silently drops connections to itself - so each CLI invocation lingered for the OS
 // connect timeout (~10s) after printing its result.
-function fetchHealth(baseUrl, { reconcileNetwork = false, timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS } = {}) {
+function fetchHealth(
+  baseUrl,
+  { reconcileNetwork = false, timeoutMs = DEFAULT_HEALTH_TIMEOUT_MS, signal = undefined } = {},
+) {
   return new Promise((resolve) => {
     let settled = false;
     /** @type {import("node:http").ClientRequest | null} */
@@ -2002,11 +2175,13 @@ function fetchHealth(baseUrl, { reconcileNetwork = false, timeoutMs = DEFAULT_HE
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      signal?.removeEventListener("abort", abort);
       request?.destroy();
       resolve(value);
     };
     const abort = () => finish(null);
     const timer = setTimeout(abort, timeoutMs);
+    signal?.addEventListener("abort", abort, { once: true });
     try {
       const url = new URL(`${baseUrl}/health${reconcileNetwork ? "?reconcile_network=1" : ""}`);
       request = httpGet(url, { agent: false }, (response) => {
@@ -2043,7 +2218,7 @@ async function requestShutdown(baseUrl, { reloadKey = "", reason = "" } = {}) {
   if (reloadKey) body.reload_key = reloadKey;
   if (reason) body.reason = reason;
   try {
-    await fetch(`${baseUrl}/shutdown`, {
+    await requestServer(`${baseUrl}/shutdown`, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -2123,7 +2298,7 @@ async function startServer(port, { alsoListen = [] } = {}) {
   try {
     const args = [entry, "server", "--port", String(port)];
     for (const host of alsoListen) args.push("--also-listen", host);
-    const child = spawn(process.execPath, args, createServerSpawnOptions(logFd));
+    const child = spawn(process.execPath, args, createServerSpawnOptions(stateDir(), logFd));
     child.unref();
   } finally {
     if (logFd !== null) closeSync(logFd);
@@ -2141,23 +2316,67 @@ function resolveServerEntry() {
 }
 
 /**
+ * @param {string} directory The state directory, which the server runs in.
  * @param {number | null} logFd
  * @returns {import("node:child_process").SpawnOptions}
  */
-export function createServerSpawnOptions(logFd = null) {
+export function createServerSpawnOptions(directory, logFd = null) {
   const stdio = /** @type {import("node:child_process").StdioOptions} */ (
     logFd === null ? "ignore" : ["ignore", logFd, logFd]
   );
+  // The server outlives the command that starts it, and on Windows no folder can be removed while a
+  // process runs in it, so it never runs in its first caller's folder. A relative state directory
+  // would resolve against the server's own folder, so the server is told the absolute one.
+  const cwd = path.resolve(directory);
   return {
+    cwd,
     detached: true,
     stdio,
-    env: { ...process.env, LAVISH_AXI_NO_OPEN: "1" },
+    env: { ...process.env, LAVISH_AXI_NO_OPEN: "1", LAVISH_AXI_STATE_DIR: cwd },
   };
 }
 
 /**
+ * @typedef {{ ok: boolean, status: number, headers: import("node:http").IncomingHttpHeaders, text: Promise<string> }} LavishResponse
+ */
+
+/**
  * @param {string} url
- * @param {{ retries?: number, retryDelayMs?: number, onResponse?: ((response: Response) => void) | null, method?: string, headers?: Record<string, string>, body?: string }} [options]
+ * @param {{ method?: string, headers?: Record<string, string>, body?: string }} [options]
+ * @returns {Promise<LavishResponse>}
+ */
+// Plain node:http, like fetchHealth, never fetch: a server this CLI asks can be shutting down (an
+// upgrade, another agent's stop, its own idle timeout) and resets the connections it holds. Node
+// 24.21's fetch sets IP_TOS on every new socket without handling a failure, macOS fails that
+// setsockopt with EINVAL on a socket its peer already reset, and fetch throws it from the socket's
+// connect listener, where no caller can catch it and the CLI dies. Here the same reset is this
+// request's error. It settles when the response head arrives, as fetch does, so a connection that
+// fails stays told apart from a body cut short.
+function requestServer(url, { method = "GET", headers = {}, body } = {}) {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(new URL(url), { method, headers, agent: false }, (response) => {
+      const text = new Promise((resolveText, rejectText) => {
+        let chunks = "";
+        response.setEncoding("utf8");
+        response.on("data", (chunk) => {
+          chunks += chunk;
+        });
+        response.on("end", () => resolveText(chunks));
+        response.on("error", rejectText);
+      });
+      // A caller that needs only the status never reads the body, so its failure is not unhandled.
+      text.catch(() => {});
+      const status = response.statusCode ?? 0;
+      resolve({ ok: status >= 200 && status < 300, status, headers: response.headers, text });
+    });
+    request.on("error", reject);
+    request.end(body);
+  });
+}
+
+/**
+ * @param {string} url
+ * @param {{ retries?: number, retryDelayMs?: number, onResponse?: ((response: LavishResponse) => void) | null, method?: string, headers?: Record<string, string>, body?: string }} [options]
  */
 export async function fetchJson(
   url,
@@ -2166,11 +2385,7 @@ export async function fetchJson(
   let response;
   for (let attempt = 0; attempt <= retries; attempt += 1) {
     try {
-      response = await fetch(url, {
-        method,
-        ...(headers ? { headers } : {}),
-        ...(body === undefined ? {} : { body }),
-      });
+      response = await requestServer(url, { method, headers, body });
       break;
     } catch (error) {
       if (error instanceof AxiError) throw error;
@@ -2183,7 +2398,7 @@ export async function fetchJson(
   if (!response.ok) {
     let payload = null;
     try {
-      payload = await response.json();
+      payload = JSON.parse(await response.text);
     } catch {
       // Keep the generic transport error when the server did not send JSON.
     }
@@ -2205,7 +2420,7 @@ export async function fetchJson(
   }
   onResponse?.(response);
   try {
-    return await response.json();
+    return JSON.parse(await response.text);
   } catch {
     throw pollResponseInterruptedError();
   }
@@ -2214,7 +2429,7 @@ export async function fetchJson(
 async function postJson(url, body) {
   let response;
   try {
-    response = await fetch(url, {
+    response = await requestServer(url, {
       method: "POST",
       headers: { "content-type": "application/json" },
       body: JSON.stringify(body),
@@ -2225,7 +2440,7 @@ async function postJson(url, body) {
   if (!response.ok) {
     throw new AxiError(`Lavish Editor request failed: ${response.status}`, "SERVER_ERROR");
   }
-  return response.json();
+  return JSON.parse(await response.text);
 }
 
 function serverConnectionError() {
@@ -2433,21 +2648,22 @@ export function getCommandHelp(command, { agent = "generic" } = {}) {
 }
 
 function createTopLevelHelp({ agent = "generic" } = {}) {
-  return `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n  lavish-axi poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]\n  lavish-axi end <html-file>\n  lavish-axi export <html-file> [--out <path>]\n  lavish-axi share <html-file> [--private | --password <pw>] [--token <t>]\n  lavish-axi share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  lavish-axi share --unpublish --site <site_id> --update-key <key>\n  lavish-axi stop\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi setup hooks\n  lavish-axi setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the Lavish top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
+  return `lavish-axi - Lavish Editor AXI\n\nUsage:\n  lavish-axi\n  lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n  lavish-axi poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]\n  lavish-axi end <html-file>\n  lavish-axi end --gone\n  lavish-axi export <html-file> [--out <path>]\n  lavish-axi share <html-file> [--private | --password <pw>] [--token <t>]\n  lavish-axi share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  lavish-axi share --unpublish --site <site_id> --update-key <key>\n  lavish-axi stop\n  lavish-axi playbook [playbook_id]\n  lavish-axi design\n  lavish-axi theme <project-dir> [--set <file.json> | --clear]\n  lavish-axi setup hooks\n  lavish-axi setup plugin\n\n${DESIGN_SYSTEM_HINT}\n\nNote: poll long-polls until the user sends feedback, ends the session, or leaves every review window disconnected past the reconnect grace period, staying silent while it waits - never kill it. Layout issues the browser detects are passive: they collect in the user's Layout issues inbox in the Lavish top bar and reach the agent only when the user selects them and queues the fixes, as an ordinary tag "layout-warnings" prompt. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. ${pollExecutionGuidance({ agent })} ${POLL_SEND_AND_END_RULE}\n\n`;
 }
 
 function createCommandHelp({ agent = "generic" } = {}) {
   return {
     open: `Usage: lavish-axi <html-file> [--no-open] [--no-gate] [--reopen]\n\nOpen or resume a Lavish Editor review session for an HTML artifact. Use --no-open when you need to ensure the server/session exists without opening another browser window. Use --no-gate to skip the open-time layout curtain for this browser open. If the user explicitly ended the session from the browser, this refuses to reopen it and returns guidance instead - pass --reopen to force it open when the user asks for further review or something important needs their visual attention. Sessions ended by the agent (\`lavish-axi end\`) reopen normally without the flag.\n`,
     poll: `Usage: lavish-axi poll <html-file> [--owner <label>] [--takeover] [--agent-reply "..."] [--agent-reply-file <path>]\n\nThis command exclusively long-polls for queued user prompts. Pass --owner <label> to make the active listener visible in session listings; --takeover displaces an existing listener, which receives LISTENER_REPLACED. A second poll without --takeover fails with LISTENER_ACTIVE instead of silently returning waiting.\n\nThis command long-polls indefinitely for queued user prompts. It stays silent while it waits - that is normal, never kill it. Browser-detected layout issues do NOT return this poll: they are filed passively in the user's Layout issues inbox and arrive as an ordinary tag "layout-warnings" prompt only after the user selects them and queues the fixes. Warning lifecycle: an issue stays unresolved and counted while queued, becomes recurring if a newer artifact revision still shows it, and is resolved only after a newer artifact load plus a complete diagnostic pass at the same viewport no longer detects it. A failed or incomplete pass preserves it as unverified rather than clearing it. The only response that arrives without user action is artifact_failures - a fatal failure that made the review surface itself unusable. Do not pass --timeout-ms during normal agent use; it is for tests and debugging only. In a Herdr-managed pane, set LAVISH_AXI_HERDR_CHIME=1 to request attention when the poll has entered its waiting state; unset it or use any other value to keep the current silent behavior. Notification failures never interrupt the poll. ${pollExecutionGuidance({ agent })} Use --agent-reply after applying prior feedback to display a concise response in Lavish Editor before waiting again. ${POLL_AGENT_REPLY_RULE} ${POLL_AGENT_REPLY_HELP_POINTER} Do not combine --agent-reply with --agent-reply-file.\n\nExamples:\n  lavish-axi poll report.html --agent-reply "Renamed the payment step."\n  lavish-axi poll report.html --agent-reply-file reply.md\n  lavish-axi poll report.html --agent-reply-file -\n\n${POLL_SEND_AND_END_RULE}\n`,
-    end: `Usage: lavish-axi end <html-file>\n\nEnd a Lavish Editor session as the agent. A session ended this way still reopens normally on the next \`lavish-axi <html-file>\`, unlike a user ending it from the browser, which requires --reopen.\n`,
+    end: `Usage: lavish-axi end <html-file>\n       lavish-axi end --gone\n\nEnd a Lavish Editor session as the agent. A session ended this way still reopens normally on the next \`lavish-axi <html-file>\`, unlike a user ending it from the browser, which requires --reopen. The page's file need not still exist: a session whose file was deleted is found by the path it was opened with, and any feedback it holds stays for \`lavish-axi poll\` to deliver.\n\n--gone ends, in one call, every open session whose page file is gone and that holds no undelivered feedback. A gone page that still holds feedback is listed under pending and stays open, so a poll can collect it first.\n`,
     export: `Usage: lavish-axi export <html-file> [--out <path>]\n\nWrite a portable copy of an artifact: one HTML file with its LOCAL assets inlined (relative-path stylesheets, scripts, images, and fonts become inline <style>/<script> blocks and data URIs). Remote CDN/font references (https URLs) are left as links for the browser to load, so the file needs network to render those. Lavish makes no outbound requests - it only reads local files, confined to the artifact's directory. Defaults to writing <name>.export.html next to the source; pass --out to choose a path. The Lavish annotation SDK is never included in an export.\n`,
     share: `Usage:\n  lavish-axi share <html-file> [--private | --password <pw>] [--token <t>]\n  lavish-axi share <html-file> --site <site_id> --update-key <key> [--private | --password <pw>]\n  lavish-axi share --unpublish --site <site_id> --update-key <key>\n\nPublish the artifact on ht-ml.app (https://ht-ml.app), a third-party hosting service not part of Lavish, and print a visitable URL. Shares are PUBLIC by default: anyone with the link can open the page, and it may be indexed or scraped. Pass --private to publish a PRIVATE page behind a generated password, returned once in the output - give it to the user with the URL and tell them it is a shared secret. Pass --password <pw> instead when the user chose the password; it is never echoed back. Builds the same local-inlined HTML as 'export' (local assets inlined; remote CDN/font URLs left as links and are not blocked by CSP on ht-ml.app, but still load over the viewer's network), then POSTs it to ht-ml.app's /v1 API. Creating a site needs no account or API key. The response includes the url plus a secret update_key (shown once) for changing the page later.\n\n--site <site_id> with --update-key <key> republishes an existing page in place: same URL, new HTML. On a republish the password is left alone unless you pass --private (rotate to a new generated one) or --password <pw> (set one). There is no way to make a private page public again: ht-ml.app accepts a request to clear a password and silently ignores it, so Lavish does not offer one rather than reporting a page as public while it is still gated. Locking a page that was PUBLIC is also not instant at ht-ml.app's CDN: it was observed still answering uncredentialed requests for minutes after the password was set, so do not tell the user a newly gated page is unreachable right away (a page that was already private has no such cached copy).\n\n--unpublish takes the same credentials and no file. ht-ml.app has NO delete endpoint, so this replaces the page with a short placeholder and locks it behind a random password that is immediately discarded; the URL still resolves and the host still holds what was published. Say that to the user rather than calling it deleted. The update_key still works, so republishing with --private brings the page back behind a new password.\n\nA value flag given an empty or whitespace-only value is REFUSED rather than acted on: an unquoted shell variable that is unset makes \`--password $PW\` an empty password, which the host treats as none and would publish a PUBLIC page while you believed it was gated. Quote the value, or pass --private to have Lavish generate one.\n\nSet LAVISH_AXI_HTML_APP_TOKEN (or pass --token) to attach an optional bearer token when CREATING a page; it is never required. A republish (--site/--update-key) or --unpublish rejects --token, because the update_key is what the Authorization header carries there. The annotation SDK is never included.\n`,
-    stop: `Usage: lavish-axi stop [--port <port>]\n\nShut down the background Lavish Editor server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected.\n`,
+    stop: `Usage: lavish-axi stop [--port <port>]\n\nShut down the background Lavish Editor server. The server also stops itself when no browser or poll has been connected for a while (LAVISH_AXI_IDLE_TIMEOUT_MS, default 30m) and immediately when the last session ends with nothing connected, except while a Tailscale https proxy points at it.\n`,
     playbook: `Usage: lavish-axi playbook [playbook_id]\n\nList focused artifact guidance playbooks, or show one playbook by ID. Known IDs: diagram, table, comparison, plan, code, input, explanation, slides.\n\n${PLAYBOOK_ROUTER_HELP}\n\nExamples:\n  lavish-axi playbook\n  lavish-axi playbook diagram\n  lavish-axi playbook input\n`,
     design: `Usage: lavish-axi design\n\nShow a copy-pasteable CDN snippet for Tailwind CSS browser runtime v4 + DaisyUI v5 + themes, the whiteboard (Mermaid) opt-in snippet, a content-to-playbook router, an optional layout safety CSS snippet, plus technical reference for DaisyUI components. ${PLAYBOOK_ROUTER_HELP} Lavish artifacts stay portable HTML. This CDN snippet is the design fallback, not the default: inspect the subject project before falling back, and paste the layout safety CSS only when useful for dense nested grid/flex layouts, badges, wide fonts, or local media. ${DESIGN_PRIORITY_RULE}\n`,
+    theme: `Usage: lavish-axi theme <project-dir> [--set <file.json> | --clear]\n\nShow, save or clear the theme Scrawl's review frame wears for every page of a project: its colours, fonts and corner radius. The project is the git checkout the path is in, and a worktree counts as the checkout it was made from. A project with no saved theme wears the Code Goblins SIQ theme. --set reads a JSON theme shaped like the frame_theme example in \`lavish-axi design\` and refuses one whose text is hard to read or whose surfaces are pure white. Themes are kept in the state directory (LAVISH_AXI_STATE_DIR), never in the project, and a review page reads its project's theme when it loads.\n`,
     setup: `Usage: lavish-axi setup hooks\n       lavish-axi setup plugin\n\nhooks: install or repair agent SessionStart hooks for lavish-axi ambient context in Claude Code, Codex, OpenCode, and GitHub Copilot CLI. Restart your agent session afterward to receive the context. This is the primary integration - it carries live session state.\n\nplugin: register the installed lavish-axi package as an Agent Plugin (agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI. The installed package directory is itself the plugin root, so nothing is downloaded and no marketplace is involved. Reload each client afterward. Codex users should use \`setup hooks\` instead.\n\nBoth actions are explicit opt-in, idempotent, and repair a stale path after a reinstall.\n`,
-    server: `Usage: lavish-axi server [--port 4387] [--verbose] [--also-listen <host>...]\n\nRun the local Lavish Editor server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nBy default Lavish binds to 127.0.0.1 and, when Tailscale is running, this machine's Tailscale IPv4. Any explicit LAVISH_AXI_HOST overrides automatic Tailscale binding; wildcard values such as 0.0.0.0 or :: are restricted to loopback. An explicit non-wildcard LAVISH_AXI_HOST sets the bind address, and the server also listens on 127.0.0.1 so every local CLI finds it; --also-listen adds further concrete addresses (the CLI passes it when it replaces a server, to keep every address the old one served). An address that cannot be bound is retried in the background and reported as network_warning. Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. With automatic binding enabled, a successfully bound Tailscale listener uses its MagicDNS name in generated session links; otherwise LAVISH_AXI_LINK_HOST can set the link hostname. See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
+    server: `Usage: lavish-axi server [--port 4387] [--verbose] [--also-listen <host>...]\n\nRun the local Lavish Editor server. Pass --verbose (or set LAVISH_AXI_DEBUG=1) to log session and watcher events to stderr. Detached server output is appended to ~/.lavish-axi/server.log, or LAVISH_AXI_STATE_DIR/server.log when set, for startup and crash diagnostics.\n\nBy default Lavish binds to 127.0.0.1 and, when Tailscale is running, this machine's Tailscale IPv4. Any explicit LAVISH_AXI_HOST overrides automatic Tailscale binding; wildcard values such as 0.0.0.0 or :: are restricted to loopback. An explicit non-wildcard LAVISH_AXI_HOST sets the bind address, and the server also listens on 127.0.0.1 so every local CLI finds it; --also-listen adds further concrete addresses (the CLI passes it when it replaces a server, to keep every address the old one served). An address that cannot be bound is retried in the background and reported as network_warning. Binding beyond loopback exposes an unauthenticated server that can read and serve arbitrary local files to anything that can reach it, so only do so on a trusted network. With automatic binding enabled, a successfully bound Tailscale listener uses its MagicDNS name in generated session links; otherwise LAVISH_AXI_LINK_HOST can set the link hostname. When \`tailscale serve\` proxies https on this machine's MagicDNS name to this port (\`tailscale serve --bg --https=4388 http://127.0.0.1:4387\`), session links use that https origin instead, so the page is a secure context on every tailnet device and its microphone works. LAVISH_AXI_LINK_URL (a bare http or https origin) overrides every link choice. See README's Allowed hosts section for Host allowlisting and LAVISH_AXI_ALLOWED_HOSTS. LAVISH_AXI_NO_OPEN=1 (or --no-open) suppresses the local browser launch.\n`,
   };
 }
 

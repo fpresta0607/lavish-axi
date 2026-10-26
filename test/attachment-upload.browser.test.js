@@ -285,7 +285,7 @@ test(
       const errorColors = evaluate(`(() => {
         const status = document.querySelector(".chat-attachment-error .chat-attachment-status");
         if (!status) return "missing-error-chip";
-        const danger = getComputedStyle(document.documentElement).getPropertyValue("--danger").trim();
+        const danger = getComputedStyle(document.documentElement).getPropertyValue("--red").trim();
         const probe = document.createElement("span");
         probe.style.color = danger;
         document.body.appendChild(probe);
@@ -296,11 +296,12 @@ test(
       assert.doesNotMatch(errorColors, /missing-error-chip/, errorColors);
       const colors = decode(errorColors);
       assert.match(colors.text, /Unsupported file type/, errorColors);
-      assert.equal(colors.actual, colors.expected, `error status must render in --danger:\n${errorColors}`);
+      assert.equal(colors.actual, colors.expected, `error status must render in --red:\n${errorColors}`);
     } finally {
       run(process.execPath, ["bin/lavish-axi.js", "stop", "--port", String(port)], lavishEnv, 15_000);
       run("chrome-devtools-axi", ["stop"], chromeEnv);
-      await rm(temp, { recursive: true, force: true });
+      // Windows keeps the profile's lockfile a moment after Chrome exits.
+      await rm(temp, { recursive: true, force: true, maxRetries: 10 });
     }
   },
 );

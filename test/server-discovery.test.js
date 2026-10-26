@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
-import { createServer as createHttpServer } from "node:http";
-import { createServer } from "node:net";
-import { networkInterfaces, tmpdir } from "node:os";
+import { createServer as createHttpServer, request as httpRequest } from "node:http";
+import { createServer, Socket } from "node:net";
+import os, { networkInterfaces, tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -35,7 +35,9 @@ async function withTempDir(fn) {
   try {
     return await fn(dir);
   } finally {
-    await rm(dir, { recursive: true, force: true });
+    // A server the CLI started runs in its state directory, and Windows keeps the directory until
+    // that server has exited, which can be after it stops answering.
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
 }
 
@@ -102,6 +104,9 @@ async function captureCli(args) {
   return output;
 }
 
+// The port is free at host only: the kernel checks no other address when it picks one. A test that
+// needs one port at loopback and at the LAN address picks it at the LAN address, since on macOS a
+// port free on loopback can still be the local port of a connection there.
 async function freePort(host = "127.0.0.1") {
   const probe = createServer();
   await new Promise((resolve) => probe.listen({ port: 0, host }, () => resolve(undefined)));
@@ -123,9 +128,33 @@ function closeRaw(server) {
   return new Promise((resolve) => server.close(() => resolve(undefined)));
 }
 
+// Plain node:http, not fetch, as the CLI does: these reach servers while they shut down, and Node
+// 24.21's fetch throws an uncaught EINVAL on macOS for a socket the closing server already reset.
+function requestJson(url, method = "GET") {
+  return new Promise((resolve, reject) => {
+    const request = httpRequest(new URL(url), { method, agent: false, timeout: 3000 }, (response) => {
+      let body = "";
+      response.setEncoding("utf8");
+      response.on("data", (chunk) => {
+        body += chunk;
+      });
+      response.on("end", () => {
+        try {
+          resolve(JSON.parse(body));
+        } catch (error) {
+          reject(error);
+        }
+      });
+      response.on("error", reject);
+    });
+    request.on("timeout", () => request.destroy(new Error(`${url} did not answer within 3s`)));
+    request.on("error", reject);
+    request.end();
+  });
+}
+
 async function health(host, port, query = "") {
-  const response = await fetch(`http://${host}:${port}/health${query}`, { signal: AbortSignal.timeout(3000) });
-  return response.json();
+  return requestJson(`http://${host}:${port}/health${query}`);
 }
 
 async function reachable(host, port) {
@@ -181,7 +210,7 @@ async function openSession(host, port, file) {
 }
 
 async function shutdownAt(host, port) {
-  await fetch(`http://${host}:${port}/shutdown`, { method: "POST" }).catch(() => {});
+  await requestJson(`http://${host}:${port}/shutdown`, "POST").catch(() => {});
   await waitFor(async () => !(await reachable(host, port)));
 }
 
@@ -351,7 +380,7 @@ test("a second server for a port whose loopback a Lavish server owns refuses to 
   }
   await withTempDir(async (dir) => {
     const owner = await serve({
-      port: 0,
+      port: await freePort(otherHost),
       stateFile: path.join(dir, "state.json"),
       version: "9.9.9-test",
       env: {},
@@ -389,8 +418,8 @@ test("a foreign loopback listener prevents a pinned server from claiming the sam
     return;
   }
   await withTempDir(async (dir) => {
-    const loopback = await listenRaw("127.0.0.1", 0);
-    const port = /** @type {import('node:net').AddressInfo} */ (loopback.address()).port;
+    const port = await freePort(otherHost);
+    const loopback = await listenRaw("127.0.0.1", port);
     try {
       const contender = await serve({
         port,
@@ -599,6 +628,9 @@ test(
       });
       try {
         await withEnv(cliEnv(dir, port, undefined), () => runCli(["open", artifact, "--no-open"]));
+        const refused = await withEnv(cliEnv(dir, port, otherHost), () => captureCli(["open", artifact, "--no-open"]));
+        assert.match(refused, /SERVER_ERROR/);
+        assert.deepEqual(await stateSessions(otherInstallDir), []);
         assert.equal(await isResolved(otherInstall.done), false, "another installation's server was stopped");
         assert.equal(await isResolved(kept.done), false);
       } finally {
@@ -607,8 +639,21 @@ test(
       }
 
       // The same situation with a shared state file is the duplicate daemon pair the old discovery
-      // created. Retiring the duplicate must not take its address with it: review links already
-      // handed out there keep working, served by one server for both addresses.
+      // created, so its loopback daemon is from an older release: no daemon since loopback became the
+      // port lock starts beside one that holds it. The upgrade must still sweep for the other daemon
+      // after loopback answered. Retiring the duplicate must not take its address with it: review
+      // links already handed out there keep working, served by one server for both addresses.
+      await kept.close();
+      const older = await serve({
+        port,
+        stateFile: path.join(dir, "state.json"),
+        version: "0.0.1",
+        env: {},
+        detectTailscale: null,
+        hosts: ["127.0.0.1"],
+        log: () => {},
+        idleTimeoutMs: null,
+      });
       const duplicate = await serve({
         port,
         stateFile: path.join(dir, "state.json"),
@@ -623,6 +668,7 @@ test(
         const { key } = await openSession(otherHost, port, artifact);
         await withEnv(cliEnv(dir, port, undefined), () => runCli(["open", artifact, "--no-open"]));
         assert.ok(await waitFor(() => isResolved(duplicate.done)), "the duplicate daemon was not retired");
+        assert.equal(await isResolved(older.done), true, "the older loopback daemon was not replaced");
         const survivor = await health(otherHost, port);
         assert.ok(survivor.hosts.includes("127.0.0.1") && survivor.hosts.includes(otherHost), survivor.hosts.join());
         assert.deepEqual((await health("127.0.0.1", port)).hosts, survivor.hosts);
@@ -630,13 +676,137 @@ test(
         assert.deepEqual(await stateSessions(dir), [artifact]);
       } finally {
         await duplicate.close().catch(() => {});
-        await kept.close().catch(() => {});
+        await older.close().catch(() => {});
         await shutdownAt("127.0.0.1", port);
         await shutdownAt(otherHost, port);
       }
     });
   },
 );
+
+test(
+  "an owned loopback server is adopted without waiting on a local address that never answers",
+  { timeout: 20_000 },
+  async (t) => {
+    if (!(await ipv6LoopbackAvailable())) {
+      t.skip("host needs IPv6 loopback");
+      return;
+    }
+    await withTempDir(async (dir) => {
+      const artifact = await writeArtifact(dir);
+      const port = await freePort();
+      const owner = await serve({
+        port,
+        stateFile: path.join(dir, "state.json"),
+        version: VERSION,
+        env: {},
+        detectTailscale: null,
+        hosts: ["127.0.0.1"],
+        log: () => {},
+        idleTimeoutMs: null,
+      });
+      // Windows takes about two seconds to refuse a connection to one of its own non-loopback
+      // addresses, so every adapter with nothing on the port held each open and poll for the whole
+      // probe bound after loopback had already answered. A listener that accepts and never replies
+      // stands in for those adapters on every platform.
+      /** @type {number[]} */
+      const heldMs = [];
+      const hanging = createServer((socket) => {
+        const acceptedAt = Date.now();
+        socket.on("close", () => heldMs.push(Date.now() - acceptedAt));
+        socket.on("error", () => {});
+        // Read and drop the request, so the probe's own close reaches this side as end of stream.
+        socket.resume();
+      });
+      await new Promise((resolve, reject) => {
+        hanging.once("error", reject);
+        hanging.listen({ host: "::1", port }, () => resolve(undefined));
+      });
+      const realNetworkInterfaces = os.networkInterfaces;
+      os.networkInterfaces = () => ({
+        ...realNetworkInterfaces(),
+        hanging: [{ address: "::1", family: "IPv6", scopeid: 0, internal: false, netmask: "", mac: "", cidr: null }],
+      });
+      try {
+        for (const args of [["open", artifact, "--no-open"], ["poll", artifact, "--timeout-ms", "1"], []]) {
+          const closedBefore = heldMs.length;
+          await withEnv(cliEnv(dir, port, undefined), () => runCli(args));
+          assert.ok(await waitFor(() => heldMs.length > closedBefore), "discovery never probed the hanging address");
+          // The probe bound is 500 ms; adoption must cancel it promptly for open, poll, and list.
+          assert.ok(heldMs[closedBefore] < 250, `discovery held the hanging probe open for ${heldMs[closedBefore]} ms`);
+        }
+        assert.equal(await isResolved(owner.done), false, "the owned server was replaced");
+        assert.deepEqual(await stateSessions(dir), [artifact]);
+      } finally {
+        os.networkInterfaces = realNetworkInterfaces;
+        await closeRaw(hanging);
+        await owner.close();
+      }
+    });
+  },
+);
+
+test("replacement reconciles a proven loopback owner only once", { timeout: 60_000 }, async (t) => {
+  for (const { reason, overrides, configuredHost = "127.0.0.1" } of [
+    { reason: "upgrade", overrides: { version: "0.0.1" } },
+    { reason: "network change", overrides: { network_stale: true } },
+    { reason: "missing host", overrides: { requested_hosts: [] } },
+    { reason: "pinned address upgrade", overrides: { version: "0.0.1" }, configuredHost: otherLocalIpv4() },
+  ]) {
+    await t.test(reason, async (subtest) => {
+      if (!configuredHost) {
+        subtest.skip("host has no non-loopback IPv4 address");
+        return;
+      }
+      await withTempDir(async (dir) => {
+        const artifact = await writeArtifact(dir);
+        const port = await freePort();
+        let reconciles = 0;
+        const hosts = [...new Set(["127.0.0.1", configuredHost])];
+        const owners = [];
+        const handleRequest = (request, response) => {
+          if (request.url?.startsWith("/health")) {
+            if (request.url.includes("reconcile_network=1")) reconciles += 1;
+            response.writeHead(200, { "content-type": "application/json" }).end(
+              JSON.stringify({
+                app: "lavish-axi",
+                version: VERSION,
+                state_id: stateId(path.join(dir, "state.json")),
+                hosts,
+                requested_hosts: hosts,
+                ...overrides,
+              }),
+            );
+            return;
+          }
+          if (request.method === "POST" && request.url === "/shutdown") {
+            response.writeHead(200, { connection: "close" }).end("{}");
+            for (const owner of owners) owner.close();
+            return;
+          }
+          response.writeHead(404).end();
+        };
+        for (const host of hosts) {
+          const owner = createHttpServer(handleRequest);
+          owners.push(owner);
+          await new Promise((resolve) => owner.listen({ host, port }, () => resolve(undefined)));
+        }
+        try {
+          const output = await withEnv(cliEnv(dir, port, configuredHost), () =>
+            captureCli(["open", artifact, "--no-open"]),
+          );
+          assert.doesNotMatch(output, /SERVER_ERROR/);
+          assert.equal(reconciles, 1, "replacement repeated the same owner's network reconciliation");
+          assert.deepEqual(await stateSessions(dir), [artifact]);
+        } finally {
+          for (const owner of owners) owner.closeAllConnections();
+          await Promise.all(owners.map(closeRaw));
+          await shutdownAt("127.0.0.1", port);
+        }
+      });
+    });
+  }
+});
 
 test("another installation's server on loopback is never used or stopped", { timeout: 20_000 }, async () => {
   await withTempDir(async (dir) => {
@@ -744,6 +914,16 @@ test(
         const served = await health(otherHost, port);
         assert.deepEqual([...served.hosts].sort(), ["127.0.0.1", otherHost].sort());
         assert.deepEqual(await stateSessions(dir), [artifact]);
+        // The CLI started two replacements, and the one that lost the port refuses to start once it
+        // finds the winner, which can be after the open returned. Stopped before that, the winner
+        // would free the port for it, and it would serve from this folder after teardown.
+        assert.ok(
+          await waitFor(
+            async () => /not starting/.test(await readFile(path.join(dir, "server.log"), "utf8").catch(() => "")),
+            15_000,
+          ),
+          "the replacement that lost the port never refused to start",
+        );
       } finally {
         await first.close().catch(() => {});
         await (await racer.catch(() => null))?.close().catch(() => {});
@@ -859,6 +1039,51 @@ test(
         await oldPinned.close().catch(() => {});
         await shutdownAt("127.0.0.1", port);
         await shutdownAt(otherHost, port);
+      }
+    });
+  },
+);
+
+test(
+  "the CLI's requests survive a socket that refuses its type of service, as macOS refuses one a closing server reset",
+  { timeout: 15_000 },
+  async (t) => {
+    if (typeof Socket.prototype.setTypeOfService !== "function") {
+      t.skip("this Node has no setTypeOfService, so its fetch never sets one");
+      return;
+    }
+    // A server that is shutting down resets the connections it holds, and macOS fails
+    // setsockopt(IP_TOS) with EINVAL on a socket its peer already reset. Node 24.21's fetch sets
+    // IP_TOS on every new socket and throws that error from the socket's connect listener, where no
+    // caller can catch it. Here every socket fails that way.
+    t.mock.method(Socket.prototype, "setTypeOfService", () => {
+      throw Object.assign(new Error("setTypeOfService EINVAL"), {
+        errno: -22,
+        code: "EINVAL",
+        syscall: "setTypeOfService",
+      });
+    });
+    await withTempDir(async (dir) => {
+      const artifact = await writeArtifact(dir);
+      const server = await serve({
+        port: await freePort(),
+        stateFile: path.join(dir, "state.json"),
+        version: VERSION,
+        env: {},
+        detectTailscale: null,
+        hosts: ["127.0.0.1"],
+        log: () => {},
+        idleTimeoutMs: null,
+      });
+      try {
+        await withEnv(cliEnv(dir, server.port, undefined), async () => {
+          assert.doesNotMatch(await captureCli(["open", artifact, "--no-open"]), /SERVER_ERROR/);
+          assert.doesNotMatch(await captureCli(["poll", artifact, "--timeout-ms", "50"]), /SERVER_ERROR/);
+          assert.match(await captureCli(["stop"]), /status: stopped/);
+        });
+        assert.equal(await isResolved(server.done), true, "stop left the server running");
+      } finally {
+        await server.close().catch(() => {});
       }
     });
   },
@@ -1210,5 +1435,85 @@ os.networkInterfaces = () => ({ ...networkInterfaces(), blackhole: [{ address: "
     assert.match(stdout, /not-running/);
     // Before the fix the aborted probe's TCP connect kept the process alive until the OS gave up.
     assert.ok(elapsedMs < 5000, `the CLI took ${elapsedMs}ms to exit`);
+  });
+});
+
+test("probes abandoned for an owned loopback server do not keep the CLI alive", { timeout: 30_000 }, async (t) => {
+  if (!(await ipv6LoopbackAvailable())) {
+    t.skip("host needs IPv6 loopback");
+    return;
+  }
+  await withTempDir(async (dir) => {
+    const artifact = await writeArtifact(dir);
+    const port = await freePort();
+    const owner = await serve({
+      port,
+      stateFile: path.join(dir, "state.json"),
+      version: VERSION,
+      env: {},
+      detectTailscale: null,
+      hosts: ["127.0.0.1"],
+      log: () => {},
+      idleTimeoutMs: null,
+    });
+    // One address that never connects and one that connects and never answers: discovery returns at
+    // loopback while both probes are still open, and only destroying them lets the process exit.
+    let closedProbes = 0;
+    const hanging = createServer((socket) => {
+      socket.on("close", () => (closedProbes += 1));
+      socket.on("error", () => {});
+      socket.resume();
+    });
+    await new Promise((resolve, reject) => {
+      hanging.once("error", reject);
+      hanging.listen({ host: "::1", port }, () => resolve(undefined));
+    });
+    const preload = path.join(dir, "hanging-interfaces.mjs");
+    await writeFile(
+      preload,
+      `import os from "node:os";
+const networkInterfaces = os.networkInterfaces;
+os.networkInterfaces = () => ({
+  ...networkInterfaces(),
+  hanging: [
+    { address: "${UNBINDABLE_HOST}", family: "IPv4", internal: false },
+    { address: "::1", family: "IPv6", internal: false },
+  ],
+});
+`,
+    );
+    try {
+      const started = Date.now();
+      const child = spawn(
+        process.execPath,
+        [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), "open", artifact, "--no-open"],
+        {
+          env: {
+            ...process.env,
+            NODE_OPTIONS: `--import=${pathToFileURL(preload).href}`,
+            LAVISH_AXI_STATE_DIR: dir,
+            LAVISH_AXI_PORT: String(port),
+            LAVISH_AXI_TELEMETRY: "0",
+            LAVISH_AXI_NO_OPEN: "1",
+            LAVISH_AXI_HOST: "127.0.0.1",
+          },
+          windowsHide: true,
+          timeout: 5000,
+          stdio: ["ignore", "pipe", "pipe"],
+        },
+      );
+      let stdout = "";
+      child.stdout.on("data", (chunk) => (stdout += chunk));
+      const [code] = await once(child, "exit");
+      const elapsedMs = Date.now() - started;
+      assert.equal(code, 0, stdout);
+      assert.match(stdout, new RegExp(`http://127\\.0\\.0\\.1:${port}/session/`));
+      assert.ok(elapsedMs < 5000, `the CLI took ${elapsedMs}ms to exit`);
+      assert.ok(await waitFor(() => closedProbes > 0), "the probe that never got an answer was left open");
+      assert.equal(await isResolved(owner.done), false, "the owned server was replaced");
+    } finally {
+      await closeRaw(hanging);
+      await owner.close();
+    }
   });
 });

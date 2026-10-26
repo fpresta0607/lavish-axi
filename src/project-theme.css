@@ -1,0 +1,154 @@
+/* How the frame wears a project's saved theme (src/project-theme.js). The server marks the page
+   `data-project-theme="light|dark"` and declares the theme's --theme-* properties in its head; this
+   layer, the last in the stylesheet, points the board's tokens at them and re-colours every rule
+   above that writes a colour out. A page with no saved theme matches nothing here and keeps the
+   board's SIQ look exactly. test/project-theme-css.test.js fails when a rule above writes out a
+   colour the frame uses and this layer does not cover it. */
+html[data-project-theme] {
+  --body-bg: var(--theme-page);
+  --hero-surface: var(--theme-page);
+  --soot: var(--theme-page);
+  --hide: var(--theme-surface);
+  --glass-bg: var(--theme-surface);
+  --glass-bg-hover: var(--theme-raised);
+  --ghost-bg: var(--theme-raised);
+  --field-bg: var(--theme-raised);
+  --tip-surface: var(--theme-raised);
+  --border: var(--theme-border);
+  --edge: var(--theme-border);
+  --tip-edge: var(--theme-border);
+  --glass-border: var(--theme-border);
+  --glass-border-hover: color-mix(in srgb, var(--theme-accent) 60%, var(--theme-border));
+  --bone: var(--theme-text);
+  --muted: var(--theme-muted);
+  --bone-dim: var(--theme-muted);
+  --mint: var(--theme-accent-ink);
+  --lantern: var(--theme-accent-ink);
+  --accent-green: var(--theme-accent);
+  --accent-green-deep: var(--theme-accent);
+  --accent-blue: var(--theme-accent);
+  --lantern-fill: var(--theme-accent);
+  --lantern-hover: color-mix(in srgb, var(--theme-accent) 88%, var(--theme-text));
+  --lantern-light: color-mix(in srgb, var(--theme-accent) 70%, var(--theme-page));
+  --lantern-shade: color-mix(in srgb, var(--theme-accent) 70%, var(--theme-text));
+  --recommend-fill: var(--theme-accent);
+  --recommend-ink: var(--theme-accent-text);
+  --brand-gradient: linear-gradient(105deg, var(--theme-text), var(--theme-accent-ink));
+  --electric-ring: linear-gradient(105deg, var(--theme-accent), var(--theme-accent));
+  --electric-glow: 0 0 0 transparent;
+  --focus-ring: 3px solid var(--theme-accent);
+  --glass-shadow: 0 8px 28px color-mix(in srgb, var(--theme-text) 12%, transparent);
+  --glass-shadow-hover: 0 12px 34px color-mix(in srgb, var(--theme-text) 16%, transparent);
+  --selected-glow: 0 0 0 1px var(--theme-accent), var(--glass-shadow-hover);
+  --scrim: color-mix(in srgb, var(--theme-page) 75%, transparent);
+  --radius: var(--theme-radius);
+  --font-body: var(--theme-font-body);
+  --font-display: var(--theme-font-display);
+  --font-mono: var(--theme-font-mono);
+  --theme-hover: color-mix(in srgb, var(--theme-text) 7%, transparent);
+  color: var(--theme-text);
+  background: var(--theme-page);
+}
+/* Status colours keep their meaning on a light page, in tones that read on it. */
+html[data-project-theme="light"] {
+  --amber: #8a5a00;
+  --red: #b42318;
+  --blue: #175cd3;
+  --purple: #6941c6;
+  --amber-edge: #e2b057;
+  --amber-fill: #fff4dc;
+  --amber-ink: #7a4a00;
+  --danger-ink: #b42318;
+  --danger-edge: #d92d20;
+}
+
+/* Text the board writes out in its light ink. */
+html[data-project-theme] .tip,
+html[data-project-theme] .brand,
+html[data-project-theme] .panel-pill button:hover,
+html[data-project-theme] .panel-pill button[aria-pressed="true"],
+html[data-project-theme] .icon-button.raised,
+html[data-project-theme] .pill-link,
+html[data-project-theme] .count-pill,
+html[data-project-theme] .update-banner,
+html[data-project-theme] .share-copy,
+html[data-project-theme] .share-note,
+html[data-project-theme] .bubble.note .note-draft,
+html[data-project-theme] .anchor-excerpt.text,
+html[data-project-theme] .queued-edit,
+html[data-project-theme] .queued-remove,
+html[data-project-theme] .composer-anchor-clear,
+html[data-project-theme] .bubble-attachment-more,
+html[data-project-theme] .panel-toggle {
+  color: var(--theme-text);
+}
+html[data-project-theme] ::placeholder,
+html[data-project-theme] .command-center-heading h2 span,
+html[data-project-theme] .done-card p,
+html[data-project-theme] .menu-file,
+html[data-project-theme] .warnings-selectall,
+html[data-project-theme] .warning-explanation,
+html[data-project-theme] .share-grid label,
+html[data-project-theme] .share-result label,
+html[data-project-theme] .share-status,
+html[data-project-theme] .anchor-kind {
+  color: var(--theme-muted);
+}
+html[data-project-theme] .primary {
+  color: var(--theme-accent-text);
+  box-shadow: none;
+}
+
+/* Hover washes: a little of the text colour, so they show on a light page as on a dark one. */
+html[data-project-theme] .icon-button:hover,
+html[data-project-theme] .dialogue .pixel-icon:hover::before,
+html[data-project-theme] .voice-card .pixel-icon:hover::before,
+html[data-project-theme] .menu-file:hover,
+html[data-project-theme] .menu-item:hover:not(:disabled),
+html[data-project-theme] .warning-action:hover:not(:disabled),
+html[data-project-theme] .revision-reveal:hover,
+html[data-project-theme] .button-danger:hover:not(:disabled),
+html[data-project-theme] .share-copy-btn:hover,
+html[data-project-theme] .share-cancel:hover,
+html[data-project-theme] .queued-edit:hover:not(:disabled),
+html[data-project-theme] .queued-remove:hover:not(:disabled),
+html[data-project-theme] .composer-anchor-clear:hover:not(:disabled),
+html[data-project-theme] .ended-action:hover:not(:disabled) {
+  background: var(--theme-hover);
+}
+
+/* Surfaces the board writes out. */
+html[data-project-theme] .dialogue-portrait::before,
+html[data-project-theme] .chat-md pre,
+html[data-project-theme] .chat-md code {
+  background: var(--theme-raised);
+}
+html[data-project-theme] button.dialogue-portrait:hover::before,
+html[data-project-theme] .voice-bubble:hover::before {
+  background: color-mix(in srgb, var(--theme-raised) 88%, var(--theme-text));
+}
+html[data-project-theme] ::selection,
+html[data-project-theme] .anchor-excerpt.text {
+  background: color-mix(in srgb, var(--theme-accent) 28%, transparent);
+}
+html[data-project-theme] * {
+  scrollbar-color: var(--theme-border) transparent;
+}
+
+/* Depth: shadows in the text colour, soft on a light page. */
+html[data-project-theme] .tip {
+  box-shadow: var(--glass-shadow);
+}
+html[data-project-theme] .panel-pill {
+  box-shadow: inset 0 1px 3px color-mix(in srgb, var(--theme-text) 14%, transparent);
+}
+html[data-project-theme] .frame {
+  box-shadow: inset 0 1px 8px color-mix(in srgb, var(--theme-text) 10%, transparent);
+}
+html[data-project-theme] .warnings-foot {
+  box-shadow: 0 -10px 14px -10px color-mix(in srgb, var(--theme-text) 20%, transparent);
+}
+html[data-project-theme] .dialogue {
+  filter: drop-shadow(1px 0 0 var(--glass-border-hover)) drop-shadow(-1px 0 0 var(--glass-border-hover))
+    drop-shadow(0 1px 0 var(--glass-border-hover)) drop-shadow(0 -1px 0 var(--glass-border-hover));
+}

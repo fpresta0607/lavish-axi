@@ -2,6 +2,8 @@
 
 const sessionDataElement = document.getElementById("lavish-session");
 const sessionData = JSON.parse(sessionDataElement?.textContent || "{}");
+// What the page calls itself and its server in everything it says: the brand's short name.
+const PRODUCT = typeof sessionData.product === "string" && sessionData.product ? sessionData.product : "Lavish";
 const key = String(sessionData.key || "");
 const filePath = String(sessionData.file || "");
 const queueStorageKey = "lavish-axi:queued:" + key;
@@ -19,6 +21,12 @@ const retiredDraftStorageKey = "lavish-axi:retired-drafts:" + key;
 /** @type {any[]} */
 const retiredDraftNodes = [];
 const internalQueueKeyField = "_lavishQueueKey";
+// The id the annotation card gives a note so its chip can follow that note's delivery. It is the
+// page's own business: reported back to the page, never sent to the server.
+const internalNoteIdField = "_lavishNoteId";
+const NOTE_ID_MAX = 64;
+// What each note with a chip was last told, so a re-render says nothing twice.
+const reportedNoteStatuses = new Map();
 const promptIdentityField = "prompt_id";
 const PROMPT_IDENTITY_MAX = 128;
 const PROMPT_IDENTITY_RE = /^[A-Za-z0-9_-]+$/;
@@ -109,11 +117,28 @@ const panelScroll = /** @type {HTMLDivElement} */ (document.getElementById("pane
 const queuedLog = /** @type {HTMLDivElement} */ (document.getElementById("queuedLog"));
 const chatLog = /** @type {HTMLDivElement} */ (document.getElementById("chatLog"));
 const chatComposer = /** @type {HTMLDivElement} */ (document.getElementById("chatComposer"));
+// The one message box (src/message-box.js), which the server serves ahead of this script because
+// this file is served as it is on disk and cannot import it. The annotation box on the page is
+// drawn by the same module.
+/** @type {typeof import("./message-box.js")} */
+const messageBox = /** @type {any} */ (window).lavishMessageBox;
 const chatInput = /** @type {HTMLTextAreaElement} */ (document.getElementById("chatInput"));
+const chatField = /** @type {HTMLDivElement} */ (document.getElementById("chatField"));
+const chatAnchor = /** @type {HTMLDivElement} */ (document.getElementById("chatAnchor"));
+const chatAnchorTarget = /** @type {HTMLSpanElement} */ (document.getElementById("chatAnchorTarget"));
+const chatAnchorClear = /** @type {HTMLButtonElement} */ (document.getElementById("chatAnchorClear"));
 const chatAttachments = /** @type {HTMLDivElement} */ (document.getElementById("chatAttachments"));
 const chatAttachButton = /** @type {HTMLButtonElement} */ (document.getElementById("chatAttach"));
 const chatAttachInput = /** @type {HTMLInputElement} */ (document.getElementById("chatAttachInput"));
 const chatAttachmentNotice = /** @type {HTMLSpanElement} */ (document.getElementById("chatAttachmentNotice"));
+const chatVoiceButton = /** @type {HTMLButtonElement} */ (document.getElementById("chatVoice"));
+const chatVoiceBars = /** @type {HTMLSpanElement} */ (document.getElementById("chatVoiceBars"));
+const chatVoiceNote = /** @type {HTMLDivElement} */ (document.getElementById("chatVoiceNote"));
+const chatVoiceDock = /** @type {HTMLDivElement} */ (document.getElementById("chatVoiceDock"));
+const chatVoiceRecent = /** @type {HTMLElement} */ (document.getElementById("chatVoiceRecent"));
+const chatVoiceRecentList = /** @type {HTMLUListElement} */ (document.getElementById("chatVoiceRecentList"));
+const chatVoiceRecentEmpty = /** @type {HTMLParagraphElement} */ (document.getElementById("chatVoiceRecentEmpty"));
+const chatVoiceRecentClose = /** @type {HTMLButtonElement} */ (document.getElementById("chatVoiceRecentClose"));
 const panel = /** @type {HTMLElement} */ (document.getElementById("panel"));
 const panelHead = /** @type {HTMLDivElement} */ (document.getElementById("panelHead"));
 const panelSummary = /** @type {HTMLSpanElement} */ (document.getElementById("panelSummary"));
@@ -122,6 +147,7 @@ const panelScrim = /** @type {HTMLDivElement} */ (document.getElementById("panel
 const sendButton = /** @type {HTMLButtonElement} */ (document.getElementById("send"));
 const sendAndEndButton = /** @type {HTMLButtonElement} */ (document.getElementById("sendAndEnd"));
 const annotationSwitch = /** @type {HTMLButtonElement} */ (document.getElementById("annotation"));
+const exploreSwitch = /** @type {HTMLButtonElement} */ (document.getElementById("explore"));
 const moreWrap = /** @type {HTMLDivElement} */ (document.getElementById("moreWrap"));
 const moreButton = /** @type {HTMLButtonElement} */ (document.getElementById("moreButton"));
 const moreMenu = /** @type {HTMLDivElement} */ (document.getElementById("moreMenu"));
@@ -155,7 +181,6 @@ const endButton = /** @type {HTMLButtonElement} */ (document.getElementById("end
 const copyPathButton = /** @type {HTMLButtonElement} */ (document.getElementById("copyPath"));
 const copyHint = /** @type {HTMLSpanElement} */ (document.getElementById("copyHint"));
 const copyHintText = /** @type {HTMLSpanElement} */ (document.getElementById("copyHintText"));
-const presenceBanner = /** @type {HTMLDivElement} */ (document.getElementById("presenceBanner"));
 const handoffBanner = /** @type {HTMLDivElement} */ (document.getElementById("handoffBanner"));
 const handoffTakeoverButton = /** @type {HTMLButtonElement} */ (document.getElementById("handoffTakeover"));
 const outdatedBanner = /** @type {HTMLDivElement} */ (document.getElementById("outdatedBanner"));
@@ -163,6 +188,7 @@ const outdatedText = /** @type {HTMLSpanElement} */ (document.getElementById("ou
 const outdatedReloadButton = /** @type {HTMLButtonElement} */ (document.getElementById("outdatedReload"));
 const outdatedDismissButton = /** @type {HTMLButtonElement} */ (document.getElementById("outdatedDismiss"));
 const endedOverlay = /** @type {HTMLDivElement} */ (document.getElementById("endedOverlay"));
+const endedReplies = /** @type {HTMLDivElement} */ (document.getElementById("endedReplies"));
 const layoutGateOverlay = /** @type {HTMLDivElement} */ (document.getElementById("layoutGateOverlay"));
 const layoutGateTitle = /** @type {HTMLDivElement} */ (document.getElementById("layoutGateTitle"));
 const layoutGateCopy = /** @type {HTMLParagraphElement} */ (document.getElementById("layoutGateCopy"));
@@ -192,6 +218,15 @@ const whiteboardError = /** @type {HTMLDivElement} */ (document.getElementById("
 const artifactSrc = frame.dataset.artifactSrc || frame.getAttribute?.("data-artifact-src") || frame.src || "";
 
 const queued = loadQueuedPrompts();
+// The queued note being reworded in place, by its identity, with the words typed so far.
+/** @type {{ id: string, text: string } | null} */
+let editingNote = null;
+// What is selected in the page, as the SDK last reported it: the context a note from the
+// Conversation box goes on, or null for the whole page. `pageCardOpen` says an annotation card
+// is open there, whose unfinished words a send takes along.
+/** @type {{ uid: string, selector: string, tag: string, text: string, target?: object } | null} */
+let pageSelection = null;
+let pageCardOpen = false;
 let annotation = true;
 let ended = false;
 let agentPresence = "waiting";
@@ -261,6 +296,11 @@ let terminalSubmission =
 /** @type {ReturnType<typeof setTimeout> | undefined} */
 let sendAcknowledgementTimer;
 let lastScroll = { x: 0, y: 0 };
+// Where the reader was in the previous document, restored once this one has loaded. Null when
+// there is nothing to restore, or once this document reports a position of its own: that one is
+// the reader's, and restoring over it would move a page they are already reading.
+/** @type {{ x: number, y: number } | null} */
+let pendingScrollRestore = null;
 // In-iframe review context (an open annotation card's unsent text, Lavish-owned question
 // answers). The sandbox means the chrome cannot read it back after a reload, so the SDK reports
 // it as it changes and the chrome replays it once the new document is up. It is persisted per
@@ -296,15 +336,11 @@ const TERMINAL_PREPARATION_TIMEOUT_MS = 5000;
 // If the artifact frame navigated away from the injected SDK (or otherwise stopped
 // answering), deliver those words without a snapshot instead of waiting forever.
 const SNAPSHOT_REQUEST_TIMEOUT_MS = 5000;
-const SEND_STALLED_COPY =
-  "Still trying to send. Your feedback is saved in this tab. Keep this tab open while Lavish catches up, and check that the server is running.";
-const SEND_FAILED_COPY =
-  "Could not send. Your feedback is still queued in this tab. Check that Lavish is running, then click Send to Agent to retry.";
-const TERMINAL_SEND_FAILED_COPY =
-  "Could not send. Your terminal feedback is still queued in this tab. Check that Lavish is running, then click Send & End to retry the same batch.";
-const HEALTH_NO_ANSWER_TITLE = "Lavish did not answer.";
-const HEALTH_NO_ANSWER_COPY =
-  "Lavish did not answer the check, so this page cannot tell whether it is running. Try again in a moment.";
+const SEND_STALLED_COPY = `Still trying to send. Your feedback is saved in this tab. Keep this tab open while ${PRODUCT} catches up, and check that the server is running.`;
+const SEND_FAILED_COPY = `Could not send. Your feedback is still queued in this tab. Check that ${PRODUCT} is running, then click Send to Agent to retry.`;
+const TERMINAL_SEND_FAILED_COPY = `Could not send. Your terminal feedback is still queued in this tab. Check that ${PRODUCT} is running, then click Send & End to retry the same batch.`;
+const HEALTH_NO_ANSWER_TITLE = `${PRODUCT} did not answer.`;
+const HEALTH_NO_ANSWER_COPY = `${PRODUCT} did not answer the check, so this page cannot tell whether it is running. Try again in a moment.`;
 let artifactLoadToken = "";
 let artifactLoadRevision = Number(sessionData.initialArtifactRevision) || 0;
 let artifactLoadRequestSequence = Number(sessionData.initialArtifactLoadSequence) || 0;
@@ -484,8 +520,38 @@ function persistTerminalReservation(reserved) {
   }
 }
 
-const REMOVE_ICON_SVG =
-  '<svg width="10" height="10" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg>';
+// A list rebuilt while the keyboard is on one of its controls puts the keyboard back on the control
+// that replaced it, the one with the same data-focus-key. Without this the browser drops focus onto
+// the page body, where Escape and Tab start over. The SDK carries the same helper for the
+// annotation card (artifact-sdk.js), which is why the list's own root says what has focus.
+function rebuildKeepingFocus(container, rebuild) {
+  const focused = /** @type {HTMLElement | null} */ (
+    /** @type {Document | ShadowRoot} */ (container.getRootNode()).activeElement
+  );
+  const focusKey = focused && container.contains(focused) ? focused.dataset.focusKey : undefined;
+  rebuild();
+  if (!focusKey) return;
+  for (const control of container.querySelectorAll("[data-focus-key]")) {
+    if (/** @type {HTMLElement} */ (control).dataset.focusKey !== focusKey) continue;
+    /** @type {HTMLElement} */ (control).focus();
+    return;
+  }
+}
+
+// The board's line icons (code-goblins frontend/src/Icon.tsx), drawn by its `.icon` rule.
+function boardIconSvg(path) {
+  return '<svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="' + path + '"/></svg>';
+}
+const REMOVE_ICON_SVG = boardIconSvg("M6 6l12 12M18 6 6 18");
+const EDIT_ICON_SVG = boardIconSvg("m4 16-1 5 5-1L20 8l-4-4ZM14 6l4 4");
+// A note's delivery reads as the board's comment chip does: one check while it is on its way,
+// two once the transcript carries it.
+const SENDING_MARK_HTML =
+  '<span class="delivery" role="img" aria-label="Sending">' + boardIconSvg("M5 12.5 9.5 17 19 7.5") + "</span>";
+const DELIVERED_MARK_HTML =
+  '<span class="delivery succeeded" role="img" aria-label="Delivered">' +
+  boardIconSvg("M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5") +
+  "</span>";
 const ANCHOR_EXCERPT_MAX = 120;
 const ANCHOR_SELECTOR_MAX = 512;
 const ANCHOR_LABEL_MAX = 40;
@@ -505,7 +571,8 @@ function boundAnchorText(value, max) {
 // two against the same fixtures. A bubble must not change its anchor when it settles.
 function promptAnchor(prompt) {
   const tag = String(prompt?.tag || "");
-  if (tag === "message") return null;
+  // A note written with nothing selected in the page is about the whole page.
+  if (tag === "message") return { kind: "page", label: "whole page" };
   const target = prompt?.target && typeof prompt.target === "object" ? prompt.target : null;
   const selector = boundAnchorText(prompt?.selector, ANCHOR_SELECTOR_MAX);
   const withSelector = (anchor) => (selector ? { ...anchor, selector } : anchor);
@@ -586,21 +653,55 @@ function userBubbleTextHtml(entry, text) {
   return displayText ? '<div class="bubble-text">' + escapeHtml(displayText) + "</div>" : "";
 }
 
+// The notes he wrote can be reworded before they go. A choice is the option as the page declared
+// it, and a layout batch or whiteboard note is generated, so those are only removed.
+function isEditableNote(prompt) {
+  return !["choice", "layout-warnings", "whiteboard"].includes(String(prompt?.tag || ""));
+}
+
 // A queued note is the user bubble in its not-yet-sent state: dashed, labelled Queued (Sending
-// while its batch is in flight), and removable until then. It settles in place as a sent bubble
-// once the server's transcript carries it, so nothing moves between regions.
+// while its batch is in flight), and editable and removable until then. It settles in place as a
+// sent bubble once the server's transcript carries it, so nothing moves between regions.
 function queuedBubbleHtml(prompt, index) {
   const sending = isPromptSending(prompt);
-  return (
-    '<div class="bubble user queued"><small>' +
-    (sending ? "Sending\u2026" : "Queued") +
-    ' <button class="queued-remove" type="button" aria-label="Remove queued prompt" data-index="' +
+  const id = escapeHtml(promptIdentity(prompt));
+  const editing = !sending && editingNote !== null && editingNote.id === promptIdentity(prompt);
+  const control = (className, label, focusKey, content) =>
+    '<button class="' +
+    className +
+    '" type="button" aria-label="' +
+    label +
+    '" data-index="' +
     index +
+    '" data-focus-key="' +
+    focusKey +
+    ":" +
+    id +
     '">' +
-    REMOVE_ICON_SVG +
-    "</button></small>" +
+    content +
+    "</button>";
+  return (
+    '<div class="bubble user queued' +
+    (editing ? " editing" : "") +
+    '"><small>' +
+    (sending ? SENDING_MARK_HTML + "Sending\u2026" : "Queued") +
+    (isEditableNote(prompt) && !editing ? " " + control("queued-edit", "Edit note", "edit", EDIT_ICON_SVG) : "") +
+    " " +
+    control("queued-remove", "Remove queued prompt", "remove", REMOVE_ICON_SVG) +
+    "</small>" +
     anchorHtml(promptAnchor(prompt)) +
-    userBubbleTextHtml(prompt, prompt.prompt) +
+    (editing
+      ? '<textarea class="queued-edit-input" rows="3" aria-label="Edit note" data-index="' +
+        index +
+        '" data-focus-key="editing:' +
+        id +
+        '">' +
+        escapeHtml(editingNote?.text || "") +
+        '</textarea><div class="queued-edit-actions">' +
+        control("queued-edit-cancel", "Keep the note as it was", "cancel", "Cancel") +
+        control("queued-edit-save primary", "Save the note", "save", "Save") +
+        "</div>"
+      : userBubbleTextHtml(prompt, prompt.prompt)) +
     bubbleAttachmentsHtml(prompt) +
     "</div>"
   );
@@ -623,8 +724,36 @@ function isPromptSending(prompt) {
   );
 }
 
+function promptNoteId(prompt) {
+  const noteId = prompt ? prompt[internalNoteIdField] : "";
+  return typeof noteId === "string" && noteId.length <= NOTE_ID_MAX ? noteId : "";
+}
+
+// Tells the page what became of a note it put a chip up for: queued, sending, delivered or
+// removed. The last two are the last word on a note.
+function reportNoteStatus(prompt, status) {
+  const noteId = promptNoteId(prompt);
+  if (!noteId || reportedNoteStatuses.get(noteId) === status) return;
+  if (status === "delivered" || status === "removed") reportedNoteStatuses.delete(noteId);
+  else reportedNoteStatuses.set(noteId, status);
+  postToFrame({ type: "lavish:noteStatus", noteId, status });
+}
+
 function render() {
-  queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
+  // An edit whose note was sent or removed has nothing left to save.
+  if (editingNote && !queued.some((prompt) => promptIdentity(prompt) === editingNote?.id && !isPromptSending(prompt))) {
+    editingNote = null;
+  }
+  // The list is rebuilt from markup, so an open editor's caret is put back where it was.
+  const openEditor = /** @type {HTMLTextAreaElement | undefined} */ (
+    queuedLog.querySelectorAll(".queued-edit-input")[0]
+  );
+  const caret =
+    openEditor && document.activeElement === openEditor ? [openEditor.selectionStart, openEditor.selectionEnd] : null;
+  rebuildKeepingFocus(queuedLog, () => {
+    queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
+  });
+  for (const prompt of queued) reportNoteStatus(prompt, isPromptSending(prompt) ? "sending" : "queued");
 
   for (const button of queuedLog.querySelectorAll(".queued-remove")) {
     const removeButton = /** @type {HTMLButtonElement} */ (button);
@@ -632,9 +761,87 @@ function render() {
     removeButton.disabled = terminalSubmission !== null || isPromptSending(prompt);
     removeButton.addEventListener("click", (event) => removeQueuedPrompt(Number(removeButton.dataset.index), event));
   }
+  for (const button of queuedLog.querySelectorAll(".queued-edit")) {
+    const editButton = /** @type {HTMLButtonElement} */ (button);
+    const prompt = queued[Number(editButton.dataset.index)];
+    editButton.disabled = terminalSubmission !== null || isPromptSending(prompt);
+    editButton.addEventListener("click", (event) => startEditingNote(Number(editButton.dataset.index), event));
+  }
+  const editor = /** @type {HTMLTextAreaElement | undefined} */ (queuedLog.querySelectorAll(".queued-edit-input")[0]);
+  if (editor && editingNote) {
+    editor.value = editingNote.text;
+    if (caret) editor.setSelectionRange(caret[0], caret[1]);
+    editor.addEventListener("input", () => {
+      if (editingNote) editingNote.text = editor.value;
+      syncEditSave();
+    });
+    editor.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
+        event.preventDefault();
+        saveEditedNote();
+      } else if (event.key === "Escape" && !event.isComposing) {
+        // Escape belongs to the edit here, not to the menus and sheet the page-wide handler closes.
+        event.preventDefault();
+        event.stopPropagation();
+        stopEditingNote();
+      }
+    });
+    for (const button of queuedLog.querySelectorAll(".queued-edit-cancel")) {
+      /** @type {HTMLButtonElement} */ (button).onclick = stopEditingNote;
+    }
+    for (const button of queuedLog.querySelectorAll(".queued-edit-save")) {
+      /** @type {HTMLButtonElement} */ (button).onclick = saveEditedNote;
+    }
+    syncEditSave();
+  }
   updateSendState();
   scrollPanelToBottom();
   renderSheetSummary();
+}
+
+function editedPrompt() {
+  return editingNote ? queued.find((prompt) => promptIdentity(prompt) === editingNote?.id) : undefined;
+}
+
+// A note with neither words nor images is not saved: it is removed with its own control.
+function syncEditSave() {
+  const prompt = editedPrompt();
+  const canSave = Boolean(editingNote?.text.trim() || (prompt && attachmentCount(prompt)));
+  for (const button of queuedLog.querySelectorAll(".queued-edit-save")) {
+    /** @type {HTMLButtonElement} */ (button).disabled = !canSave;
+  }
+}
+
+function startEditingNote(index, event) {
+  if (event) event.stopPropagation();
+  const prompt = queued[index];
+  if (!prompt || terminalSubmission || isPromptSending(prompt) || !isEditableNote(prompt)) return;
+  // One note is edited at a time; the one already open keeps its words.
+  settleOpenEdit();
+  editingNote = { id: promptIdentity(prompt), text: String(prompt.prompt || "") };
+  render();
+  const editor = /** @type {HTMLTextAreaElement | undefined} */ (queuedLog.querySelectorAll(".queued-edit-input")[0]);
+  if (!editor) return;
+  editor.focus();
+  editor.setSelectionRange(editor.value.length, editor.value.length);
+}
+
+function stopEditingNote() {
+  editingNote = null;
+  render();
+}
+
+function saveEditedNote() {
+  const prompt = editedPrompt();
+  const text = editingNote ? editingNote.text.trim() : "";
+  if (!prompt || (!text && !attachmentCount(prompt))) return;
+  prompt.prompt = text;
+  editingNote = null;
+  persistQueuedPrompts();
+  // The note's chip in the page says what the note says now.
+  const noteId = promptNoteId(prompt);
+  if (noteId) postToFrame({ type: "lavish:noteText", noteId, text });
+  render();
 }
 
 function updateSendState() {
@@ -646,8 +853,11 @@ function updateSendState() {
   sendButton.disabled = ended || terminalReserved;
   sendAndEndButton.disabled = ended || Boolean(terminalSubmission?.inFlight);
   annotationSwitch.disabled = ended || terminalReserved;
+  exploreSwitch.disabled = ended || terminalReserved;
   chatInput.disabled = ended || terminalReserved;
   chatAttachButton.disabled = ended || terminalReserved;
+  if (chatInput.disabled) voiceDictation.dispose();
+  renderVoice();
   endButton.disabled = ended || terminalReserved;
   if (warningsQueueButton) updateWarningSelectionState();
 }
@@ -719,6 +929,9 @@ function replaceExpiredThumbnail(event) {
 chatLog.addEventListener("error", replaceExpiredThumbnail, true);
 
 const DEFAULT_SEND_HINT = "Write a message or annotate an element first.";
+const APPROVED_AS_SHOWN = "Approved as shown.";
+// What a note written with nothing selected in the page says it is about.
+const WHOLE_PAGE = "Whole page";
 
 function showSendHint(message = DEFAULT_SEND_HINT, holdMs = 2600, focusInput = true) {
   sendHint.textContent = message;
@@ -831,33 +1044,57 @@ async function copyText(text) {
 // user entry is always escaped text, with its anchor line and thumbnails when it carries them.
 function chatBubbleHtml(entry) {
   if (entry.role === "agent") {
+    // The agent speaks in the board's dialogue box: its name on the tab, its portrait, its words.
     return (
-      "<small>Agent</small>" +
+      '<span class="dialogue-tab">Agent</span><div class="dialogue-box"><span class="dialogue-portrait"><span class="goblin-avatar"></span></span>' +
       (typeof entry.html === "string" && entry.html
-        ? '<div class="chat-md">' + entry.html + "</div>"
-        : '<div class="bubble-text">' + escapeHtml(entry.text) + "</div>")
+        ? '<div class="dialogue-text chat-md">' + entry.html + "</div>"
+        : '<div class="dialogue-text bubble-text">' + escapeHtml(entry.text) + "</div>") +
+      "</div>"
     );
   }
   return (
-    "<small>You</small>" +
+    "<small>" +
+    DELIVERED_MARK_HTML +
+    "You</small>" +
     anchorHtml(entry.anchor) +
     userBubbleTextHtml(entry, entry.text) +
     bubbleAttachmentsHtml(entry)
   );
 }
 
-function addChat(entry, shouldScroll = true) {
+function chatBubble(entry) {
   if (!entry || typeof entry !== "object") return;
   const role = entry.role === "agent" ? "agent" : "user";
   const text = String(entry.text || "");
   if (!text && !(role === "agent" ? entry.html : attachmentCount(entry) || entry.anchor)) return;
 
   const el = document.createElement("div");
-  el.className = "bubble " + role;
+  el.className = role === "agent" ? "bubble agent dialogue" : "bubble user";
   el.innerHTML = chatBubbleHtml({ ...entry, role, text });
+  return el;
+}
+
+function addChat(entry, shouldScroll = true) {
+  const el = chatBubble(entry);
+  if (!el) return;
   chatLog.appendChild(el);
   if (shouldScroll) scrollElementIntoView(el);
   return el;
+}
+
+// The ended overlay covers the conversation, so its card carries what the agent said that the
+// reader has not answered: every reply after their last message, or the last reply when they
+// spoke last. A goblin that answered and then retired otherwise left its answer unreadable.
+function renderEndedReplies() {
+  if (!ended) return;
+  const lastUserIndex = displayedChat.findLastIndex((entry) => entry?.role !== "agent");
+  const unanswered = displayedChat.slice(lastUserIndex + 1);
+  const lastReply = displayedChat.findLast((entry) => entry?.role === "agent");
+  const replies = unanswered.length ? unanswered : lastReply ? [lastReply] : [];
+  const bubbles = replies.map(chatBubble).filter(Boolean);
+  endedReplies.replaceChildren(...bubbles);
+  endedReplies.hidden = bubbles.length === 0;
 }
 
 function chatEntryDisplayKey(entry) {
@@ -957,6 +1194,7 @@ function settleQueuedFromTranscript(chat, shouldRender = true) {
     if (!promptAcknowledgedInChat(prompt, chat)) continue;
     settledPrompts.add(prompt);
     deliveredPrompts.add(prompt);
+    reportNoteStatus(prompt, "delivered");
   }
   if (!settledPrompts.size) return false;
   for (let i = queued.length - 1; i >= 0; i -= 1) {
@@ -990,6 +1228,7 @@ function syncChat(chat, revision) {
   for (const note of retiredDraftNodes) chatLog.appendChild(note);
   const anchor = retiredDraftNodes[retiredDraftNodes.length - 1] || workingBubble || lastChatBubble;
   if (anchor) scrollElementIntoView(anchor);
+  renderEndedReplies();
   return true;
 }
 
@@ -997,7 +1236,6 @@ function setAgentPresence(state) {
   agentPresence = state === "listening" || state === "external" || state === "working" ? state : "waiting";
   updateSendState();
   renderSheetSummary();
-  if (presenceBanner) presenceBanner.hidden = ended || agentPresence !== "waiting";
 
   // A supervisor-owned process-only listener is busy on the agent's behalf. It must not make the
   // composer look like an idle captain turn while the owning agent is offline.
@@ -1009,10 +1247,17 @@ function setAgentPresence(state) {
 
   if (!workingBubble) {
     workingBubble = document.createElement("div");
-    workingBubble.className = "bubble agent agent-working";
-    workingBubble.innerHTML = '<span class="spinner"></span><span>Working...</span>';
+    workingBubble.className = "bubble agent dialogue agent-working";
     chatLog.appendChild(workingBubble);
   }
+  const html = chatBubbleHtml({
+    role: "agent",
+    html:
+      agentPresence === "working"
+        ? '<small class="agent-received">Received</small><p role="status">Agent is working</p><div class="agent-progress" role="progressbar" aria-label="Agent is working"></div>'
+        : "<p>External listener active</p>",
+  });
+  if (workingBubble.innerHTML !== html) workingBubble.innerHTML = html;
   scrollElementIntoView(workingBubble);
 }
 
@@ -1025,12 +1270,12 @@ function setHandoffSuperseded(visible) {
 // after a deliberate stop is being told something false. An unnamed reason (SIGTERM, or any
 // caller that names none) claims neither.
 function chromeOutdatedCopy(reason) {
-  if (reason === "upgrade") return "Lavish was updated. This page is running the previous version.";
+  if (reason === "upgrade") return `${PRODUCT} was updated. This page is running the previous version.`;
   if (reason === "local-build") {
-    return "Lavish was restarted to pick up a local build. This page is running the copy the previous server sent.";
+    return `${PRODUCT} was restarted to pick up a local build. This page is running the copy the previous server sent.`;
   }
-  if (reason === "stop") return "Lavish was stopped. Reload after you start it again.";
-  return "The Lavish server this page was connected to is no longer running. Reloading will work once it is running again.";
+  if (reason === "stop") return `${PRODUCT} was stopped. Reload after you start it again.`;
+  return `The ${PRODUCT} server this page was connected to is no longer running. Reloading will work once it is running again.`;
 }
 
 // Say so where the user can dismiss it, and never reload on their behalf - a forced reload
@@ -1048,7 +1293,8 @@ function setReviewState(state) {
   lastReviewState = state;
   // The artifact reported a card, so its anchor exists: whatever miss was recorded is answered.
   if (state?.card) unrestorableDraftMiss = null;
-  if (!state || (!state.card && !(Array.isArray(state.fields) && state.fields.length))) {
+  const holds = (list) => Array.isArray(list) && list.length > 0;
+  if (!state || (!state.card && !holds(state.fields) && !holds(state.choices))) {
     try {
       sessionStorage.removeItem(reviewStateStorageKey);
     } catch {
@@ -1108,7 +1354,7 @@ function renderRetiredDraft(text, stored = true) {
   const el = document.createElement("div");
   el.className = "bubble note";
   el.innerHTML =
-    "<small>Unsent annotation</small><div>The element this note was attached to is no longer in the artifact, so Lavish could not reopen the card. Your text is kept here:</div>" +
+    `<small>Unsent annotation</small><div>The element this note was attached to is no longer in the artifact, so ${escapeHtml(PRODUCT)} could not reopen the card. Your text is kept here:</div>` +
     '<div class="note-draft">' +
     escapeHtml(text) +
     "</div>" +
@@ -1209,7 +1455,8 @@ function applySheetState() {
 }
 
 // What the closed dock says. One line, most actionable state first: work the user has queued,
-// then a reply they have not seen, then whether the agent is there to receive a send.
+// then a reply they have not seen, then what the agent is doing. No poll yet says nothing: a send
+// waits for the agent's next poll, so it is not news.
 function sheetSummary() {
   if (ended) return { text: "Session ended", accent: false, unread: false };
   if (queued.length > 0) {
@@ -1219,7 +1466,7 @@ function sheetSummary() {
   if (agentPresence === "working") return { text: "Agent is working…", accent: false, unread: false };
   if (agentPresence === "external") return { text: "External listener active", accent: false, unread: false };
   if (agentPresence === "listening") return { text: "Agent listening", accent: false, unread: false };
-  return { text: "Agent not listening", accent: false, unread: false };
+  return { text: "", accent: false, unread: false };
 }
 
 function renderSheetSummary() {
@@ -1341,6 +1588,7 @@ function scrollElementIntoView(el) {
 function removeQueuedPrompt(index, event) {
   if (event) event.stopPropagation();
   if (terminalSubmission || isPromptSending(queued[index])) return;
+  reportNoteStatus(queued[index], "removed");
   queued.splice(index, 1);
   persistQueuedPrompts();
   if (!queued.length) {
@@ -1352,6 +1600,51 @@ function removeQueuedPrompt(index, event) {
 
 function promptQueueKey(prompt) {
   return prompt && typeof prompt[internalQueueKeyField] === "string" ? prompt[internalQueueKeyField].trim() : "";
+}
+
+// A choice takes its answer back out of the notes when the answer is cleared. Only a choice's own
+// answer can be taken back this way: the page is untrusted, and every other note is his to remove.
+// The page already knows, so it is not told the note was removed.
+function dropQueuedPrompt(queueKey) {
+  if (!queueKey.startsWith("choice:") || terminalSubmission) return;
+  const index = queued.findIndex((prompt) => promptQueueKey(prompt) === queueKey && prompt.tag === "choice");
+  if (index === -1 || isPromptSending(queued[index])) return;
+  reportedNoteStatuses.delete(promptNoteId(queued[index]));
+  queued.splice(index, 1);
+  persistQueuedPrompts();
+  if (!queued.length) {
+    clearSendAcknowledgementWarning();
+    if (sendFailureOwner?.kind !== "preparation") clearPersistentSendFailure();
+  }
+  render();
+}
+
+// The page says what is selected in it. Only the fields a note carries are kept: it comes from the
+// sandboxed artifact, and the server checks them again like any note's.
+function setPageSelection(selection, cardOpen) {
+  pageSelection =
+    selection && typeof selection === "object"
+      ? {
+          uid: String(selection.uid || ""),
+          selector: String(selection.selector || ""),
+          tag: String(selection.tag || ""),
+          text: String(selection.text || ""),
+          ...(selection.target && typeof selection.target === "object" ? { target: selection.target } : {}),
+        }
+      : null;
+  pageCardOpen = Boolean(pageSelection) && cardOpen;
+  renderComposerAnchor();
+  // An open box draws its voice bubble from the chrome's state; once it closes, it stops listening.
+  if (pageCardOpen) postPageVoice(true);
+  else if (voiceTarget === VOICE_TO_PAGE) voiceDictation.stop();
+}
+
+// The line above the message box names what a note written there goes on; with nothing selected
+// there is no line, and the box itself says the note is about the whole page.
+function renderComposerAnchor() {
+  chatAnchor.hidden = !pageSelection;
+  chatAnchorTarget.innerHTML = pageSelection ? anchorHtml(promptAnchor({ ...pageSelection, prompt: "" })) : "";
+  chatInput.placeholder = pageSelection ? "Write a note on what is selected..." : "Write a note on the whole page...";
 }
 
 function beginFeedbackPreparation() {
@@ -1398,6 +1691,7 @@ function stripInternalPromptFields(prompt) {
   if (!prompt || typeof prompt !== "object") return prompt;
   const clean = { ...prompt };
   delete clean[internalQueueKeyField];
+  delete clean[internalNoteIdField];
   return clean;
 }
 
@@ -1466,44 +1760,52 @@ function createChatAttachmentsController() {
   }
 
   function renderAttachments() {
-    chatAttachments.innerHTML = items
-      .map((item) => {
-        const status = item.status === "uploading" ? "Uploading…" : item.status === "error" ? item.error : "";
-        const preview = item.preview
-          ? '<img class="chat-attachment-thumb" src="' + escapeHtml(item.preview) + '" alt="">'
-          : "";
-        const retry =
-          item.status === "error" && item.file
-            ? '<button type="button" aria-label="Retry ' +
-              escapeHtml(item.name) +
-              '" data-chat-attachment-retry="' +
-              item.localId +
-              '">Retry</button>'
+    rebuildKeepingFocus(chatAttachments, () => {
+      chatAttachments.innerHTML = items
+        .map((item) => {
+          const status = item.status === "uploading" ? "Uploading…" : item.status === "error" ? item.error : "";
+          const preview = item.preview
+            ? '<img class="chat-attachment-thumb" src="' + escapeHtml(item.preview) + '" alt="">'
             : "";
-        const errorData = item.errorCode ? ' data-error="' + escapeHtml(item.errorCode) + '"' : "";
-        return (
-          '<div class="chat-attachment-chip chat-attachment-' +
-          item.status +
-          '"' +
-          errorData +
-          ">" +
-          preview +
-          '<span class="chat-attachment-copy"><strong>' +
-          escapeHtml(item.name) +
-          "</strong>" +
-          (status ? '<span class="chat-attachment-status" aria-live="polite">' + escapeHtml(status) + "</span>" : "") +
-          "</span>" +
-          retry +
-          '<button type="button" aria-label="Remove ' +
-          escapeHtml(item.name) +
-          '" title="Remove ' +
-          escapeHtml(item.name) +
-          '" data-chat-attachment-remove="' +
-          item.localId +
-          '">×</button></div>'
-        );
-      })
-      .join("");
+          const retry =
+            item.status === "error" && item.file
+              ? '<button type="button" aria-label="Retry ' +
+                escapeHtml(item.name) +
+                '" data-chat-attachment-retry="' +
+                item.localId +
+                '" data-focus-key="retry:' +
+                item.localId +
+                '">Retry</button>'
+              : "";
+          const errorData = item.errorCode ? ' data-error="' + escapeHtml(item.errorCode) + '"' : "";
+          return (
+            '<div class="chat-attachment-chip chat-attachment-' +
+            item.status +
+            '"' +
+            errorData +
+            ">" +
+            preview +
+            '<span class="chat-attachment-copy"><strong>' +
+            escapeHtml(item.name) +
+            "</strong>" +
+            (status
+              ? '<span class="chat-attachment-status" aria-live="polite">' + escapeHtml(status) + "</span>"
+              : "") +
+            "</span>" +
+            retry +
+            '<button type="button" aria-label="Remove ' +
+            escapeHtml(item.name) +
+            '" title="Remove ' +
+            escapeHtml(item.name) +
+            '" data-chat-attachment-remove="' +
+            item.localId +
+            '" data-focus-key="remove:' +
+            item.localId +
+            '">×</button></div>'
+          );
+        })
+        .join("");
+    });
     syncNotice();
   }
 
@@ -1653,6 +1955,519 @@ function createChatAttachmentsController() {
 
 const chatAttachmentController = createChatAttachmentsController();
 
+// Voice input: the browser's own speech recognition dictates into a message box. Holding
+// Ctrl+Shift+Space listens until one of those keys is released. What was heard lands at the caret
+// for the reviewer to read and send; it is never sent by itself. Nothing is installed and the
+// chrome makes no request of its own. The microphone is the board's voice bubble: a click opens
+// this review's recent dictations, each with Copy and Paste into this box.
+// The chrome is the one that listens, for the Conversation box and for the annotation box the page
+// draws: the page is sandboxed and has no microphone of its own, so its box asks the chrome to
+// listen while its keys are held and the chrome hands it what was heard.
+const {
+  unsupported: VOICE_UNSUPPORTED_COPY,
+  insecure: VOICE_INSECURE_COPY,
+  held: VOICE_HELD_HINT,
+} = messageBox.voiceCopy();
+// The board's voice bubble keeps each review's dictations in this browser only: the newest
+// KEPT_DICTATIONS of each of the KEPT_DICTATION_REVIEWS reviews used most recently, so reviews that
+// come and go never grow what it keeps. Its list shows LISTED_DICTATIONS of them.
+const DICTATIONS_STORAGE_KEY = "lavish-axi:dictations";
+const KEPT_DICTATIONS = 10;
+const KEPT_DICTATION_REVIEWS = 20;
+const LISTED_DICTATIONS = 5;
+// The card opens 8px above the box, as the board's rule places it, and keeps as much again clear of
+// the top of the panel.
+const VOICE_CARD_CLEARANCE = 16;
+// A voice problem stays under the composer this long.
+const VOICE_NOTE_MS = 6000;
+// While listening, the waveform takes the microphone's level this often.
+const VOICE_SAMPLE_MS = 70;
+// The box a dictation types into: the Conversation box, or the annotation box open on the page.
+const VOICE_TO_CHAT = "chat";
+const VOICE_TO_PAGE = "page";
+
+function speechRecognitionClass() {
+  const scope = /** @type {any} */ (window);
+  return scope.SpeechRecognition || scope.webkitSpeechRecognition || null;
+}
+
+// The phrases heard, as one line of plain words.
+function spokenText(phrases) {
+  return phrases.join(" ").replace(/\s+/g, " ").trim();
+}
+
+// How loud a frame of microphone samples is, from 0 for silence to 1: the root mean square of the
+// time-domain bytes around their midpoint 128, scaled so ordinary speech fills a good part of the bars.
+function voiceLevel(samples) {
+  if (!samples.length) return 0;
+  let sum = 0;
+  for (const sample of samples) {
+    const offset = (sample - 128) / 128;
+    sum += offset * offset;
+  }
+  return Math.min(1, Math.sqrt(sum / samples.length) * 4);
+}
+
+function dictationProblem(error) {
+  switch (error) {
+    case "aborted":
+      return "";
+    case "not-allowed":
+    case "service-not-allowed":
+      return "The microphone is blocked for this page. Allow it in the browser's site settings, then try again.";
+    case "audio-capture":
+      return "No microphone was found.";
+    case "network":
+      return "Speech recognition in this browser needs a network connection.";
+    case "no-speech":
+      return "Nothing was heard.";
+    default:
+      return "Voice input stopped: " + error + ".";
+  }
+}
+
+function microphoneProblem(error) {
+  const name = String(error?.name || "");
+  if (name === "NotAllowedError" || name === "SecurityError") return dictationProblem("not-allowed");
+  if (name === "NotFoundError" || name === "NotReadableError") return dictationProblem("audio-capture");
+  return "Voice input stopped: the microphone could not be opened.";
+}
+
+// One open microphone: its track, which the recognizer listens to, and how loud it is right now,
+// which the waveform shows. Nothing else reads, keeps, or sends its audio.
+async function openMicrophone() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const audio = new window.AudioContext();
+  const analyser = audio.createAnalyser();
+  analyser.fftSize = 512;
+  audio.createMediaStreamSource(stream).connect(analyser);
+  void audio.resume();
+  const samples = new Uint8Array(analyser.fftSize);
+  return {
+    track: stream.getAudioTracks()[0],
+    level() {
+      analyser.getByteTimeDomainData(samples);
+      return voiceLevel(samples);
+    },
+    close() {
+      for (const track of stream.getTracks()) track.stop();
+      void audio.close();
+    },
+  };
+}
+
+// One dictation at a time. With a microphone, the recognizer listens to the track it opens, so the
+// waveform and the words come from one capture. What was heard is reported once listening ends.
+function createDictation(events, recognition, lang, microphone) {
+  let recognizer = null;
+  let started = false;
+  let capture = null;
+  let phrases = [];
+
+  function release() {
+    capture?.close();
+    capture = null;
+  }
+
+  function begin(current, track) {
+    started = true;
+    if (!track) {
+      current.start();
+      return;
+    }
+    try {
+      current.start(track);
+    } catch (error) {
+      // A recognizer that cannot take a track opens its own microphone, so this one closes rather
+      // than capture twice, and shows no level.
+      if (error?.name !== "TypeError") throw error;
+      release();
+      current.start();
+    }
+  }
+
+  function start() {
+    if (recognizer) return;
+    const Recognition = recognition();
+    if (!Recognition) {
+      events.problem(VOICE_UNSUPPORTED_COPY + ".");
+      return;
+    }
+    const current = new Recognition();
+    current.continuous = true;
+    current.interimResults = false;
+    current.lang = lang;
+    phrases = [];
+    // Without interim results every result the browser sends is final.
+    current.onresult = (event) => {
+      for (let index = event.resultIndex; index < event.results.length; index++) {
+        phrases.push(event.results[index][0].transcript);
+      }
+    };
+    current.onerror = (event) => {
+      const note = dictationProblem(event.error);
+      if (note) events.problem(note);
+    };
+    current.onend = () => {
+      recognizer = null;
+      release();
+      events.listening(false);
+      const text = spokenText(phrases);
+      phrases = [];
+      if (text) events.heard(text);
+    };
+    recognizer = current;
+    started = false;
+    events.problem("");
+    events.listening(true);
+    if (!microphone) {
+      begin(current);
+      return;
+    }
+    microphone().then(
+      (opened) => {
+        // Stopped while the microphone opened: keep nothing open.
+        if (recognizer !== current) {
+          opened.close();
+          return;
+        }
+        capture = opened;
+        begin(current, opened.track);
+      },
+      (error) => {
+        if (recognizer !== current) return;
+        recognizer = null;
+        events.listening(false);
+        events.problem(microphoneProblem(error));
+      },
+    );
+  }
+
+  function stop() {
+    const current = recognizer;
+    if (!current) return;
+    if (started) {
+      current.stop();
+      return;
+    }
+    // Stopped before the microphone opened: nothing was heard.
+    recognizer = null;
+    events.listening(false);
+  }
+
+  // Stops listening and reports nothing heard, for a composer that can no longer take text.
+  function dispose() {
+    const current = recognizer;
+    if (!current) return;
+    recognizer = null;
+    phrases = [];
+    release();
+    if (started) {
+      current.onresult = null;
+      current.onerror = null;
+      current.onend = null;
+      current.abort();
+    }
+    events.listening(false);
+  }
+
+  return { start, stop, dispose, level: () => (capture ? capture.level() : 0) };
+}
+
+// A review whose record is broken reads as none, leaving the other reviews be.
+function keptDictations(entries) {
+  if (!Array.isArray(entries)) return [];
+  return entries
+    .filter((entry) => typeof entry?.text === "string" && entry.text && Number.isFinite(entry.at))
+    .map((entry) => ({ text: entry.text, at: entry.at }))
+    .slice(0, KEPT_DICTATIONS);
+}
+
+function readKeptDictations() {
+  try {
+    const saved = JSON.parse(localStorage.getItem(DICTATIONS_STORAGE_KEY) || "{}");
+    if (!saved || typeof saved !== "object" || Array.isArray(saved)) return {};
+    return Object.fromEntries(Object.entries(saved).map(([review, entries]) => [review, keptDictations(entries)]));
+  } catch {
+    return {};
+  }
+}
+
+// This review's dictations with this one first. The list is the one this visit shows, so a browser
+// that refuses to keep it still lists every dictation of the visit.
+function rememberDictation(text, at) {
+  const dictations = [{ text, at }, ...voiceDictations].slice(0, KEPT_DICTATIONS);
+  const reviews = Object.entries({ ...readKeptDictations(), [key]: dictations })
+    .sort(([, a], [, b]) => (b[0]?.at ?? 0) - (a[0]?.at ?? 0))
+    .slice(0, KEPT_DICTATION_REVIEWS);
+  try {
+    localStorage.setItem(DICTATIONS_STORAGE_KEY, JSON.stringify(Object.fromEntries(reviews)));
+  } catch {
+    // The list shows them for this visit only.
+  }
+  return dictations;
+}
+
+let voiceListening = false;
+let voiceTarget = VOICE_TO_CHAT;
+let voiceProblem = "";
+let voiceProblemTimer;
+let voiceFrame = 0;
+let voiceSampledAt = 0;
+// One recent level per bar, newest on the right.
+const voiceLevels = Array.from(chatVoiceBars.children, () => 0);
+let voiceDictations = readKeptDictations()[key] || [];
+// What the page's annotation box was last told, so it hears only what changed.
+let pageVoiceSent = "";
+const chatVoice = messageBox.createVoiceBubble(
+  {
+    field: chatField,
+    dock: chatVoiceDock,
+    button: chatVoiceButton,
+    bars: chatVoiceBars,
+    card: chatVoiceRecent,
+    list: chatVoiceRecentList,
+    empty: chatVoiceRecentEmpty,
+    close: chatVoiceRecentClose,
+  },
+  {
+    dictations: () => voiceDictations,
+    paste: insertDictatedText,
+    // A page served over plain http, such as an old tailnet link, has no clipboard.
+    copy: navigator.clipboard ? (text) => navigator.clipboard.writeText(text) : null,
+    // The room above the box, down from the top of the panel, which clips anything past it.
+    fit(card) {
+      card.style.maxHeight =
+        chatField.getBoundingClientRect().top - panel.getBoundingClientRect().top - VOICE_CARD_CLEARANCE + "px";
+    },
+    rebuildKeepingFocus,
+  },
+);
+const voiceDictation = createDictation(
+  {
+    heard(text) {
+      voiceDictations = rememberDictation(text, Date.now());
+      if (voiceTarget === VOICE_TO_PAGE) postToFrame({ type: "lavish:dictated", text });
+      else insertDictatedText(text);
+      chatVoice.refresh();
+      postPageVoice();
+    },
+    listening(on) {
+      voiceListening = on;
+      renderVoice();
+    },
+    problem: showVoiceProblem,
+  },
+  speechRecognitionClass,
+  navigator.language || "en-US",
+  navigator.mediaDevices?.getUserMedia ? openMicrophone : null,
+);
+
+function insertDictatedText(text) {
+  const next = messageBox.insertDictation(chatInput.value, chatInput.selectionStart, chatInput.selectionEnd, text);
+  chatInput.value = next.value;
+  chatInput.focus();
+  chatInput.setSelectionRange(next.caret, next.caret);
+  hideSendHint();
+}
+
+function showVoiceProblem(note) {
+  voiceProblem = note;
+  clearTimeout(voiceProblemTimer);
+  if (note) {
+    voiceProblemTimer = setTimeout(() => {
+      voiceProblem = "";
+      renderVoice();
+    }, VOICE_NOTE_MS);
+  }
+  renderVoice();
+}
+
+function drawVoiceLevel(now) {
+  if (now - voiceSampledAt >= VOICE_SAMPLE_MS) {
+    voiceSampledAt = now;
+    voiceLevels.shift();
+    voiceLevels.push(voiceDictation.level());
+    if (voiceTarget === VOICE_TO_PAGE) postToFrame({ type: "lavish:voiceLevels", levels: voiceLevels });
+    else chatVoice.showLevels(voiceLevels);
+  }
+  voiceFrame = window.requestAnimationFrame(drawVoiceLevel);
+}
+
+// The bubble, the composer, and the note under it are derived from the dictation's state on every
+// render; the waveform runs only while listening. Only the box being dictated into listens.
+function renderVoice() {
+  const toChat = voiceTarget === VOICE_TO_CHAT;
+  chatVoice.render({
+    supported: Boolean(speechRecognitionClass()),
+    secure: window.isSecureContext !== false,
+    listening: voiceListening && toChat,
+    disabled: chatInput.disabled,
+  });
+  chatVoiceNote.textContent = toChat ? voiceProblem || (voiceListening ? VOICE_HELD_HINT : "") : "";
+  chatVoiceNote.classList.toggle("is-problem", toChat && Boolean(voiceProblem));
+  if (voiceListening && !voiceFrame) {
+    voiceLevels.fill(0);
+    voiceFrame = window.requestAnimationFrame(drawVoiceLevel);
+  }
+  if (!voiceListening && voiceFrame) {
+    window.cancelAnimationFrame(voiceFrame);
+    voiceFrame = 0;
+  }
+  postPageVoice();
+}
+
+// The page's annotation box draws the same bubble from what the chrome tells it, while one is open:
+// whether it listens, the problem it hit, and this review's recent dictations.
+function postPageVoice(force = false) {
+  if (!pageCardOpen) return;
+  const toPage = voiceTarget === VOICE_TO_PAGE;
+  const state = {
+    supported: Boolean(speechRecognitionClass()),
+    secure: window.isSecureContext !== false,
+    listening: voiceListening && toPage,
+    disabled: chatInput.disabled,
+    problem: toPage ? voiceProblem : "",
+    canCopy: Boolean(navigator.clipboard),
+    dictations: voiceDictations.slice(0, LISTED_DICTATIONS),
+  };
+  const sent = JSON.stringify(state);
+  if (!force && sent === pageVoiceSent) return;
+  pageVoiceSent = sent;
+  postToFrame({ type: "lavish:voiceState", ...state });
+}
+
+function startVoice(target) {
+  if (chatInput.disabled || voiceListening) return;
+  voiceTarget = target;
+  if (window.isSecureContext === false) {
+    showVoiceProblem(VOICE_INSECURE_COPY + ": browsers refuse the microphone on plain http.");
+    return;
+  }
+  voiceDictation.start();
+  renderVoice();
+}
+
+function handleVoiceKey(event) {
+  const meaning = messageBox.dictationKey(event);
+  if (!meaning) return;
+  if (meaning.swallow) event.preventDefault();
+  if (meaning.action === "start") startVoice(VOICE_TO_CHAT);
+  if (meaning.action === "stop") voiceDictation.stop();
+}
+
+// The page's annotation box asks to listen while its keys are held. The page is untrusted, so the
+// chrome listens only for an open box and only on a press the reader just made, and stops once the
+// box closes.
+function handlePageDictation(action) {
+  if (action === "start" && pageCardOpen && navigator.userActivation?.isActive) startVoice(VOICE_TO_PAGE);
+  if (action === "stop" && voiceTarget === VOICE_TO_PAGE) voiceDictation.stop();
+}
+
+// Copy in the page's list goes through the chrome, which has the clipboard, and only for one of
+// this review's own dictations.
+function copyPageDictation(text) {
+  const copied =
+    navigator.clipboard && voiceDictations.some((dictation) => dictation.text === text)
+      ? navigator.clipboard.writeText(text)
+      : Promise.reject(new Error("not a dictation"));
+  copied.then(
+    () => postToFrame({ type: "lavish:dictationCopied", ok: true }),
+    () => postToFrame({ type: "lavish:dictationCopied", ok: false }),
+  );
+}
+
+// Puts what the Conversation box holds into his notes, on what is selected in the page or else on
+// the whole page. Nothing is sent: every note waits for Send to Agent or Send & End. Returns false
+// when a pending or failed image chip holds the words back, so they stay in the box with it.
+function addComposerNote() {
+  if (chatAttachmentController.hasPending() || chatAttachmentController.hasErrors()) {
+    chatAttachmentController.noteSendBlocked();
+    return false;
+  }
+  const text = chatInput.value.trim();
+  const attachments = chatAttachmentController.collectReady();
+  if (!text && !attachments.length) return true;
+  /** @type {{ uid: string, prompt: string, selector: string, tag: string, text: string, target?: object, attachments?: Array<{ id: string, name?: string }> }} */
+  const prompt = pageSelection
+    ? { ...pageSelection, prompt: text }
+    : { uid: "", prompt: text, selector: "", tag: "message", text: WHOLE_PAGE };
+  if (attachments.length) prompt.attachments = attachments;
+  assignPromptIdentity(prompt, false);
+  // A note on what is selected gets the chip a card's note gets, so the page shows it too.
+  if (pageSelection) prompt[internalNoteIdField] = "chrome-" + createPromptIdentity();
+  queued.push(prompt);
+  persistQueuedPrompts();
+  // Render the durable queued bubble before clearing the editor. If anything after this point
+  // fails, the user's words are already both stored and visibly recoverable in the tab. It
+  // becomes a sent bubble only when the server's transcript carries it (see submitQueuedOnce).
+  render();
+  chatInput.value = "";
+  chatAttachmentController.reset();
+  if (pageSelection) postToFrame({ type: "lavish:selectionNoted", noteId: promptNoteId(prompt), text });
+  return true;
+}
+
+// A send takes the open card's unfinished words with it, as a note like any other: the page adds
+// them to the notes under this request's id, then says it is done. A card that holds its note
+// back, or a page that does not answer in time (and might still add the words after an end that
+// went without them), stops the send and says so; the next send then goes without the card, so
+// no page can hold the review.
+const DRAFT_COMMIT_TIMEOUT_MS = 2000;
+const DRAFT_HELD_COPY =
+  "Finish the note on the page first: its image is still uploading or could not be attached. Nothing was sent. Send again to go without it.";
+const DRAFT_SILENT_COPY =
+  "The page did not answer, so its open note could not be added. Nothing was sent. Send again to go without it.";
+// What a page may add under a commit: the one note of its open card, never a note the chrome or a
+// page control owns.
+const CHROME_OWNED_TAGS = new Set(["choice", "layout-warnings", "message", "whiteboard"]);
+/** @type {Map<string, { preparation: FeedbackPreparation, admitted: boolean }>} */
+const draftCommits = new Map();
+let skipNextDraftCommit = false;
+
+function commitPageDraft() {
+  if (skipNextDraftCommit) {
+    skipNextDraftCommit = false;
+    return null;
+  }
+  const preparation = beginFeedbackPreparation();
+  if (!preparation) return null;
+  const commitId = "commit-" + createPromptIdentity();
+  draftCommits.set(commitId, { preparation, admitted: false });
+  const timeout = setTimeout(() => settleDraftCommit(commitId, false, DRAFT_SILENT_COPY), DRAFT_COMMIT_TIMEOUT_MS);
+  preparation.done.then(() => clearTimeout(timeout));
+  postToFrame({ type: "lavish:commitDraft", commit_id: commitId });
+  return preparation;
+}
+
+// The commit id went to the untrusted page, so it admits one card note, unkeyed, and nothing else.
+function admitCommittedPrompt(commitId, rawPrompt) {
+  const commit = draftCommits.get(commitId);
+  if (!commit || commit.admitted || !rawPrompt || CHROME_OWNED_TAGS.has(String(rawPrompt.tag || ""))) return null;
+  commit.admitted = true;
+  const prompt = { ...rawPrompt };
+  delete prompt[internalQueueKeyField];
+  return { prompt, preparation: commit.preparation };
+}
+
+function settleDraftCommit(commitId, committed, heldCopy = DRAFT_HELD_COPY) {
+  const commit = draftCommits.get(commitId);
+  if (!commit) return;
+  draftCommits.delete(commitId);
+  if (!committed) {
+    skipNextDraftCommit = true;
+    showSendHint(heldCopy, 6000, false);
+  }
+  commit.preparation.finish(committed);
+}
+
+// Puts an open edit's words on its note before a send takes the notes, or drops an emptied edit.
+function settleOpenEdit() {
+  if (!editingNote) return;
+  if (editingNote.text.trim()) saveEditedNote();
+  else stopEditingNote();
+}
+
 function sendQueued(endAfter) {
   if (ended) return;
   if (terminalSubmission) {
@@ -1660,40 +2475,19 @@ function sendQueued(endAfter) {
     return;
   }
   closeMenus();
+  // A note being reworded goes with the words it has now.
+  settleOpenEdit();
 
   // A pending or failed chip holds back only the COMPOSER message (and an
   // explicit end, which would strand the chips) - queued annotation prompts
   // still deliver, mirroring how the annotation card holds only its own card
   // open. Gating the whole pipeline here made Send and Send & End silently
   // deliver nothing while the only signal sat in the composer toolbar.
-  const chipsBlocked = chatAttachmentController.hasPending() || chatAttachmentController.hasErrors();
-  if (chipsBlocked) chatAttachmentController.noteSendBlocked();
-
-  if (!chipsBlocked) {
-    const text = chatInput.value.trim();
-    const attachments = chatAttachmentController.collectReady();
-    if (text || attachments.length) {
-      const prompt = { uid: "", prompt: text, selector: "", tag: "message", text: "Freeform message" };
-      if (attachments.length) prompt.attachments = attachments;
-      assignPromptIdentity(prompt, false);
-      queued.push(prompt);
-      persistQueuedPrompts();
-      // Render the durable queued bubble before clearing the editor. If anything after this point
-      // fails, the user's words are already both stored and visibly recoverable in the tab. It
-      // becomes a sent bubble only when the server's transcript carries it (see submitQueuedOnce).
-      render();
-      chatInput.value = "";
-      chatAttachmentController.reset();
-    }
-  }
+  const chipsBlocked = !addComposerNote();
+  const draftCommit = pageCardOpen ? commitPageDraft() : null;
   const shouldEnd = Boolean(endAfter && !chipsBlocked);
-  const preparations = shouldEnd ? [...feedbackPreparations] : [];
-  if (!queued.length && preparations.length === 0) {
-    if (!chipsBlocked && !sendFailureOwner) showSendHint();
-    return;
-  }
-  if (!sendFailureOwner) hideSendHint(true);
   if (shouldEnd) {
+    if (!sendFailureOwner) hideSendHint(true);
     const terminal = {
       prompts: [],
       inFlight: true,
@@ -1701,9 +2495,26 @@ function sendQueued(endAfter) {
     };
     terminalSubmission = terminal;
     updateSendState();
-    finishTerminalPreparation(terminal, preparations);
+    finishTerminalPreparation(terminal, [...feedbackPreparations]);
     return;
   }
+  if (!draftCommit) {
+    submitNotes(chipsBlocked);
+    return;
+  }
+  draftCommit.done.then((committed) => {
+    if (committed && !ended && !terminalSubmission) submitNotes(chipsBlocked);
+  });
+}
+
+function submitNotes(chipsBlocked) {
+  // An edit opened while the send waited for the card goes with its new words too.
+  settleOpenEdit();
+  if (!queued.length) {
+    if (!chipsBlocked && !sendFailureOwner) showSendHint();
+    return;
+  }
+  if (!sendFailureOwner) hideSendHint(true);
   requestSnapshot("submit", queued.slice(), false, null);
   render();
 }
@@ -1735,13 +2546,16 @@ function completeTerminalPreparation(terminal, results) {
     releaseTerminalSubmission(terminal);
     return;
   }
+  if (!queued.length) {
+    // Send & End with nothing written approves the page as shown, and is delivered as that,
+    // never as nothing (the Overlord, 2026-10-01).
+    const prompt = { uid: "", prompt: APPROVED_AS_SHOWN, selector: "", tag: "message", text: WHOLE_PAGE };
+    assignPromptIdentity(prompt, false);
+    queued.push(prompt);
+    persistQueuedPrompts();
+  }
   terminal.prompts = queued.slice();
   clearPreparationFailure("terminal");
-  if (!terminal.prompts.length) {
-    releaseTerminalSubmission(terminal);
-    if (!sendFailureOwner) showSendHint();
-    return;
-  }
   // Only make the reservation durable once every preparation has joined the exact
   // batch. A reload before this point must restore an ordinary editable queue, not
   // an incomplete terminal submission.
@@ -1825,6 +2639,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
         });
         throw error;
       }
+      closeReviewTab();
     }
     settleAcknowledgementGuidance(submission, preserveFailureState);
     return;
@@ -1921,6 +2736,7 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
   if (!acceptedChat || reconciledChat) {
     for (const prompt of prompts) {
       deliveredPrompts.add(prompt);
+      reportNoteStatus(prompt, "delivered");
       const index = queued.indexOf(prompt);
       if (index !== -1) queued.splice(index, 1);
     }
@@ -1931,8 +2747,16 @@ async function submitQueuedOnce(submission, preserveFailureState = false) {
   settleAcknowledgementGuidance(submission, preserveFailureState);
   if (shouldEndSession) {
     markSessionEnded();
+    closeReviewTab();
     return;
   }
+}
+
+// A Send & End from this tab ends the review here: once it lands, the tab closes itself and the
+// browser shows the tab that opened it, such as the board's Command Center. A browser that will
+// not let a script close this tab leaves it showing the ended review.
+function closeReviewTab() {
+  window.close();
 }
 
 function submissionResolvesSendFailure(submission) {
@@ -1972,18 +2796,11 @@ function clearLayoutGateTimer() {
   layoutGateTimer = undefined;
 }
 
-function setLayoutGateCard(state) {
+function setLayoutGateCard() {
   if (!layoutGateTitle || !layoutGateCopy) return;
 
-  if (state === "held") {
-    layoutGateTitle.innerHTML = "Fixing a layout issue...";
-    layoutGateCopy.textContent =
-      "The browser found inaccessible or unusable content. Your agent has been notified and this will reveal after the next clean reload.";
-    return;
-  }
-
-  layoutGateTitle.innerHTML = "Checking layout.<br>One moment.";
-  layoutGateCopy.textContent = "Lavish is waiting for fonts and final geometry before revealing this artifact.";
+  layoutGateTitle.innerHTML = "Opening this artifact.<br>One moment.";
+  layoutGateCopy.textContent = `${PRODUCT} shows it as soon as it has loaded, then checks its layout on screen.`;
 }
 
 function setLayoutGateActive(active) {
@@ -2117,14 +2934,16 @@ function startLayoutGateCycle() {
   setLayoutGateActive(true);
   // A sticky failure owns the card copy, but never the reveal. Do not repaint it as a checking
   // card, and do arm a fresh timer for reloads that happen while the sticky card is present.
-  if (!layoutGateFailureSticky) setLayoutGateCard("checking");
+  if (!layoutGateFailureSticky) setLayoutGateCard();
   armLayoutGateTimer();
 }
 
-// The gate only waits for fonts and final geometry now. It never holds the artifact hostage
-// pending an agent repair: findings are the user's to triage, so a completed pass always reveals
-// and hands the result to the passive inbox.
-function handleLayoutGatePass() {
+// The curtain covers the artifact only until its document says it can be shown, or, for a reload
+// that restores the reader's place, until it has loaded. The layout audit runs on the shown page
+// and reports to the passive inbox; its passes never decide the reveal, because the audit needs
+// several animation frames and the curtain's transparent iframe gets about one a second, which
+// held every page for seconds.
+function showArtifact() {
   if (ended || !layoutGateVisible) return;
   revealLayoutGate();
 }
@@ -2277,6 +3096,7 @@ function createWarningRow(warning) {
   const checkbox = document.createElement("input");
   checkbox.type = "checkbox";
   checkbox.className = "warning-select";
+  checkbox.dataset.focusKey = "select:" + warning.id;
   checkbox.checked = selectable && selectedWarningIds.has(warning.id);
   checkbox.disabled = !selectable;
   checkbox.setAttribute(
@@ -2326,6 +3146,7 @@ function createWarningRow(warning) {
     const reveal = document.createElement("button");
     reveal.type = "button";
     reveal.className = "warning-action";
+    reveal.dataset.focusKey = "reveal:" + warning.id;
     reveal.textContent = "Reveal";
     reveal.setAttribute("aria-label", "Reveal " + warning.title + " in the artifact");
     reveal.addEventListener("click", () => revealWarning(warning));
@@ -2334,6 +3155,7 @@ function createWarningRow(warning) {
   const dismiss = document.createElement("button");
   dismiss.type = "button";
   dismiss.className = "warning-action";
+  dismiss.dataset.focusKey = "dismiss:" + warning.id;
   dismiss.textContent = "Dismiss";
   dismiss.disabled = !selectable;
   dismiss.setAttribute(
@@ -2377,15 +3199,17 @@ function renderWarnings() {
     (count === 1 ? "1 unresolved issue" : count + " unresolved issues") +
     (outstanding > 0 ? " · " + outstanding + " already queued for a fix" : "");
 
-  warningsList.replaceChildren();
-  if (count === 0) {
-    const empty = document.createElement("p");
-    empty.className = "warnings-empty";
-    empty.textContent = "No unresolved layout issues.";
-    warningsList.appendChild(empty);
-  } else {
-    for (const warning of active) warningsList.appendChild(createWarningRow(warning));
-  }
+  rebuildKeepingFocus(warningsList, () => {
+    warningsList.replaceChildren();
+    if (count === 0) {
+      const empty = document.createElement("p");
+      empty.className = "warnings-empty";
+      empty.textContent = "No unresolved layout issues.";
+      warningsList.appendChild(empty);
+    } else {
+      for (const warning of active) warningsList.appendChild(createWarningRow(warning));
+    }
+  });
   updateWarningSelectionState();
 }
 
@@ -2640,6 +3464,7 @@ function buildRevisionRow(entry) {
     const reveal = document.createElement("button");
     reveal.type = "button";
     reveal.className = "revision-reveal";
+    reveal.dataset.focusKey = "reveal:" + entry.id;
     const position = (revisionRevealCursor.get(entry.id) || 0) % entry.marks.length;
     reveal.textContent = entry.marks.length === 1 ? "Reveal" : "Reveal " + (position + 1) + "/" + entry.marks.length;
     reveal.setAttribute("aria-label", "Reveal the next block changed in " + entry.label);
@@ -2668,7 +3493,7 @@ function renderRevisionLegend() {
     " · " +
     (revisionMarks.length === 1 ? "1 marked block" : revisionMarks.length + " marked blocks");
 
-  revisionsList.replaceChildren(...revisionEntries.map(buildRevisionRow));
+  rebuildKeepingFocus(revisionsList, () => revisionsList.replaceChildren(...revisionEntries.map(buildRevisionRow)));
 }
 
 function setRevisionsDrawerOpen(open) {
@@ -2776,6 +3601,12 @@ async function refreshLayoutWarnings() {
   }
 }
 
+// Ending the review never drops his notes: with any waiting, the end goes with them, as Send & End.
+function endReview() {
+  if (queued.length) sendQueued(true);
+  else endSession();
+}
+
 async function endSession(terminal = null) {
   if (ended || (terminalSubmission && terminal !== terminalSubmission)) return;
   const response = await fetch("/api/" + key + "/end", { method: "POST" });
@@ -2799,11 +3630,11 @@ function markSessionEnded() {
   renderRevisionLegend();
   closeWhiteboard();
   annotationSwitch.disabled = true;
+  exploreSwitch.disabled = true;
   moreButton.disabled = true;
   chatInput.disabled = true;
   updateSendState();
   applySheetState();
-  if (presenceBanner) presenceBanner.hidden = true;
   if (handoffBanner) handoffBanner.hidden = true;
   if (outdatedBanner) outdatedBanner.hidden = true;
   layoutGateManuallyBypassed = true;
@@ -2811,6 +3642,7 @@ function markSessionEnded() {
   revealLayoutGate();
   layoutGateEscape?.end?.();
   postToFrame({ type: "lavish:setAnnotationMode", enabled: false });
+  renderEndedReplies();
   endedOverlay.hidden = false;
 }
 
@@ -2916,8 +3748,7 @@ function renderShareResult({ url = "", siteId = "", password = "", updateKey = "
 
 // Wording shared with the CLI's next_step for the same condition, so the two surfaces cannot
 // drift into describing the same dead end differently.
-const NO_SITE_ID_WARNING =
-  " The host did not return a site id Lavish can use, and --site is half the republish credential, so this page can NEVER be republished or unpublished even though its update key is in hand.";
+const NO_SITE_ID_WARNING = ` The host did not return a site id ${PRODUCT} can use, and --site is half the republish credential, so this page can NEVER be republished or unpublished even though its update key is in hand.`;
 
 // What the page is gated behind, said only in terms of what the panel can show. A password the
 // user typed is never echoed by the server, so pointing at a row that was not rendered is the
@@ -2945,7 +3776,7 @@ function syncSharePasswordInput() {
   const generating = shareGenerateInput.checked;
   sharePasswordInput.disabled = generating;
   sharePasswordInput.placeholder = generating
-    ? "Lavish will generate one when you publish"
+    ? `${PRODUCT} will generate one when you publish`
     : "Leave blank for a public page";
   if (generating) sharePasswordInput.value = "";
 }
@@ -2972,7 +3803,7 @@ function reportIndeterminatePublish(data) {
     "ht-ml.app may or may not have published this page, so treat the outcome as unknown. If it did publish, the page is live " +
     visibility +
     ", and its URL and update key were lost with the failed response, so it can never be republished or unpublished. Publishing again creates a SECOND page rather than replacing it." +
-    (rendered.password ? " Copy the password now - it is shown once here and Lavish does not store it." : "");
+    (rendered.password ? ` Copy the password now - it is shown once here and ${PRODUCT} does not store it.` : "");
 }
 
 // An incomplete 200 is NOT an unknown outcome: the host answered, so the page landed. Whatever
@@ -2996,11 +3827,11 @@ function reportIncompletePublish(data) {
   shareStatus.textContent =
     "ht-ml.app accepted this publish, so the page IS live and " +
     visibility +
-    ", but its response was malformed and Lavish could not read the whole result back. " +
-    (rendered.url ? "Its address is below. " : "The response carried no URL, so Lavish cannot show the address. ") +
+    `, but its response was malformed and ${PRODUCT} could not read the whole result back. ` +
+    (rendered.url ? "Its address is below. " : `The response carried no URL, so ${PRODUCT} cannot show the address. `) +
     updateKeyNote +
     "Publishing again creates a SECOND page rather than replacing it." +
-    (rendered.password ? " Copy the password now - it is shown once here and Lavish does not store it." : "");
+    (rendered.password ? ` Copy the password now - it is shown once here and ${PRODUCT} does not store it.` : "");
 }
 
 async function publishShare(event) {
@@ -3054,7 +3885,7 @@ async function publishShare(event) {
             : "Published. Anyone with the link can view this page.";
     if (rendered.updateKey && !rendered.siteId) shareStatus.textContent += NO_SITE_ID_WARNING;
     if (rendered.password) {
-      shareStatus.textContent += " Copy the password now - it is shown once here and Lavish does not store it.";
+      shareStatus.textContent += ` Copy the password now - it is shown once here and ${PRODUCT} does not store it.`;
     }
     shareUrlInput.focus();
     shareUrlInput.select();
@@ -3109,6 +3940,9 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
     // Only clear it here, right before the frame is actually replaced - a preserved
     // load (superseded/out-of-order/exhausted retries below) must leave it intact.
     resetRevisionLegend();
+    // Nothing in the next document is selected until it says so.
+    setPageSelection(null, false);
+    pendingScrollRestore = lastScroll.x || lastScroll.y ? { ...lastScroll } : null;
     startLayoutGateCycle();
     const currentSrc = frame.src || "about:blank";
     frame.src = currentSrc + (currentSrc.includes("?") ? "&" : "?") + "lavish_reload=" + Date.now();
@@ -3140,12 +3974,12 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
     // already shows an artifact keeps showing it rather than losing a usable review.
     if (!artifactLoadToken) {
       setLayoutGateFailure(
-        "Lavish could not load this artifact.",
-        "The Lavish server did not answer this review's load request. It usually restarted while this page was opening. Check and reload to reconnect.",
+        `${PRODUCT} could not load this artifact.`,
+        `The ${PRODUCT} server did not answer this review's load request. It usually restarted while this page was opening. Check and reload to reconnect.`,
         "Check and reload",
         checkServerThenReload(
-          "Lavish could not load this artifact.",
-          "Lavish is still not answering. Start it again with your agent, then use Check and reload.",
+          `${PRODUCT} could not load this artifact.`,
+          `${PRODUCT} is still not answering. Start it again with your agent, then use Check and reload.`,
         ),
       );
     }
@@ -3192,7 +4026,7 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
           if (!artifactLoadToken) {
             setLayoutGateFailure(
               "This review is already open in another tab.",
-              "Lavish loads an artifact in one tab at a time. Take over here to move the review into this tab, or switch back to the tab that already has it.",
+              `${PRODUCT} loads an artifact in one tab at a time. Take over here to move the review into this tab, or switch back to the tab that already has it.`,
               "Take over here",
             );
           }
@@ -3224,10 +4058,13 @@ async function replaceArtifactFrame({ recoveryRetry = false } = {}) {
   artifactSpokeToken = "";
   inlineWhiteboardChannels.clear();
   setHandoffSuperseded(false);
+  pendingScrollRestore = lastScroll.x || lastScroll.y ? { ...lastScroll } : null;
   startLayoutGateCycle();
   // The next document reports its own registry once it loads; until then the
   // previous revision's legend would point at blocks that may no longer exist.
   resetRevisionLegend();
+  // Nothing in the next document is selected until it says so.
+  setPageSelection(null, false);
   frame.src = artifactFrameSrcForLoad({ revision, token });
   return true;
 }
@@ -3827,12 +4664,12 @@ async function reloadChromeAfterServerRestart(reason = "") {
   if (!healthy) {
     chromeRestartReloadPromise = null;
     setLayoutGateFailure(
-      "Lavish is not running.",
-      "The Lavish server restarted and did not come back. Start it again with your agent, then check and reload this page.",
+      `${PRODUCT} is not running.`,
+      `The ${PRODUCT} server restarted and did not come back. Start it again with your agent, then check and reload this page.`,
       "Check and reload",
       checkServerThenReload(
-        "Lavish is not running.",
-        "Lavish is still not running. Start it again with your agent, then use Check and reload.",
+        `${PRODUCT} is not running.`,
+        `${PRODUCT} is still not running. Start it again with your agent, then use Check and reload.`,
       ),
       { sticky: true },
     );
@@ -3880,7 +4717,7 @@ async function reloadChromeForOutdatedBanner() {
         outdatedText.textContent =
           outcome === "no-answer"
             ? HEALTH_NO_ANSWER_COPY
-            : "Lavish is still not running. Start it again, then use Check and reload.";
+            : `${PRODUCT} is still not running. Start it again, then use Check and reload.`;
       }
     }
   }
@@ -3900,15 +4737,18 @@ window.addEventListener("message", (event) => {
   const messageSequence = ++artifactMessageSequence;
   artifactSpokeToken = messageToken;
   clearTimeout(artifactSilenceTimer);
+  if (msg.type === "lavish:readyToShow") {
+    // A reload that returns the reader to their place is shown at its load, once that place is
+    // restored: shown now it would open at its top and then jump.
+    if (!pendingScrollRestore) showArtifact();
+    return;
+  }
   if (msg.type === "lavish:layoutDiagnostics") {
     const diagnosticSequence = ++layoutDiagnosticSequence;
-    const complete = msg.complete !== false;
-    // The gate is visual, so the client-side settled pass is the release signal. Reporting the
-    // pass is deliberately fire-and-forget: a server restart or a diagnostics 4xx/5xx must not
-    // hold a rendered artifact hostage to a network round-trip.
-    if (complete) handleLayoutGatePass();
+    // Reporting the pass is fire-and-forget and never touches the curtain: a server restart or a
+    // diagnostics 4xx/5xx only leaves the inbox as it was.
     submitLayoutDiagnostics({
-      complete,
+      complete: msg.complete !== false,
       targetPresenceComplete: msg.target_presence_complete === true,
       artifactRevision: msg.artifact_revision,
       artifactLoadToken: msg.artifact_load_token,
@@ -3924,26 +4764,29 @@ window.addEventListener("message", (event) => {
           return;
         }
       })
-      .catch(() => {
-        // A failed report is still a completed client-side pass. Keep this fallback explicit so a
-        // future change cannot accidentally make the network request the gate's release path.
-        if (complete && messageToken === artifactLoadToken && diagnosticSequence === layoutDiagnosticSequence) {
-          handleLayoutGatePass();
-        }
-      });
+      .catch(() => {});
     return;
   }
   // The artifact spoke, so it rendered and ran its SDK - there is nothing fatal to probe for.
   if (msg.type === "lavish:queuePrompt") {
-    enqueuePrompt(msg.prompt);
+    // A card's words committed for a send join that send, even once its batch is reserved.
+    const committed = admitCommittedPrompt(String(msg.commit_id || ""), msg.prompt);
+    if (committed) enqueuePrompt(committed.prompt, committed.preparation);
+    else enqueuePrompt(msg.prompt);
     // Queued from inside the artifact, where the closed dock is the only sign it landed.
     pulseSheetDock();
   }
+  if (msg.type === "lavish:draftCommitted") settleDraftCommit(String(msg.commit_id || ""), msg.committed !== false);
+  if (msg.type === "lavish:dropQueuedPrompt") dropQueuedPrompt(String(msg.queueKey || ""));
+  if (msg.type === "lavish:selection") setPageSelection(msg.selection, msg.card === true);
+  if (msg.type === "lavish:dictate") handlePageDictation(String(msg.action || ""));
+  if (msg.type === "lavish:copyDictation") copyPageDictation(String(msg.text || ""));
   if (msg.type === "lavish:snapshot") {
     completeSnapshotRequest(msg.snapshot_request_id, msg.snapshot || "");
   }
   if (msg.type === "lavish:scroll") {
     lastScroll = { x: Number(msg.x) || 0, y: Number(msg.y) || 0 };
+    pendingScrollRestore = null;
   }
   if (msg.type === "lavish:reviewState") {
     setReviewState(msg.state && typeof msg.state === "object" ? msg.state : null);
@@ -3961,8 +4804,8 @@ window.addEventListener("message", (event) => {
   // There is deliberately no attachment-delete message. See removeAttachment's
   // removal note below: the iframe cannot be trusted to decide a delete, and the
   // chrome cannot see every live reference, so reclamation is the sweeper's job.
-  if (msg.type === "lavish:sendQueuedPrompts") sendQueued();
-  if (msg.type === "lavish:endSession") endSession();
+  if (msg.type === "lavish:sendQueuedPrompts") sendQueued(msg.endSession === true);
+  if (msg.type === "lavish:endSession") endReview();
   if (msg.type === "lavish:revisions") applyRevisionMessage(msg);
   if (msg.type === "lavish:toggleAnnotationMode") toggleAnnotationMode();
 });
@@ -4098,10 +4941,17 @@ function toggleAnnotationMode() {
   if (ended || terminalSubmission) return;
   annotation = !annotation;
   annotationSwitch.setAttribute("aria-pressed", String(annotation));
+  exploreSwitch.setAttribute("aria-pressed", String(!annotation));
   postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation });
 }
 
-annotationSwitch.onclick = toggleAnnotationMode;
+// The mode pill's two halves each choose their mode; the half already chosen does nothing.
+annotationSwitch.onclick = () => {
+  if (!annotation) toggleAnnotationMode();
+};
+exploreSwitch.onclick = () => {
+  if (annotation) toggleAnnotationMode();
+};
 
 sendButton.onclick = () => sendQueued(false);
 sendAndEndButton.onclick = () => sendQueued(true);
@@ -4199,13 +5049,29 @@ chatAttachments.addEventListener("click", (event) => {
   const retry = /** @type {HTMLElement | null} */ (target?.closest?.("[data-chat-attachment-retry]") || null);
   if (retry) chatAttachmentController.retry(String(retry.dataset.chatAttachmentRetry || ""));
 });
+// Enter adds what he wrote to his notes; Send to Agent or Send & End sends them all together.
 chatInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
-    sendQueued(false);
+    if (!ended && !terminalSubmission) addComposerNote();
   }
 });
+chatAnchorClear.onclick = () => {
+  postToFrame({ type: "lavish:clearSelection" });
+  setPageSelection(null, false);
+  chatInput.focus();
+};
 chatInput.addEventListener("input", () => hideSendHint());
+window.addEventListener("resize", () => chatVoice.refresh());
+// Capture phase, like the mode hotkey, so the voice shortcut works wherever focus is in the chrome
+// and the held space never reaches the message box or a focused button.
+document.addEventListener("keydown", handleVoiceKey, true);
+document.addEventListener("keyup", handleVoiceKey, true);
+// The page may never see a held shortcut's release once it loses focus, so that stops listening.
+window.addEventListener("blur", () => voiceDictation.stop());
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) voiceDictation.stop();
+});
 copyPathButton.onclick = copyFilePath;
 reloadArtifactButton.onclick = reloadArtifact;
 copySnapshotButton.onclick = copyDomSnapshot;
@@ -4225,7 +5091,7 @@ copyShareSiteIdButton.onclick = () => copyToButton(shareSiteIdInput.value, copyS
 shareGenerateInput.onchange = syncSharePasswordInput;
 endButton.onclick = () => {
   closeMenus();
-  endSession();
+  endReview();
 };
 handoffTakeoverButton.onclick = () => location.reload();
 if (outdatedReloadButton) outdatedReloadButton.onclick = () => reloadChromeForOutdatedBanner();
@@ -4267,6 +5133,10 @@ document.addEventListener("keydown", (event) => {
       closeRevisionsDrawer({ restoreFocus: true });
     } else if (warningsDrawerOpen) {
       closeWarningsDrawer({ restoreFocus: true });
+    } else if (chatVoice.isOpen()) {
+      // Escape from anywhere else closes the recent dictations too; from inside them, the bubble's
+      // own Escape has already closed them and put the keyboard back on it.
+      chatVoice.setOpen(false);
     } else if (!moreMenu.hidden) {
       closeMenus();
     } else if (sheetOpen && isMobileSheet()) {
@@ -4290,13 +5160,21 @@ document.addEventListener(
 frame.addEventListener("load", () => {
   if (artifactSpokeToken !== artifactLoadToken) armArtifactAvailabilityProbe(artifactLoadToken);
   postToFrame({ type: "lavish:setAnnotationMode", enabled: annotation && !ended });
-  // Replay the pre-reload scroll position so hot reloads don't jump the artifact to the top.
-  postToFrame({ type: "lavish:restoreScroll", x: lastScroll.x, y: lastScroll.y });
+  // Replay the pre-reload scroll position so hot reloads don't jump the artifact to the top. Load
+  // waits for every font and image, so a page shown before it is the reader's to scroll by now.
+  if (pendingScrollRestore) {
+    postToFrame({ type: "lavish:restoreScroll", x: pendingScrollRestore.x, y: pendingScrollRestore.y });
+    pendingScrollRestore = null;
+  }
   if (lastReviewState) postToFrame({ type: "lavish:restoreReviewState", state: lastReviewState });
   if (overlayIndex !== null) {
     inlineWhiteboardChannels.delete(overlayIndex);
     postToFrame({ type: "lavish:suspendWhiteboard", diagramIndex: overlayIndex });
   }
+  // A reload that waited to restore the reader's place is shown now. Only a document that has
+  // spoken counts: the iframe's own blank document can report a load after the artifact load
+  // began, and showing it would flash an empty white frame.
+  if (artifactSpokeToken === artifactLoadToken) showArtifact();
 });
 
 initializeLayoutGate();
@@ -4360,6 +5238,7 @@ events.set("agent-reply", (data) => {
     ...(data.at ? { at: String(data.at) } : {}),
   };
   if (addChat(entry)) displayedChat.push(entry);
+  renderEndedReplies();
   noteAgentReply(entry.text);
 });
 events.set("chat-sync", (data) => {

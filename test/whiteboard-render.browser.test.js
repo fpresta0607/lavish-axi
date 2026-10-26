@@ -176,7 +176,8 @@ async function runBrowserFixture(t, fixtureName) {
       await new Promise((resolve) => server.close(resolve));
     }
   } finally {
-    await rm(root, { recursive: true, force: true });
+    // Windows keeps the profile's lockfile a moment after Chrome exits.
+    await rm(root, { recursive: true, force: true, maxRetries: 10 });
   }
 }
 

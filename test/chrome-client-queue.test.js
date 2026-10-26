@@ -4,7 +4,8 @@ import test from "node:test";
 import vm from "node:vm";
 
 import { chatEntryForPrompt } from "../src/chat-messages.js";
-import { createChromeHtml } from "../src/server.js";
+import * as messageBox from "../src/message-box.js";
+import { createChromeHtml, createChromeMessageBoxJs } from "../src/server.js";
 
 const sourceUrl = new URL("../src/chrome-client.js", import.meta.url);
 
@@ -17,7 +18,7 @@ const servedChromeIds = new Set(
   ),
 );
 
-/** @typedef {{ key: string, file: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
+/** @typedef {{ key: string, file: string, product?: string, layoutGateEnabled?: boolean, layoutGateMaxHoldMs?: number, modeToggleHotkeyKey?: string, initialChat?: any[], initialChatAckIds?: string[], initialChatRevision?: number, initialLayoutWarnings?: any[], chromeLoadToken?: string, initialArtifactRevision?: number, initialArtifactLoadToken?: string, initialArtifactLoadSequence?: number, attachmentMaxBytes?: number, attachmentMaxCount?: number, attachmentAcceptedMime?: string[], initialEnded?: boolean, initialEndedBy?: string | null, revisionPalette?: { hex: string, borderStyle: string, pattern: string }[] }} HarnessSessionData */
 /** @type {HarnessSessionData} */
 const defaultSessionData = {
   key: "abc",
@@ -64,6 +65,15 @@ function identicalProjectionNote(offset) {
   };
 }
 
+// An agent entry is the board's dialogue box: its name on the tab, its portrait, then its words.
+const AGENT_BUBBLE_OPEN =
+  '<span class="dialogue-tab">Agent</span><div class="dialogue-box"><span class="dialogue-portrait"><span class="goblin-avatar"></span></span>';
+// A sent note carries the board's two checks; a note on its way carries one.
+const DELIVERED_MARK =
+  '<span class="delivery succeeded" role="img" aria-label="Delivered"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M2 12.5 6.5 17 16 7.5M11.5 16l1 1L22 7.5"/></svg></span>';
+const SENDING_MARK =
+  '<span class="delivery" role="img" aria-label="Sending"><svg class="icon" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="M5 12.5 9.5 17 19 7.5"/></svg></span>';
+
 async function createChromeHarness({
   fetchImpl = /** @type {(url?: any, init?: any) => Promise<any>} */ (
     async () => ({ ok: true, json: async () => ({}) })
@@ -81,6 +91,18 @@ async function createChromeHarness({
   // chrome's sheet breakpoint, with `setMobile` flipping it the way a resize would. Left off, the
   // window has no matchMedia at all, which is the desktop the other tests run against.
   mobile = false,
+  // Opt-in speech recognition: the recognizer class the browser would offer and, optionally, a
+  // getUserMedia for the waveform's microphone. Left off, the window has neither, which is a
+  // browser without speech recognition.
+  speech = null,
+  // Opt-in plain-http page: a window whose `isSecureContext` is false, as on an http link anywhere
+  // but localhost. Left off, the window does not say, as before.
+  insecure = false,
+  // The browser's localStorage, which outlives the page: pass one Map to two harnesses to model a
+  // reload of the same browser.
+  localStore = new Map(),
+  // Opt-out clipboard: a page served over plain http has no navigator.clipboard.
+  clipboard = true,
 } = {}) {
   const source = await readFile(sourceUrl, "utf8");
   // Seed sessionStorage before the client boots, to model a tab whose queue was
@@ -102,6 +124,7 @@ async function createChromeHarness({
   let activeElement = null;
   let nextTimerId = 1;
   let reloadCount = 0;
+  let closeCount = 0;
   let artifactRevision = 0;
 
   function fakeSetTimeout(fn, ms) {
@@ -181,12 +204,17 @@ async function createChromeHarness({
         if (handler) handler(event);
       },
       querySelectorAll(selector) {
-        if (id === "queuedLog" && selector === ".queued-remove") {
-          return [...this.innerHTML.matchAll(/class="queued-remove"[^>]*data-index="(\d+)"/g)].map((match) => {
-            const close = element(`queued-remove-${match[1]}`);
-            close.dataset.index = match[1];
-            return close;
-          });
+        // A queued note's controls are drawn from markup, so they are found in it by class; each
+        // keeps one stub per note index, as the same control in a redrawn list would.
+        if (id === "queuedLog" && /^\.queued-[\w-]+$/.test(selector)) {
+          const className = selector.slice(1);
+          return [...this.innerHTML.matchAll(new RegExp(`class="${className}"[^>]*data-index="(\\d+)"`, "g"))].map(
+            (match) => {
+              const control = element(`${className}-${match[1]}`);
+              control.dataset.index = match[1];
+              return control;
+            },
+          );
         }
         const matches = [];
         const walk = (node) => {
@@ -199,6 +227,8 @@ async function createChromeHarness({
                   (childClasses.includes("agent") && !childClasses.includes("agent-working")))
               )
                 matches.push(child);
+            } else if (selector === "[data-focus-key]") {
+              if (child.dataset?.focusKey !== undefined) matches.push(child);
             } else if (typeof selector === "string" && selector.startsWith(".")) {
               if (childClasses.includes(selector.slice(1))) matches.push(child);
             }
@@ -233,6 +263,8 @@ async function createChromeHarness({
         return child;
       },
       replaceChildren(...next) {
+        // The browser drops focus from a removed element onto the page body.
+        if (activeElement && activeElement !== this && this.contains(activeElement)) activeElement = null;
         for (const child of this.children) child.parentElement = null;
         this.children = [];
         for (const child of next) this.appendChild(child);
@@ -265,11 +297,46 @@ async function createChromeHarness({
         focusLog.push(this.id);
       },
       select() {},
+      setSelectionRange(start, end) {
+        this.selectionStart = start;
+        this.selectionEnd = end;
+      },
       scrollIntoView(options) {
         this.scrolledIntoView = options;
       },
+      // No layout here: every box sits at the origin with no size.
+      getBoundingClientRect() {
+        return { top: 0, bottom: 0, left: 0, right: 0, width: 0, height: 0 };
+      },
       listeners,
     };
+    let markup = "";
+    let markupGeneration = 0;
+    Object.defineProperty(el, "innerHTML", {
+      enumerable: true,
+      get() {
+        return markup;
+      },
+      set(value) {
+        // As in the browser, rebuilding from markup removes the elements it held, and focus with them.
+        if (activeElement?.markupParent === el) activeElement = null;
+        markup = String(value);
+        markupGeneration += 1;
+      },
+    });
+    const querySelectorAll = el.querySelectorAll;
+    el.querySelectorAll = function (selector) {
+      if (selector !== "[data-focus-key]" || !markup.includes("data-focus-key"))
+        return querySelectorAll.call(this, selector);
+      return [...markup.matchAll(/data-focus-key="([^"]+)"/g)].map((match) => {
+        const control = element(`${id}@${markupGeneration}:${match[1]}`);
+        control.dataset.focusKey = match[1];
+        control.parentElement = el;
+        control.markupParent = el;
+        return control;
+      });
+    };
+    el.getRootNode = () => context.document;
     elements.set(id, el);
     return el;
   }
@@ -304,6 +371,8 @@ async function createChromeHarness({
   element("moreMenu").hidden = true;
   element("warningsDrawer").hidden = true;
   element("revisionsDrawer").hidden = true;
+  element("chatVoiceRecent").hidden = true;
+  element("chatVoice")["aria-expanded"] = "false";
   const whiteboardFrame = element("whiteboardFrame");
   whiteboardFrame.contentWindow = {
     postMessage(message) {
@@ -427,9 +496,23 @@ async function createChromeHarness({
         storage.delete(key);
       },
     },
+    localStorage: {
+      getItem(key) {
+        return localStore.has(key) ? localStore.get(key) : null;
+      },
+      setItem(key, value) {
+        localStore.set(key, String(value));
+      },
+      removeItem(key) {
+        localStore.delete(key);
+      },
+    },
     window: {
       clearTimeout: fakeClearTimeout,
       setTimeout: fakeSetTimeout,
+      close() {
+        closeCount += 1;
+      },
       addEventListener(type, handler) {
         if (!windowListeners.has(type)) windowListeners.set(type, []);
         windowListeners.get(type).push(handler);
@@ -451,10 +534,21 @@ async function createChromeHarness({
       return list;
     };
   }
+  if (speech) {
+    context.window.SpeechRecognition = speech.Recognition;
+    context.window.requestAnimationFrame = () => 1;
+    context.window.cancelAnimationFrame = () => {};
+    if (speech.getUserMedia) context.navigator.mediaDevices = { getUserMedia: speech.getUserMedia };
+  }
+  if (insecure) context.window.isSecureContext = false;
+  if (!clipboard) delete context.navigator.clipboard;
 
+  // The server serves the message box's helpers ahead of the client, as the browser runs them.
+  vm.runInNewContext(createChromeMessageBoxJs(), context, { filename: "message-box.js" });
   vm.runInNewContext(source, context, { filename: "chrome-client.js" });
   await flushPromises();
-  if (artifactSrc) frame.dispatch("load");
+  // A frame fires load only once something was loaded into it: a superseded first load never is.
+  if (frame.src) frame.dispatch("load");
 
   function frameLoadToken() {
     const match = String(frame.src).match(/[?&]artifact_load_token=([^&]+)/);
@@ -462,6 +556,8 @@ async function createChromeHarness({
   }
 
   return {
+    // The client's global scope: its top-level function declarations, for unit tests of helpers.
+    context,
     element,
     frame,
     postedToFrame,
@@ -573,6 +669,9 @@ async function createChromeHarness({
     queued() {
       return JSON.parse(storage.get("lavish-axi:queued:abc") || "[]");
     },
+    closeCount() {
+      return closeCount;
+    },
     reloadCount() {
       return reloadCount;
     },
@@ -624,7 +723,7 @@ test("chrome client carries live events over a WebSocket outside the HTTP connec
 
   assert.equal(chrome.webSocket().url, "ws://lavish.test/events/abc");
   chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "listening" }) });
-  assert.equal(chrome.element("presenceBanner").hidden, true);
+  assert.equal(chrome.element("panelSummary").textContent, "Agent listening");
 });
 
 test("chrome reconnects its live WebSocket and syncs missed chat", async () => {
@@ -659,7 +758,10 @@ test("a reconnect's stale initial sync cannot erase a newer reply", async () => 
   const bubbles = chrome.element("chatLog").children;
   assert.equal(bubbles.length, 2);
   assert.match(bubbles[0].innerHTML, /Sent note/);
-  assert.equal(bubbles[1].innerHTML, '<small>Agent</small><div class="chat-md"><p>New reply</p></div>');
+  assert.equal(
+    bubbles[1].innerHTML,
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>New reply</p></div></div>',
+  );
 });
 
 test("a reconnect cannot settle an identical note this tab never submitted", async () => {
@@ -768,7 +870,7 @@ test("a queued send falls back without a snapshot and ignores a late snapshot", 
               prompt: "Deliver even if the artifact navigated away",
               selector: "",
               tag: "message",
-              text: "Freeform message",
+              text: "Whole page",
             },
           ],
           domSnapshot: "",
@@ -1234,6 +1336,44 @@ test("Send & End falls back without a snapshot and preserves the atomic end inte
   assert.equal(posts[0].body.domSnapshot, "");
   assert.equal(posts[0].body.endSession, true);
   assert.equal(chrome.element("sendAndEnd").disabled, true);
+});
+
+// The Overlord, 2026-10-01: Send & End with nothing written is an approval of the page as shown,
+// delivered as that, never as nothing; and once it lands, the review tab closes itself so the tab
+// that opened it shows again.
+test("an empty Send & End approves the page as shown and closes the tab once it lands", async () => {
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init = {}) => {
+      posts.push({ url, body: init.body ? JSON.parse(init.body) : null });
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.element("sendAndEnd").click();
+  chrome.runTimers(5000);
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, "/api/abc/prompts");
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => [prompt.tag, prompt.prompt]),
+    [["message", "Approved as shown."]],
+  );
+  assert.equal(chrome.element("sendHint").hidden, true);
+  assert.equal(chrome.closeCount(), 1);
+});
+
+test("a review ended by its agent leaves the tab open", async () => {
+  const chrome = await createChromeHarness();
+
+  chrome.eventSource().listeners.get("ended")({ data: JSON.stringify({ ended_by: "agent" }) });
+  await flushPromises();
+
+  assert.equal(chrome.element("chatInput").disabled, true);
+  assert.equal(chrome.closeCount(), 0);
 });
 
 test("Send & End reserves its terminal batch and only retries that batch after failure", async () => {
@@ -2067,6 +2207,23 @@ test("Conversation accepts an image-only paste and sends its attachment ref", as
   chrome.element("send").click();
   assert.deepEqual(chrome.queued()[0].attachments, [{ id, name: "clipboard.png" }]);
   assert.equal(chrome.queued()[0].prompt, "");
+});
+
+test("a re-render keeps the keyboard on an image chip's control", async () => {
+  const chrome = await createChromeHarness();
+  const input = chrome.element("chatInput");
+  input.dispatch("paste", clipboardEvent(pastedImage("first.png")));
+  const remove = chrome
+    .element("chatAttachments")
+    .querySelectorAll("[data-focus-key]")
+    .find((control) => control.dataset.focusKey.startsWith("remove:"));
+  remove.focus();
+
+  input.dispatch("paste", clipboardEvent(pastedImage("second.png")));
+
+  const focused = chrome.context.document.activeElement;
+  assert.equal(focused?.dataset.focusKey, remove.dataset.focusKey);
+  assert.notEqual(focused, remove, "the chips were rebuilt");
 });
 
 test("Conversation attaches a screenshot exposed only through clipboard items", async () => {
@@ -2912,6 +3069,21 @@ test("warning fixes stay queueable while the agent is working", async () => {
 
   await chrome.element("warningsQueueButton").onclick();
   assert.ok(posts.some((post) => post.url === "/api/abc/layout-warnings/queue"));
+});
+
+test("a layout issue update keeps the keyboard on the row's control", async () => {
+  const chrome = await createChromeHarness();
+  const update = () =>
+    chrome.eventSource().listeners.get("layout-warnings")({ data: JSON.stringify({ warnings: [warningPayload()] }) });
+  update();
+  const select = chrome.warningRows()[0].children[0];
+  select.focus();
+
+  update();
+
+  const replaced = chrome.warningRows()[0].children[0];
+  assert.notEqual(replaced, select, "the row was rebuilt");
+  assert.equal(chrome.context.document.activeElement, replaced);
 });
 
 test("queueing a selected subset produces exactly one ordinary prompt with only those warnings", async () => {
@@ -3896,39 +4068,136 @@ test("chrome client registers message listener before loading the artifact ifram
   assert.equal(chrome.srcLoads[0].hadMessageListener, true);
 });
 
-test("the layout gate reveals after a completed pass with no findings", async () => {
+// The curtain covers the artifact only until its document says it can be shown. Waiting for the
+// layout check instead held every page for seconds: the check needs several animation frames, and
+// a frame behind the curtain gets about one a second.
+test("the curtain lifts as soon as the artifact is ready to show, before any layout pass", async () => {
   const { posts, fetchImpl } = diagnosticsHarness([[]]);
   const chrome = await createChromeHarness({ fetchImpl });
 
   assert.equal(chrome.element("layoutGateOverlay").hidden, false);
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), true);
 
-  chrome.sendFrameMessage({ type: "lavish:layoutDiagnostics", complete: true, viewport_width: 720, findings: [] });
-  await flushPromises();
+  chrome.sendFrameMessage({ type: "lavish:readyToShow" });
 
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), false);
-  assert.equal(posts[0].url, "/api/abc/layout-diagnostics");
-  assert.deepEqual(posts[0].body.findings, []);
+  assert.equal(
+    posts.some((post) => post.url === "/api/abc/layout-diagnostics"),
+    false,
+  );
 });
 
-// The gate used to hold the artifact hostage until an agent repaired the finding. Triage is the
-// user's now, so a completed pass always reveals and hands the result to the inbox.
-test("the layout gate reveals on severe findings and points at the inbox instead of holding", async () => {
+// The layout check runs on the shown page. Its findings go to the inbox; a pass neither lifts the
+// curtain nor brings it back.
+test("a layout pass fills the inbox and never decides the curtain", async () => {
   const { fetchImpl } = diagnosticsHarness([[warningPayload()]]);
   const chrome = await createChromeHarness({ fetchImpl });
-
-  chrome.sendFrameMessage({
+  const severePass = {
     type: "lavish:layoutDiagnostics",
     complete: true,
     viewport_width: 720,
     findings: [{ selector: "html", kind: "page-horizontal-overflow", overflowPx: 18, severity: "error" }],
-  });
+  };
+
+  chrome.sendFrameMessage(severePass);
+  await flushPromises();
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false, "only the artifact's own signal lifts it");
+  assert.equal(chrome.element("warningsWrap").hidden, false);
+
+  chrome.sendFrameMessage({ type: "lavish:readyToShow" });
+  chrome.sendFrameMessage(severePass);
   await flushPromises();
 
   assert.equal(chrome.element("layoutGateOverlay").hidden, true, "the user sees the artifact");
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), false);
   assert.equal(chrome.element("warningsWrap").hidden, false);
+});
+
+// The iframe's own blank document can report its load after the artifact load began. Lifting the
+// curtain on it shows an empty white frame while the artifact is still on its way.
+test("a frame load from a document that never spoke leaves the curtain up", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.frame.dispatch("load");
+
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+// The previous document's scroll position is restored at the new one's load, when its images and
+// fonts are in. Shown at its ready-to-show, the page would open at its top and then jump.
+test("a reload is shown where the reader was, once that place is restored", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:scroll", x: 0, y: 640 });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.frame.dispatch("load");
+
+  const restores = chrome.postedToFrame
+    .filter((message) => message.type === "lavish:restoreScroll")
+    .map(({ x, y }) => ({ x, y }));
+  assert.deepEqual(restores, [{ x: 0, y: 640 }]);
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+test("a reload whose load arrives before it speaks is shown on its ready-to-show", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:scroll", x: 0, y: 640 });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+
+  chrome.frame.dispatch("load");
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+// A late font holds the load event, so a page shown at once is being read when its load comes.
+// Restoring a position then would move the page under the reader.
+test("a page shown before its load keeps the reader's own scroll when it loads", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+  const token = chrome.artifactLoadToken();
+
+  chrome.sendFrameMessage({ artifact_load_token: token, type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+  chrome.sendFrameMessage({ artifact_load_token: token, type: "lavish:scroll", x: 0, y: 300 });
+  chrome.frame.dispatch("load");
+
+  assert.equal(
+    chrome.postedToFrame.some((message) => message.type === "lavish:restoreScroll"),
+    false,
+  );
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+});
+
+test("a previous document's ready-to-show cannot lift the next load's curtain", async () => {
+  const chrome = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html" });
+  const oldToken = chrome.artifactLoadToken();
+  chrome.sendFrameMessage({ artifact_load_token: oldToken, type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
+
+  chrome.eventSource().listeners.get("reload")();
+  await flushPromises();
+  assert.notEqual(chrome.artifactLoadToken(), oldToken);
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.sendFrameMessage({ artifact_load_token: oldToken, type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, false);
+
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
+  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
 
 test("layout gate timeout fails open when no result arrives", async () => {
@@ -3942,10 +4211,8 @@ test("layout gate timeout fails open when no result arrives", async () => {
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), false);
 });
 
-test("layout gate re-arms on reload and still reveals on the next completed pass", async () => {
-  const { fetchImpl } = diagnosticsHarness([[], [warningPayload()]]);
+test("layout gate re-arms on reload and still reveals on the next ready-to-show", async () => {
   const chrome = await createChromeHarness({
-    fetchImpl,
     sessionData: { key: "abc", file: "/tmp/artifact.html", layoutGateMaxHoldMs: 25 },
   });
 
@@ -3956,13 +4223,7 @@ test("layout gate re-arms on reload and still reveals on the next completed pass
   assert.equal(chrome.element("layoutGateOverlay").hidden, false);
   assert.equal(chrome.element("body").classList.contains("layout-gate-active"), true);
 
-  chrome.sendFrameMessage({
-    type: "lavish:layoutDiagnostics",
-    complete: true,
-    viewport_width: 720,
-    findings: [{ selector: "html", kind: "page-horizontal-overflow", overflowPx: 18, severity: "error" }],
-  });
-  await flushPromises();
+  chrome.sendFrameMessage({ type: "lavish:readyToShow" });
 
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
@@ -4101,7 +4362,7 @@ test("a first begin-load that fails keeps retrying until the artifact loads", as
   assert.equal(chrome.artifactBeginRequests.length, 4);
   assert.match(chrome.frame.src, /^\/artifact\/abc\/index\.html\?artifact_revision=\d+&artifact_load_token=/);
   // Retries alone never raise the failure card: the gate is back on its ordinary checking copy.
-  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Checking layout/);
+  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Opening this artifact/);
 });
 
 test("a first begin-load that never recovers surfaces a reloadable failure instead of a blank frame", async () => {
@@ -4172,7 +4433,7 @@ test("a load that asks for the artifact again gets the whole recovery backoff ag
   await flushPromises();
   assert.equal(chrome.artifactBeginRequests.length, 19);
   assert.match(chrome.frame.src, /artifact_load_token=/);
-  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Checking layout/);
+  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Opening this artifact/);
 });
 
 test("a superseded reviewer is not retried in the background", async () => {
@@ -4428,14 +4689,9 @@ test("the not-running card survives a later successful artifact load", async () 
   assert.equal(chrome.element("layoutGateAction").textContent, "Check and reload");
   assert.equal(chrome.element("layoutGateOverlay").hidden, false);
 
-  // A completed diagnostic pass from the replacement server must release the visual gate even
-  // while the sticky card copy remains in state. The card is not allowed to trap the artifact.
-  chrome.sendFrameMessage({
-    artifact_load_token: chrome.artifactLoadToken(),
-    type: "lavish:layoutDiagnostics",
-    complete: true,
-    findings: [],
-  });
+  // The artifact served by the replacement server must release the visual gate even while the
+  // sticky card copy remains in state. The card is not allowed to trap the artifact.
+  chrome.sendFrameMessage({ artifact_load_token: chrome.artifactLoadToken(), type: "lavish:readyToShow" });
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
   assert.equal(chrome.element("layoutGateTitle").textContent, "Lavish is not running.");
 
@@ -4473,7 +4729,7 @@ test("a sticky failure cannot outlive the layout gate timeout", async () => {
   assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
 
-test("a no-gate sticky failure reveals by pass, manual bypass, or timeout", async () => {
+test("a no-gate sticky failure reveals by ready-to-show, manual bypass, or timeout", async () => {
   async function createFailedChrome() {
     const chrome = await createChromeHarness({
       artifactSrc: "/artifact/abc/index.html",
@@ -4499,12 +4755,7 @@ test("a no-gate sticky failure reveals by pass, manual bypass, or timeout", asyn
   }
 
   const completed = await createFailedChrome();
-  completed.sendFrameMessage({
-    artifact_load_token: completed.artifactLoadToken(),
-    type: "lavish:layoutDiagnostics",
-    complete: true,
-    findings: [],
-  });
+  completed.sendFrameMessage({ artifact_load_token: completed.artifactLoadToken(), type: "lavish:readyToShow" });
   assert.equal(completed.element("layoutGateOverlay").hidden, true);
 
   const bypassed = await createFailedChrome();
@@ -4514,18 +4765,6 @@ test("a no-gate sticky failure reveals by pass, manual bypass, or timeout", asyn
   const timedOut = await createFailedChrome();
   timedOut.runTimers(12000);
   assert.equal(timedOut.element("layoutGateOverlay").hidden, true);
-});
-
-test("a diagnostics network failure does not hold the visual gate", async () => {
-  const chrome = await createChromeHarness({
-    fetchImpl: async (url) => {
-      if (String(url).includes("/layout-diagnostics")) throw new Error("server replaced");
-      return { ok: true, json: async () => ({}) };
-    },
-  });
-
-  chrome.sendFrameMessage({ type: "lavish:layoutDiagnostics", complete: true, findings: [] });
-  assert.equal(chrome.element("layoutGateOverlay").hidden, true);
 });
 
 test("a layout pass lost to a token race requests a fresh pass", async () => {
@@ -4596,6 +4835,22 @@ test("the outdated banner says what actually happened to the server", async () =
     assert.match(copy, /no longer running/);
     assert.doesNotMatch(copy, /updated/);
     assert.doesNotMatch(copy, /stopped/);
+  }
+});
+
+// A team that renames the review page sees its own name in every sentence the page says about
+// its server, never Lavish's.
+test("the chrome speaks of its server by the product name the server gave it", async () => {
+  const chrome = await createChromeHarness({
+    artifactSrc: "/artifact/abc/index.html",
+    sessionData: { ...defaultSessionData, product: "Scrawl" },
+  });
+
+  for (const reason of ["upgrade", "stop", "local-build", undefined]) {
+    sendChromeOutdated(chrome, reason);
+    const copy = chrome.element("outdatedText").textContent;
+    assert.match(copy, /Scrawl/);
+    assert.doesNotMatch(copy, /Lavish/);
   }
 });
 
@@ -4733,7 +4988,7 @@ test("a slow probe does not write its failure copy over a card that moved on", a
   chrome.eventSource().listeners.get("reload")();
   await flushPromises();
   await flushPromises();
-  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Checking layout/);
+  assert.match(String(chrome.element("layoutGateTitle").innerHTML), /Opening this artifact/);
   const checkingCopy = chrome.element("layoutGateCopy").textContent;
 
   chrome.runTimers(4000);
@@ -5219,6 +5474,26 @@ test("a queued or cancelled card leaves no draft behind for the next page load",
   );
 });
 
+// A page's declared question keeps its state in the SDK, not in page controls, so the chrome has
+// to hold a report that carries nothing but that.
+test("a pick on a page's declared question survives a full page reload", async () => {
+  const storage = new Map();
+  const first = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html", storage });
+  const choices = [{ id: "plan", selection: "option:Keep 300 s", written: "", answered: "Keep 300 s" }];
+
+  first.sendFrameMessage({
+    artifact_load_token: first.artifactLoadToken(),
+    type: "lavish:reviewState",
+    state: { card: null, fields: [], choices },
+  });
+  await flushPromises();
+
+  const second = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html", storage });
+  const restored = second.postedToFrame.filter((message) => message.type === "lavish:restoreReviewState");
+  assert.equal(restored.length, 1);
+  assert.equal(JSON.stringify(restored[0].state.choices), JSON.stringify(choices));
+});
+
 test("a draft never leaks from one artifact into another", async () => {
   const storage = new Map();
   const first = await createChromeHarness({ artifactSrc: "/artifact/abc/index.html", storage });
@@ -5338,9 +5613,11 @@ test("stale artifact messages are ignored until the current frame load", async (
     chrome.postedToFrame.some((message) => message.type === "lavish:restoreReviewState"),
     false,
   );
-  const restoredScroll = chrome.postedToFrame.filter((message) => message.type === "lavish:restoreScroll").at(-1);
-  assert.equal(restoredScroll.x, 0);
-  assert.equal(restoredScroll.y, 0);
+  assert.equal(
+    chrome.postedToFrame.some((message) => message.type === "lavish:restoreScroll"),
+    false,
+    "the stale document's position is not restored",
+  );
 
   chrome.sendFrameMessage({
     artifact_load_token: chrome.artifactLoadToken(),
@@ -5615,6 +5892,672 @@ test("a send acknowledgement does not finish the round before late feedback deli
   assert.equal(workingBubbles().length, 1);
 });
 
+test("confirmed work shows Received and a loading bar in the agent dialogue until its reply", async () => {
+  const chrome = await createChromeHarness();
+  const work = () => chrome.element("chatLog").children.find((child) => child.className.includes("agent-working"));
+
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "working" }) });
+
+  assert.match(work().className, /dialogue/);
+  assert.match(work().innerHTML, /Received/);
+  assert.match(work().innerHTML, /Agent is working/);
+  assert.match(work().innerHTML, /role="progressbar"[^>]*aria-label="Agent is working"/);
+  assert.doesNotMatch(work().innerHTML, /aria-valuenow/);
+
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify({ text: "Updated the plan" }) });
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "waiting" }) });
+
+  assert.equal(work(), undefined);
+  assert.ok(chrome.element("chatLog").children.some((child) => child.innerHTML.includes("Updated the plan")));
+});
+
+test("an external listener does not claim that feedback was received", async () => {
+  const chrome = await createChromeHarness();
+  const work = () => chrome.element("chatLog").children.find((child) => child.className.includes("agent-working"));
+
+  chrome.eventSource().listeners.get("agent-presence")({
+    data: JSON.stringify({ state: "listening", mode: "external-listener" }),
+  });
+
+  assert.match(work().innerHTML, /External listener active/);
+  assert.doesNotMatch(work().innerHTML, /Received|role="progressbar"/);
+
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "working" }) });
+  assert.match(work().innerHTML, /Received/);
+  assert.match(work().innerHTML, /role="progressbar"/);
+
+  chrome.eventSource().listeners.get("agent-presence")({
+    data: JSON.stringify({ state: "listening", mode: "external-listener" }),
+  });
+  assert.doesNotMatch(work().innerHTML, /Received|role="progressbar"/);
+});
+
+// Enter in the Conversation box adds what he wrote to his notes; only Send to Agent or Send & End
+// sends, and then every note together (the Overlord, 2026-10-18).
+for (const { name, shiftKey, isComposing, shouldAdd } of [
+  { name: "Enter", shiftKey: false, isComposing: false, shouldAdd: true },
+  { name: "Shift+Enter", shiftKey: true, isComposing: false, shouldAdd: false },
+  { name: "composing Enter", shiftKey: false, isComposing: true, shouldAdd: false },
+]) {
+  test(`the chat composer adds a note only on plain Enter, and never sends: ${name}`, async () => {
+    const posts = [];
+    const chrome = await createChromeHarness({
+      fetchImpl: async (url, init) => {
+        posts.push({ url, body: JSON.parse(init.body) });
+        return { ok: true };
+      },
+    });
+    const input = chrome.element("chatInput");
+    input.value = "Revise the plan";
+    let isDefaultPrevented = false;
+
+    input.dispatch("keydown", {
+      key: "Enter",
+      shiftKey,
+      isComposing,
+      preventDefault() {
+        isDefaultPrevented = true;
+      },
+    });
+    await flushPromises();
+
+    assert.equal(isDefaultPrevented, shouldAdd);
+    assert.equal(posts.length, 0, "nothing reaches the server note by note");
+    assert.equal(
+      chrome.postedToFrame.some((message) => message.type === "lavish:requestSnapshot"),
+      false,
+    );
+    if (shouldAdd) {
+      assert.deepEqual(publicQueued(chrome), [
+        { uid: "", prompt: "Revise the plan", selector: "", tag: "message", text: "Whole page" },
+      ]);
+      assert.equal(input.value, "");
+    } else {
+      assert.deepEqual(chrome.queued(), []);
+      assert.equal(input.value, "Revise the plan");
+    }
+  });
+}
+
+// ---- Every note is chained to one send ----
+
+function postRecorder() {
+  const posts = [];
+  return {
+    posts,
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/prompts")) posts.push({ url, body: JSON.parse(init.body) });
+      return { ok: true, json: async () => ({}) };
+    },
+  };
+}
+
+function writeNote(chrome, words) {
+  const input = chrome.element("chatInput");
+  input.value = words;
+  input.dispatch("keydown", { key: "Enter", preventDefault() {} });
+}
+
+const HEADING_SELECTION = { uid: "u-7", selector: "section > h2#pricing", tag: "h2", text: "Pricing" };
+
+test("Send & End delivers every note in one request, in the order written, then ends", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: { prompt: "Bigger", selector: "h1", tag: "h1", text: "Checkout" },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: {
+      prompt: "Wrong total",
+      selector: "td",
+      tag: "td",
+      text: "$40",
+      target: { type: "table-cell", rowLabel: "Q1", columnLabel: "Revenue", text: "$40" },
+    },
+  });
+  writeNote(chrome, "Overall it reads well");
+  await flushPromises();
+  assert.equal(posts.length, 0, "nothing is delivered before the send");
+
+  chrome.element("sendAndEnd").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1, "one delivery");
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(publicPostedBody(posts[0].body).prompts, [
+    { prompt: "Bigger", selector: "h1", tag: "h1", text: "Checkout" },
+    {
+      prompt: "Wrong total",
+      selector: "td",
+      tag: "td",
+      text: "$40",
+      target: { type: "table-cell", rowLabel: "Q1", columnLabel: "Revenue", text: "$40" },
+    },
+    { uid: "", prompt: "Overall it reads well", selector: "", tag: "message", text: "Whole page" },
+  ]);
+});
+
+test("Send to Agent delivers every note in one request and keeps the review open", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "First");
+  writeNote(chrome, "Second");
+  chrome.element("chatInput").value = "Third, still in the box";
+
+  chrome.element("send").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.notEqual(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["First", "Second", "Third, still in the box"],
+  );
+  assert.equal(chrome.closeCount(), 0);
+});
+
+test("a note written while an element is selected goes on that element, cell and all", async () => {
+  const chrome = await createChromeHarness();
+  const cellTarget = { type: "table-cell", rowLabel: "Q1", columnLabel: "Revenue", text: "$40" };
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: { uid: "u-9", selector: "tbody td:nth-child(2)", tag: "td", text: "$40", target: cellTarget },
+    card: true,
+  });
+  assert.match(chrome.element("chatAnchorTarget").innerHTML, /<span class="anchor-kind">cell<\/span>/);
+  assert.match(chrome.element("chatAnchorTarget").innerHTML, /“Q1 → Revenue”/);
+  assert.equal(chrome.element("chatAnchor").hidden, false);
+  assert.match(chrome.element("chatInput").placeholder, /selected/);
+
+  writeNote(chrome, "Check this number");
+
+  assert.deepEqual(
+    publicQueued(chrome).map(({ _lavishNoteId, ...prompt }) => prompt),
+    [
+      {
+        uid: "u-9",
+        prompt: "Check this number",
+        selector: "tbody td:nth-child(2)",
+        tag: "td",
+        text: "$40",
+        target: cellTarget,
+      },
+    ],
+  );
+  const noted = chrome.postedToFrame.findLast((message) => message.type === "lavish:selectionNoted");
+  assert.ok(noted, "the page is told, so the card shows the note's chip");
+  assert.equal(noted.text, "Check this number");
+  assert.equal(noted.noteId, chrome.queued()[0]._lavishNoteId);
+});
+
+test("a note written with nothing selected is about the whole page and says so", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: false,
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: null,
+    card: false,
+  });
+  assert.equal(chrome.element("chatAnchor").hidden, true);
+  assert.match(chrome.element("chatInput").placeholder, /whole page/);
+
+  writeNote(chrome, "Tone it down");
+
+  assert.equal(chrome.queued()[0].text, "Whole page");
+  assert.match(
+    chrome.element("queuedLog").innerHTML,
+    /<div class="anchor" title=""><span class="anchor-kind">whole page<\/span><\/div><div class="bubble-text">Tone it down<\/div>/,
+  );
+});
+
+test("clearing the selection from the Conversation box puts the next note on the whole page", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+  chrome.element("chatAnchorClear").click();
+
+  assert.ok(chrome.postedToFrame.some((message) => message.type === "lavish:clearSelection"));
+  writeNote(chrome, "About everything");
+  assert.equal(chrome.queued()[0].tag, "message");
+});
+
+test("a new artifact load forgets the old document's selection", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: false,
+  });
+  chrome.eventSource().listeners.get("reload")({ data: "{}" });
+  await flushPromises();
+
+  writeNote(chrome, "After the reload");
+  assert.equal(chrome.queued()[0].tag, "message");
+});
+
+function answerCommit(chrome, prompt) {
+  const request = chrome.postedToFrame.findLast((message) => message.type === "lavish:commitDraft");
+  assert.ok(request?.commit_id, "the chrome asked the page for the open card's words");
+  if (prompt) {
+    chrome.sendFrameMessage({
+      type: "lavish:queuePrompt",
+      artifact_load_token: chrome.artifactLoadToken(),
+      prompt,
+      commit_id: request.commit_id,
+    });
+  }
+  chrome.sendFrameMessage({
+    type: "lavish:draftCommitted",
+    artifact_load_token: chrome.artifactLoadToken(),
+    commit_id: request.commit_id,
+    committed: true,
+  });
+}
+
+test("Send & End takes the open card's unfinished words with the other notes", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Whole-page first");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("sendAndEnd").click();
+  await flushPromises();
+  assert.equal(posts.length, 0, "the send waits for the card");
+  answerCommit(chrome, { prompt: "Unfinished", selector: "section > h2#pricing", tag: "h2", text: "Pricing" });
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Whole-page first", "Unfinished"],
+  );
+});
+
+test("Send to Agent takes the open card's unfinished words too", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("send").click();
+  answerCommit(chrome, { prompt: "Card words", selector: "section > h2#pricing", tag: "h2", text: "Pricing" });
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Card words"],
+  );
+});
+
+test("an empty open card does not stop an empty Send & End from approving the page", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("sendAndEnd").click();
+  answerCommit(chrome, null);
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Approved as shown."],
+  );
+});
+
+// A page too busy to answer may still add the card's words later, after an end that went without
+// them, so the send stops and says so; sending again goes without the card.
+test("a page that does not answer the commit holds the send once, and the next send goes without it", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Sent on the second click");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("sendAndEnd").click();
+  chrome.runTimers(2000);
+  await flushPromises();
+  assert.equal(posts.length, 0, "nothing goes while the card may still be on its way");
+  assert.equal(chrome.element("sendAndEnd").disabled, false);
+  assert.match(chrome.element("sendHint").textContent, /Send again/);
+
+  const commits = chrome.postedToFrame.filter((message) => message.type === "lavish:commitDraft").length;
+  chrome.element("sendAndEnd").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(
+    chrome.postedToFrame.filter((message) => message.type === "lavish:commitDraft").length,
+    commits,
+    "the second send does not wait on the card again",
+  );
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Sent on the second click"],
+  );
+});
+
+// The commit id goes to the untrusted page, so it admits one note of its own kind, and nothing that
+// would replace another note in the reserved batch.
+test("a commit admits one card note into a reserved Send & End and nothing more", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Mine");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+  chrome.element("sendAndEnd").click();
+  const request = chrome.postedToFrame.findLast((message) => message.type === "lavish:commitDraft");
+  const send = (prompt) =>
+    chrome.sendFrameMessage({
+      type: "lavish:queuePrompt",
+      artifact_load_token: chrome.artifactLoadToken(),
+      prompt,
+      commit_id: request.commit_id,
+    });
+  send({ prompt: "Whiteboard forgery", tag: "whiteboard", text: "Whiteboard", _lavishQueueKey: "whiteboard:0" });
+  send({ prompt: "Card words", selector: "h2", tag: "h2", text: "Pricing", _lavishQueueKey: "choice:plan" });
+  send({ prompt: "A second note", selector: "h2", tag: "h2", text: "Pricing" });
+  chrome.sendFrameMessage({
+    type: "lavish:draftCommitted",
+    artifact_load_token: chrome.artifactLoadToken(),
+    commit_id: request.commit_id,
+    committed: true,
+  });
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Mine", "Card words"],
+  );
+});
+
+test("End session with notes waiting sends them and ends, rather than dropping them", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Do not lose me");
+
+  chrome.element("end").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Do not lose me"],
+  );
+});
+
+test("an edit started while a send waits for the card goes with its new words", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Old words");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("send").click();
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "New words";
+  editor.dispatch("input", {});
+  answerCommit(chrome, null);
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["New words"],
+  );
+});
+
+test("opening a second edit keeps the words of the first", async () => {
+  const chrome = await createChromeHarness();
+  writeNote(chrome, "First");
+  writeNote(chrome, "Second");
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "First, reworded";
+  editor.dispatch("input", {});
+  const secondEdit = chrome.element("queuedLog").querySelectorAll(".queued-edit")[0];
+  assert.equal(secondEdit.dataset.index, "1", "the second note's edit control");
+  secondEdit.click({ stopPropagation() {} });
+
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["First, reworded", "Second"],
+  );
+  assert.match(chrome.element("queuedLog").innerHTML, /<textarea class="queued-edit-input"[^>]*>Second<\/textarea>/);
+});
+
+test("a card still uploading its image keeps Send & End from ending the review", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Not yet");
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: HEADING_SELECTION,
+    card: true,
+  });
+
+  chrome.element("sendAndEnd").click();
+  const request = chrome.postedToFrame.findLast((message) => message.type === "lavish:commitDraft");
+  chrome.sendFrameMessage({
+    type: "lavish:draftCommitted",
+    artifact_load_token: chrome.artifactLoadToken(),
+    commit_id: request.commit_id,
+    committed: false,
+  });
+  await flushPromises();
+
+  assert.equal(posts.length, 0);
+  assert.equal(chrome.element("send").disabled, false, "the review stays open and editable");
+  assert.equal(chrome.element("sendHint").hidden, false);
+  assert.match(chrome.element("sendHint").textContent, /note on the page/);
+
+  // A page that refuses every time cannot hold the review: sending again goes without its card.
+  chrome.element("sendAndEnd").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].body.endSession, true);
+});
+
+test("a page's choice can take its answer back out of the notes by its key, and nothing else", async () => {
+  const chrome = await createChromeHarness();
+  const drop = (queueKey) =>
+    chrome.sendFrameMessage({
+      type: "lavish:dropQueuedPrompt",
+      artifact_load_token: chrome.artifactLoadToken(),
+      queueKey,
+    });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: { prompt: "Fix it next", tag: "choice", text: "Which plan?", _lavishQueueKey: "choice:plan" },
+  });
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: { prompt: "Keyed by the page", selector: "h2", tag: "h2", text: "Pricing", _lavishQueueKey: "pricing" },
+  });
+  writeNote(chrome, "Keep me");
+  drop("pricing");
+  drop("choice:plan");
+
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["Keyed by the page", "Keep me"],
+  );
+});
+
+// ---- A pending note can be edited before it is sent ----
+
+function queuedControl(chrome, className) {
+  const control = chrome.element("queuedLog").querySelectorAll("." + className)[0];
+  assert.ok(control, `the queued note has a ${className} control`);
+  return control;
+}
+
+test("an edited note is delivered with its new words", async () => {
+  const { posts, fetchImpl } = postRecorder();
+  const chrome = await createChromeHarness({ fetchImpl });
+  writeNote(chrome, "Make it red");
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  assert.match(
+    chrome.element("queuedLog").innerHTML,
+    /<textarea class="queued-edit-input"[^>]*>Make it red<\/textarea>/,
+  );
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "Make it blue";
+  editor.dispatch("input", {});
+  editor.dispatch("keydown", { key: "Enter", preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(chrome.queued()[0].prompt, "Make it blue");
+  assert.doesNotMatch(chrome.element("queuedLog").innerHTML, /queued-edit-input/);
+  assert.match(chrome.element("queuedLog").innerHTML, /<div class="bubble-text">Make it blue<\/div>/);
+
+  chrome.element("send").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  assert.deepEqual(
+    posts[0].body.prompts.map((prompt) => prompt.prompt),
+    ["Make it blue"],
+  );
+});
+
+test("Escape leaves a note being edited as it was", async () => {
+  const chrome = await createChromeHarness();
+  writeNote(chrome, "Keep these words");
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "Throw these away";
+  editor.dispatch("input", {});
+  editor.dispatch("keydown", { key: "Escape", preventDefault() {}, stopPropagation() {} });
+
+  assert.equal(chrome.queued()[0].prompt, "Keep these words");
+  assert.doesNotMatch(chrome.element("queuedLog").innerHTML, /queued-edit-input/);
+});
+
+test("an edit survives a redraw of the notes while it is open", async () => {
+  const chrome = await createChromeHarness();
+  writeNote(chrome, "Original");
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const editor = queuedControl(chrome, "queued-edit-input");
+  editor.value = "Half edited";
+  editor.dispatch("input", {});
+
+  writeNote(chrome, "Another note arrives");
+
+  assert.match(
+    chrome.element("queuedLog").innerHTML,
+    /<textarea class="queued-edit-input"[^>]*>Half edited<\/textarea>/,
+  );
+});
+
+test("a choice, a layout batch and a whiteboard note offer no edit, only removal", async () => {
+  const chrome = await createChromeHarness();
+  for (const prompt of [
+    { prompt: "Fix it next", tag: "choice", text: "Which plan?" },
+    {
+      prompt: "Fix these",
+      tag: "layout-warnings",
+      text: "1 layout issue",
+      target: { type: "layout-warnings", warnings: [] },
+    },
+    { prompt: "Edits", tag: "whiteboard", text: "Whiteboard", target: { type: "excalidraw-scene", diagramIndex: 0 } },
+  ]) {
+    chrome.sendFrameMessage({ type: "lavish:queuePrompt", artifact_load_token: chrome.artifactLoadToken(), prompt });
+  }
+
+  assert.doesNotMatch(chrome.element("queuedLog").innerHTML, /queued-edit/);
+  assert.equal(chrome.element("queuedLog").querySelectorAll(".queued-remove").length, 3);
+});
+
+test("a choice End from the artifact sends the answer and ends in one request", async () => {
+  const posts = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      posts.push({ url, body: JSON.parse(init.body) });
+      return { ok: true };
+    },
+  });
+  chrome.sendFrameMessage({ type: "lavish:queuePrompt", prompt: { prompt: "Revise the plan", tag: "choice" } });
+
+  chrome.sendFrameMessage({ type: "lavish:sendQueuedPrompts", endSession: true });
+  await flushPromises();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  await flushPromises();
+
+  assert.equal(posts.length, 1);
+  assert.equal(posts[0].url, "/api/abc/prompts");
+  assert.equal(posts[0].body.prompts[0].prompt, "Revise the plan");
+  assert.equal(posts[0].body.endSession, true);
+  assert.equal(chrome.element("send").disabled, true);
+});
+
 test("send controls stay enabled while the agent works and lock only once the session ends", async () => {
   const chrome = await createChromeHarness({
     fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
@@ -5674,7 +6617,9 @@ test("chrome send and end carries the end intent with queued prompts", async () 
   assert.equal(chrome.element("chatInput").disabled, true);
 });
 
-test("chrome send and end with an empty composer nudges instead of ending", async () => {
+// Send & End with nothing written approves the page instead (see "an empty Send & End approves
+// the page as shown"); Send to Agent with nothing written still nudges.
+test("chrome send with an empty composer nudges instead of sending", async () => {
   const posts = [];
   const chrome = await createChromeHarness({
     fetchImpl: async (url, init = {}) => {
@@ -5684,7 +6629,7 @@ test("chrome send and end with an empty composer nudges instead of ending", asyn
   });
   chrome.element("sendHint").hidden = true;
 
-  chrome.element("sendAndEnd").onclick();
+  chrome.element("send").onclick();
   await flushPromises();
 
   assert.equal(posts.length, 0);
@@ -5845,6 +6790,123 @@ test("chrome boots read-only when the session already ended before this page loa
   assert.equal(chrome.element("panelScroll").inert, true);
   assert.equal(chrome.element("chatComposer").inert, true);
   assert.equal(chrome.element("endedOverlay").hidden, false);
+});
+
+// The ended overlay covers the conversation, so a goblin that answered and then retired (or had
+// its page ended for it) left its answer unreadable behind "Session ended". The card carries what
+// the agent said that the reader has not answered.
+function userEntry(text) {
+  return { role: "user", kind: "message", text, at: "2026-10-07T16:00:00.000Z" };
+}
+
+function agentEntry(text) {
+  return { role: "agent", text, html: `<p>${text}</p>`, at: "2026-10-07T16:01:00.000Z" };
+}
+
+function endedCardReplies(chrome) {
+  return chrome
+    .element("endedReplies")
+    .children.map((bubble) => bubble.innerHTML.match(/<p>(.*?)<\/p>/)?.[1])
+    .filter(Boolean);
+}
+
+function endLive(chrome) {
+  chrome.eventSource().listeners.get("ended")({ data: JSON.stringify({ ended_by: "agent" }) });
+}
+
+for (const { name, chat, replies } of [
+  {
+    name: "the reply to the user's last message",
+    chat: [userEntry("Which layout on my phone?"), agentEntry("Use the indented list.")],
+    replies: ["Use the indented list."],
+  },
+  {
+    name: "every reply sent after the user's last message",
+    chat: [
+      agentEntry("Here are two layouts."),
+      userEntry("Which layout on my phone?"),
+      agentEntry("Use the indented list."),
+      agentEntry("Both are in PR 412."),
+    ],
+    replies: ["Use the indented list.", "Both are in PR 412."],
+  },
+  {
+    name: "the last reply when the user spoke last",
+    chat: [agentEntry("Here are two layouts."), agentEntry("Use the indented list."), userEntry("Approved as shown.")],
+    replies: ["Use the indented list."],
+  },
+  {
+    name: "every reply when the user never wrote",
+    chat: [agentEntry("Here are two layouts."), agentEntry("Use the indented list.")],
+    replies: ["Here are two layouts.", "Use the indented list."],
+  },
+]) {
+  test(`a page that loads ended shows ${name} on the ended card`, async () => {
+    const chrome = await createChromeHarness({
+      sessionData: { ...defaultSessionData, initialChat: chat, initialEnded: true, initialEndedBy: "agent" },
+    });
+
+    assert.equal(chrome.element("endedOverlay").hidden, false);
+    assert.equal(chrome.element("endedReplies").hidden, false);
+    assert.deepEqual(endedCardReplies(chrome), replies);
+    assert.match(chrome.element("endedReplies").children[0].innerHTML, /^<span class="dialogue-tab">Agent<\/span>/);
+  });
+
+  test(`a page that ends while open shows ${name} on the ended card`, async () => {
+    const chrome = await createChromeHarness({
+      sessionData: { ...defaultSessionData, initialChat: chat },
+    });
+
+    endLive(chrome);
+
+    assert.equal(chrome.element("endedOverlay").hidden, false);
+    assert.equal(chrome.element("endedReplies").hidden, false);
+    assert.deepEqual(endedCardReplies(chrome), replies);
+  });
+}
+
+for (const chat of [[], [userEntry("Approved as shown.")]]) {
+  test(`an ended page with no agent reply keeps the ended card unchanged (${chat.length} entries)`, async () => {
+    const chrome = await createChromeHarness({
+      sessionData: { ...defaultSessionData, initialChat: chat, initialEnded: true, initialEndedBy: "user" },
+    });
+
+    assert.equal(chrome.element("endedOverlay").hidden, false);
+    assert.equal(chrome.element("endedReplies").hidden, true);
+    assert.deepEqual(chrome.element("endedReplies").children, []);
+  });
+}
+
+test("a reply the agent sends after the session ended lands on the ended card", async () => {
+  const question = userEntry("Which layout on my phone?");
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, initialChat: [question] },
+  });
+  endLive(chrome);
+  assert.equal(chrome.element("endedReplies").hidden, true);
+
+  const answer = agentEntry("Use the indented list.");
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify(answer) });
+
+  assert.equal(chrome.element("endedReplies").hidden, false);
+  assert.deepEqual(endedCardReplies(chrome), ["Use the indented list."]);
+
+  const followUp = agentEntry("Both are in PR 412.");
+  chrome.eventSource().listeners.get("chat-sync")({
+    data: JSON.stringify({ chat: [question, answer, followUp], chat_revision: 3 }),
+  });
+
+  assert.deepEqual(endedCardReplies(chrome), ["Use the indented list.", "Both are in PR 412."]);
+});
+
+test("an open page never fills the ended card", async () => {
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, initialChat: [agentEntry("Use the indented list.")] },
+  });
+
+  chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify(agentEntry("Both are in PR 412.")) });
+
+  assert.deepEqual(chrome.element("endedReplies").children, []);
 });
 
 // #171: a race between this tab's own in-flight Send and a session end elsewhere must not leave
@@ -6958,7 +8020,8 @@ test("the dock summarizes what the user should know while the sheet is down", as
     fetchImpl: async () => ({ ok: true, json: async () => ({}) }),
   });
 
-  assert.equal(sheetState(chrome).summary, "Agent not listening");
+  // No poll yet is not news: what he sends waits for the agent's next poll.
+  assert.equal(sheetState(chrome).summary, "");
 
   chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "listening" }) });
   assert.equal(sheetState(chrome).summary, "Agent listening");
@@ -7098,7 +8161,10 @@ test("a queued note is a dashed bubble at the end of the conversation with its a
   });
 
   const html = chrome.element("queuedLog").innerHTML;
-  assert.match(html, /^<div class="bubble user queued"><small>Queued <button class="queued-remove"[^>]*data-index="0"/);
+  assert.match(
+    html,
+    /^<div class="bubble user queued"><small>Queued <button class="queued-edit"[^>]*data-index="0"[^>]*>.*?<\/button> <button class="queued-remove"[^>]*data-index="0"/,
+  );
   assert.match(
     html,
     /<span class="anchor-kind">&lt;h2&gt;<\/span><span class="anchor-excerpt">“Phase 1: Inventory”<\/span>/,
@@ -7184,7 +8250,7 @@ test("the chrome's queued anchor agrees with the server's transcript anchor for 
       text: "2 layout issues",
       target: { type: "layout-warnings", warnings: [{ id: "a" }, { id: "b" }] },
     },
-    { prompt: "note", selector: "", tag: "message", text: "Freeform message" },
+    { prompt: "note", selector: "", tag: "message", text: "Whole page" },
   ];
   const unescape = (value) =>
     value
@@ -7206,7 +8272,11 @@ test("the chrome's queued anchor agrees with the server's transcript anchor for 
     }
     assert.ok(rendered, `${fixture.tag}: anchor rendered`);
     assert.equal(unescape(rendered[2]), expected.label, `${fixture.tag}: label`);
-    assert.equal(unescape(rendered[3] || ""), "“" + expected.excerpt + "”", `${fixture.tag}: excerpt`);
+    assert.equal(
+      unescape(rendered[3] || ""),
+      expected.excerpt ? "“" + expected.excerpt + "”" : "",
+      `${fixture.tag}: excerpt`,
+    );
     assert.equal(
       unescape(rendered[1]),
       [expected.excerpt, expected.selector].filter(Boolean).join("\n"),
@@ -7248,7 +8318,7 @@ test("a sent batch settles in place: notes read Sending until the server's trans
   // Pressing Send commits the batch: both notes read Sending, nothing is in the transcript yet,
   // and a committed note cannot be removed.
   const inFlight = chrome.element("queuedLog").innerHTML;
-  assert.equal((inFlight.match(/<small>Sending… /g) || []).length, 2);
+  assert.equal(inFlight.split("<small>" + SENDING_MARK + "Sending… ").length - 1, 2);
   assert.doesNotMatch(inFlight, /<small>Queued /);
   assert.equal(chrome.element("chatLog").children.length, 0);
   const [removeButton] = chrome.element("queuedLog").querySelectorAll(".queued-remove");
@@ -7263,12 +8333,13 @@ test("a sent batch settles in place: notes read Sending until the server's trans
   assert.deepEqual(chrome.queued(), []);
   const bubbles = chrome.element("chatLog").children;
   assert.equal(bubbles.length, 2);
-  assert.match(
-    bubbles[0].innerHTML,
-    /^<small>You<\/small><div class="anchor" [^>]*><span class="anchor-kind">&lt;h2&gt;<\/span>/,
-  );
+  assert.ok(bubbles[0].innerHTML.startsWith("<small>" + DELIVERED_MARK + 'You</small><div class="anchor" '));
+  assert.match(bubbles[0].innerHTML, /<div class="anchor" [^>]*><span class="anchor-kind">&lt;h2&gt;<\/span>/);
   assert.match(bubbles[0].innerHTML, /<div class="bubble-text">Rename this<\/div>/);
-  assert.equal(bubbles[1].innerHTML, '<small>You</small><div class="bubble-text">Keep the table</div>');
+  assert.equal(
+    bubbles[1].innerHTML,
+    "<small>" + DELIVERED_MARK + 'You</small><div class="bubble-text">Keep the table</div>',
+  );
 });
 
 test("an accepted note merges before live entries that arrived before its response", async () => {
@@ -7305,8 +8376,16 @@ test("an accepted note merges before live entries that arrived before its respon
 
     const bubbles = chrome.element("chatLog").children;
     assert.equal(bubbles.length, 2, eventName);
-    assert.equal(bubbles[0].innerHTML, '<small>You</small><div class="bubble-text">Sent note</div>', eventName);
-    assert.equal(bubbles[1].innerHTML, '<small>Agent</small><div class="chat-md"><p>Newer reply</p></div>', eventName);
+    assert.equal(
+      bubbles[0].innerHTML,
+      "<small>" + DELIVERED_MARK + 'You</small><div class="bubble-text">Sent note</div>',
+      eventName,
+    );
+    assert.equal(
+      bubbles[1].innerHTML,
+      AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>Newer reply</p></div></div>',
+      eventName,
+    );
     assert.equal(chrome.element("queuedLog").innerHTML, "", eventName);
   }
 });
@@ -7809,7 +8888,7 @@ test("an older live sync does not hide the transcript accepted by the prompts re
   assert.equal(chrome.element("chatLog").children.length, 1);
   assert.equal(
     chrome.element("chatLog").children[0].innerHTML,
-    '<small>You</small><div class="bubble-text">Sent note</div>',
+    "<small>" + DELIVERED_MARK + 'You</small><div class="bubble-text">Sent note</div>',
   );
 });
 
@@ -7855,7 +8934,10 @@ test("a stale live sync cannot remove a newer agent reply", async () => {
   const bubbles = chrome.element("chatLog").children;
   assert.equal(bubbles.length, 2);
   assert.match(bubbles[0].innerHTML, /Sent note/);
-  assert.equal(bubbles[1].innerHTML, '<small>Agent</small><div class="chat-md"><p>New reply</p></div>');
+  assert.equal(
+    bubbles[1].innerHTML,
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>New reply</p></div></div>',
+  );
 });
 
 test("a transcript sync accepts updated rendering for the same stored agent entry", async () => {
@@ -7877,7 +8959,7 @@ test("a transcript sync accepts updated rendering for the same stored agent entr
 
   assert.equal(
     chrome.element("chatLog").lastAppendedChild.innerHTML,
-    '<small>Agent</small><div class="chat-md"><p><strong>New rendering</strong></p></div>',
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p><strong>New rendering</strong></p></div></div>',
   );
 });
 
@@ -7930,7 +9012,7 @@ test("a failed send returns its notes to Queued with the remove control back", a
   });
   chrome.element("chatInput").value = "Do not lose this";
   chrome.element("send").click();
-  assert.match(chrome.element("queuedLog").innerHTML, /<small>Sending… /);
+  assert.ok(chrome.element("queuedLog").innerHTML.includes("<small>" + SENDING_MARK + "Sending… "));
 
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
@@ -7945,6 +9027,106 @@ test("a failed send returns its notes to Queued with the remove control back", a
   );
 });
 
+// ---- A note written on the page hears of its own delivery ----
+// The annotation card shrinks to a chip whose check marks follow the note: the chrome owns the
+// queue, so it tells the page what became of each note the page put a chip up for.
+
+const noteStatuses = (chrome) =>
+  chrome.postedToFrame
+    .filter((message) => message.type === "lavish:noteStatus")
+    .map((message) => message.noteId + ":" + message.status);
+
+const pageNote = (noteId, prompt = "Rename this") => ({
+  type: "lavish:queuePrompt",
+  prompt: { prompt, selector: "h2#phase-1", tag: "h2", text: "Phase 1: Inventory", _lavishNoteId: noteId },
+});
+
+test("a page note is told queued, then sending, then delivered once the transcript carries it", async () => {
+  let resolvePost = () => {};
+  /** @type {string[]} */
+  const bodies = [];
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/prompts")) {
+        bodies.push(String(init?.body || ""));
+        return new Promise((resolve) => {
+          resolvePost = () =>
+            resolve({
+              ok: true,
+              json: async () => ({
+                status: "queued",
+                pending_prompts: 1,
+                chat: [{ role: "user", kind: "annotation", text: "Rename this", at: "2026-10-02T00:00:00.000Z" }],
+              }),
+            });
+        });
+      }
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.sendFrameMessage(pageNote("note-1"));
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued"]);
+
+  chrome.sendFrameMessage({ type: "lavish:sendQueuedPrompts" });
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued", "note-1:sending"]);
+
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  resolvePost();
+  await flushPromises();
+
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued", "note-1:sending", "note-1:delivered"]);
+  assert.equal(bodies.length, 1);
+  assert.match(bodies[0], /Rename this/);
+  assert.doesNotMatch(
+    bodies[0],
+    /_lavishNoteId|note-1/,
+    "the chip's id is the page's own business, never the server's",
+  );
+});
+
+test("a page note whose send fails is told it is back in the queue", async () => {
+  const chrome = await createChromeHarness({
+    fetchImpl: async (url) => {
+      if (String(url).endsWith("/prompts")) throw new Error("network unavailable");
+      return { ok: true, json: async () => ({}) };
+    },
+  });
+
+  chrome.sendFrameMessage(pageNote("note-1"));
+  chrome.sendFrameMessage({ type: "lavish:sendQueuedPrompts" });
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued", "note-1:sending", "note-1:queued"]);
+});
+
+test("a page note removed from the conversation is told so, and each note hears only of itself", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage(pageNote("note-1", "First"));
+  chrome.sendFrameMessage(pageNote("note-2", "Second"));
+
+  const [removeFirst] = chrome.element("queuedLog").querySelectorAll(".queued-remove");
+  removeFirst.click({ stopPropagation() {} });
+
+  assert.deepEqual(noteStatuses(chrome), ["note-1:queued", "note-2:queued", "note-1:removed"]);
+});
+
+test("a note with no chip, or an id no chip could have made, is reported to nobody", async () => {
+  const chrome = await createChromeHarness();
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "From a page control", selector: "form", tag: "choice", text: "Pick" },
+  });
+  chrome.sendFrameMessage(pageNote({ not: "a string" }));
+  chrome.sendFrameMessage(pageNote("x".repeat(65)));
+  chrome.element("chatInput").value = "Typed in the composer";
+  chrome.element("send").click();
+
+  assert.deepEqual(noteStatuses(chrome), []);
+});
+
 // ---- Agent prose renders as structure; user text never renders as html ----
 
 test("an agent reply renders the server's html and a text-only reply stays escaped", async () => {
@@ -7954,13 +9136,13 @@ test("an agent reply renders the server's html and a text-only reply stays escap
   });
   assert.equal(
     chrome.element("chatLog").lastAppendedChild.innerHTML,
-    '<small>Agent</small><div class="chat-md"><p>Done.</p><ul><li>one</li></ul></div>',
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>Done.</p><ul><li>one</li></ul></div></div>',
   );
 
   chrome.eventSource().listeners.get("agent-reply")({ data: JSON.stringify({ text: "<img src=x onerror=alert(1)>" }) });
   assert.equal(
     chrome.element("chatLog").lastAppendedChild.innerHTML,
-    '<small>Agent</small><div class="bubble-text">&lt;img src=x onerror=alert(1)&gt;</div>',
+    AGENT_BUBBLE_OPEN + '<div class="dialogue-text bubble-text">&lt;img src=x onerror=alert(1)&gt;</div></div>',
   );
 });
 
@@ -8008,14 +9190,17 @@ test("a synced transcript renders sent notes with anchors and thumbnails and nev
     }),
   });
   const [message, note, reply] = chrome.element("chatLog").children;
-  assert.equal(message.innerHTML, '<small>You</small><div class="bubble-text">&lt;b&gt;bold&lt;/b&gt;</div>');
+  assert.equal(
+    message.innerHTML,
+    "<small>" + DELIVERED_MARK + 'You</small><div class="bubble-text">&lt;b&gt;bold&lt;/b&gt;</div>',
+  );
   assert.match(
     note.innerHTML,
     /<span class="anchor-kind">text<\/span><span class="anchor-excerpt text">“&lt;i&gt;sel&lt;\/i&gt;”<\/span>/,
   );
   assert.equal(note.innerHTML.match(/class="bubble-attachment"/g)?.length, 4);
   assert.match(note.innerHTML, /class="bubble-attachment-more"[^>]*>\+2</);
-  assert.equal(reply.innerHTML, '<small>Agent</small><div class="chat-md"><p>ok</p></div>');
+  assert.equal(reply.innerHTML, AGENT_BUBBLE_OPEN + '<div class="dialogue-text chat-md"><p>ok</p></div></div>');
 });
 
 test("a queued note settles from a compact ack after its transcript entry is evicted", async () => {
@@ -8330,6 +9515,24 @@ test("Reveal walks the marked blocks one at a time through the existing reveal p
   assert.equal(button().textContent, "Reveal 1/2");
 });
 
+test("Reveal keeps the keyboard on its button as it walks the marked blocks", async () => {
+  const chrome = await revisionHarness();
+  sendRevisions(chrome, {
+    revisions: [{ id: "r1", label: "Round 1" }],
+    marks: [
+      { revision_id: "r1", selector: "#first", tag: "p", excerpt: "one" },
+      { revision_id: "r1", selector: "#second", tag: "p", excerpt: "two" },
+    ],
+  });
+  const button = () => revisionRows(chrome)[0].querySelectorAll(".revision-reveal")[0];
+
+  button().focus();
+  button().click();
+
+  assert.equal(button().textContent, "Reveal 2/2");
+  assert.equal(chrome.context.document.activeElement, button());
+});
+
 test("a mark naming an undeclared revision never reaches the legend", async () => {
   const chrome = await revisionHarness();
 
@@ -8339,4 +9542,916 @@ test("a mark naming an undeclared revision never reaches the legend", async () =
   });
 
   assert.equal(chrome.element("revisionsSummary").textContent, "1 revision · 0 marked blocks");
+});
+
+// Voice input. A recognizer that plays back what the browser's would do.
+class FakeRecognizer {
+  static made = [];
+  continuous = false;
+  interimResults = true;
+  lang = "";
+  started = false;
+  aborted = false;
+  heardFrom = "nothing";
+  onresult = null;
+  onerror = null;
+  onend = null;
+  constructor() {
+    FakeRecognizer.made.push(this);
+  }
+  start(track) {
+    this.heardFrom = track;
+    this.started = true;
+  }
+  stop() {
+    this.onend?.();
+  }
+  abort() {
+    this.aborted = true;
+    this.onerror?.({ error: "aborted" });
+    this.onend?.();
+  }
+  hear(...finals) {
+    this.onresult?.({ resultIndex: 0, results: finals.map((transcript) => [{ transcript }]) });
+  }
+}
+
+const voiceKey = (type, code, changes = {}) => ({
+  type,
+  code,
+  key: code === "Space" ? " " : code,
+  ctrlKey: true,
+  shiftKey: true,
+  altKey: false,
+  metaKey: false,
+  repeat: false,
+  ...changes,
+});
+
+// The client's own voice helpers, and the message box's, which it shares with the page's box.
+async function voiceHelpers() {
+  const chrome = await createChromeHarness();
+  return /** @type {any} */ (Object.assign(Object.create(chrome.context), messageBox));
+}
+
+/** @param {Parameters<typeof createChromeHarness>[0] & { getUserMedia?: any }} [options] */
+async function voiceHarness({ getUserMedia = undefined, ...options } = {}) {
+  FakeRecognizer.made = [];
+  const posts = [];
+  const chrome = await createChromeHarness({
+    speech: { Recognition: FakeRecognizer, getUserMedia },
+    fetchImpl: async (url) => {
+      posts.push(String(url));
+      return { ok: true, json: async () => ({}) };
+    },
+    ...options,
+  });
+  return { chrome, posts, voice: chrome.element("chatVoice"), note: chrome.element("chatVoiceNote") };
+}
+
+// One dictation by the held key: what the recognizer hears lands in the message box.
+function dictate(chrome, phrase) {
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  FakeRecognizer.made.at(-1).hear(phrase);
+  chrome.dispatchDocumentEvent("keyup", voiceKey("keyup", "Space"));
+}
+
+// The recent dictations as the card lists them: each entry's time, words and buttons.
+function recentEntries(chrome) {
+  const part = (item, className) => item.children.find((child) => child.className === className);
+  return chrome.element("chatVoiceRecentList").children.map((item) => ({
+    time: part(item, "voice-meta")?.textContent,
+    text: part(item, "voice-text").textContent,
+    buttons: part(item, "voice-actions").children,
+  }));
+}
+
+const buttonNames = (entry) => entry.buttons.map((button) => button["aria-label"]);
+
+test("voice input: holding Ctrl+Shift+Space starts once and releasing any of its keys stops", async () => {
+  const helpers = await voiceHelpers();
+  // Copied out of the client's realm, whose Object prototype strict deepEqual would reject.
+  const dictationKey = (event) => ({ ...helpers.dictationKey(event) });
+
+  assert.deepEqual(dictationKey(voiceKey("keydown", "Space")), { action: "start", swallow: true });
+  assert.deepEqual(
+    dictationKey(voiceKey("keydown", "Space", { repeat: true })),
+    { action: null, swallow: true },
+    "a held key repeats without restarting",
+  );
+  assert.deepEqual(dictationKey(voiceKey("keyup", "Space")), { action: "stop", swallow: true });
+  assert.deepEqual(
+    dictationKey(voiceKey("keyup", "ShiftLeft", { key: "Shift", shiftKey: false })),
+    { action: "stop", swallow: false },
+    "letting go of Shift first also stops, and Shift's release still reaches the page",
+  );
+  assert.deepEqual(dictationKey(voiceKey("keyup", "ControlRight", { key: "Control", ctrlKey: false })), {
+    action: "stop",
+    swallow: false,
+  });
+  assert.deepEqual(dictationKey(voiceKey("keyup", "Space", { ctrlKey: false, shiftKey: false })), {
+    action: "stop",
+    swallow: false,
+  });
+});
+
+test("voice input: every other key belongs to the page", async () => {
+  const { dictationKey } = await voiceHelpers();
+
+  for (const other of [
+    voiceKey("keydown", "Space", { shiftKey: false }),
+    voiceKey("keydown", "Space", { ctrlKey: false }),
+    voiceKey("keydown", "Space", { altKey: true }),
+    voiceKey("keydown", "Space", { metaKey: true }),
+    voiceKey("keydown", "KeyA"),
+    voiceKey("keyup", "KeyA"),
+  ]) {
+    assert.equal(dictationKey(other), null, JSON.stringify(other));
+  }
+});
+
+test("voice input: what was heard is one line of plain words", async () => {
+  const { spokenText } = await voiceHelpers();
+
+  assert.equal(spokenText([" run the tests", " and then commit "]), "run the tests and then commit");
+  assert.equal(spokenText(["line one\nline two"]), "line one line two");
+  assert.equal(spokenText(["", "  "]), "");
+  assert.equal(spokenText([]), "");
+});
+
+test("voice input: dictated text replaces the selection at the caret, spaced from the words around it", async () => {
+  const { insertDictation } = await voiceHelpers();
+
+  for (const [value, start, end, text, expected] of [
+    ["", 0, 0, "hello", { value: "hello", caret: 5 }],
+    ["Tighten cards", 7, 7, "the spacing on the", { value: "Tighten the spacing on the cards", caret: 26 }],
+    ["Tighten  cards", 8, 8, "the spacing on the", { value: "Tighten the spacing on the cards", caret: 26 }],
+    ["cards", 0, 0, "Tighten the", { value: "Tighten the cards", caret: 11 }],
+    ["Fix the header.", 14, 14, "now", { value: "Fix the header now.", caret: 18 }],
+    ["Make it red please", 8, 11, "green", { value: "Make it green please", caret: 13 }],
+  ]) {
+    assert.deepEqual({ ...insertDictation(value, start, end, text) }, expected, JSON.stringify([value, start, end]));
+  }
+});
+
+test("voice input: the waveform's bars follow the microphone's level", async () => {
+  const { voiceLevel, voiceBarScale } = await voiceHelpers();
+
+  assert.equal(voiceLevel(new Uint8Array(512).fill(128)), 0, "silence sits at the midpoint");
+  assert.equal(voiceLevel(new Uint8Array(0)), 0);
+  assert.equal(voiceLevel(Uint8Array.from({ length: 512 }, (_, index) => (index % 2 ? 0 : 255))), 1, "clipped");
+  const speech = voiceLevel(Uint8Array.from({ length: 512 }, (_, index) => (index % 2 ? 112 : 144)));
+  assert.ok(speech > 0.4 && speech < 0.6, String(speech));
+  assert.equal(voiceBarScale(0), 0.2, "a silent bar stays visible");
+  assert.equal(voiceBarScale(1), 1);
+  assert.equal(voiceBarScale(0.5), 0.6);
+});
+
+test("voice input: a failure is explained in plain words, and a deliberate stop says nothing", async () => {
+  const { dictationProblem, microphoneProblem } = await voiceHelpers();
+
+  assert.match(dictationProblem("not-allowed"), /microphone is blocked/);
+  assert.match(dictationProblem("service-not-allowed"), /microphone is blocked/);
+  assert.match(dictationProblem("audio-capture"), /No microphone/);
+  assert.match(dictationProblem("network"), /network/);
+  assert.match(dictationProblem("no-speech"), /Nothing was heard/);
+  assert.equal(dictationProblem("aborted"), "");
+  assert.match(dictationProblem("language-not-supported"), /language-not-supported/);
+  assert.match(microphoneProblem(Object.assign(new Error("denied"), { name: "NotAllowedError" })), /blocked/);
+  assert.match(microphoneProblem(Object.assign(new Error("denied"), { name: "SecurityError" })), /blocked/);
+  assert.match(microphoneProblem(Object.assign(new Error("none"), { name: "NotFoundError" })), /No microphone/);
+  assert.match(microphoneProblem(new Error("odd")), /could not be opened/);
+});
+
+async function dictation({ recognition = FakeRecognizer, microphone = null } = {}) {
+  const { createDictation } = await voiceHelpers();
+  FakeRecognizer.made = [];
+  const heard = [];
+  const listening = [];
+  const problems = [];
+  const subject = createDictation(
+    {
+      heard: (text) => heard.push(text),
+      listening: (on) => listening.push(on),
+      problem: (note) => problems.push(note),
+    },
+    () => recognition,
+    "en-GB",
+    microphone,
+  );
+  return { subject, heard, listening, problems };
+}
+
+// A microphone that opens when told to, handing over one track and its level.
+function fakeMicrophone() {
+  const opened = [];
+  let answer = null;
+  const open = () =>
+    new Promise((resolve, reject) => {
+      answer = {
+        resolve() {
+          const capture = { track: { kind: "audio" }, closed: false, level: 0.6 };
+          opened.push(capture);
+          resolve({
+            track: capture.track,
+            level: () => (capture.closed ? 0 : capture.level),
+            close: () => {
+              capture.closed = true;
+            },
+          });
+        },
+        reject,
+      };
+    });
+  return {
+    open,
+    opened,
+    allow: () => answer.resolve(),
+    refuse: (name) => answer.reject(Object.assign(new Error(name), { name })),
+  };
+}
+
+test("voice input: stopping delivers every final phrase heard while listening, once", async () => {
+  const { subject, heard, listening } = await dictation();
+
+  subject.start();
+  subject.start();
+  assert.equal(FakeRecognizer.made.length, 1, "a second start while listening opens no second recognizer");
+  const recognizer = FakeRecognizer.made[0];
+  assert.equal(recognizer.started, true);
+  assert.equal(recognizer.heardFrom, undefined, "without a microphone the recognizer opens its own");
+  assert.equal(recognizer.continuous, true);
+  assert.equal(recognizer.interimResults, false);
+  assert.equal(recognizer.lang, "en-GB");
+  recognizer.hear("open the");
+  recognizer.hear("pull request");
+  assert.deepEqual(heard, [], "nothing lands while listening");
+  subject.stop();
+  assert.deepEqual(heard, ["open the pull request"]);
+  assert.deepEqual(listening, [true, false]);
+  subject.stop();
+  assert.deepEqual(heard, ["open the pull request"]);
+});
+
+test("voice input: a browser without speech recognition says so and never listens", async () => {
+  const { subject, listening, problems } = await dictation({ recognition: null });
+
+  subject.start();
+  assert.deepEqual(listening, []);
+  assert.match(problems.at(-1) || "", /Voice input needs Chrome or Edge/);
+});
+
+test("voice input: a microphone the recognizer is refused is reported and delivers nothing", async () => {
+  const { subject, heard, problems } = await dictation();
+
+  subject.start();
+  FakeRecognizer.made[0].onerror({ error: "not-allowed" });
+  FakeRecognizer.made[0].onend();
+  assert.deepEqual(heard, []);
+  assert.match(problems.at(-1) || "", /microphone is blocked/);
+});
+
+test("voice input: the recognizer hears the one microphone track whose level the waveform shows", async () => {
+  const mic = fakeMicrophone();
+  const { subject, heard, listening } = await dictation({ microphone: mic.open });
+
+  subject.start();
+  assert.deepEqual(listening, [true], "the button shows listening at once");
+  assert.equal(subject.level(), 0, "no level before the microphone opens");
+  mic.allow();
+  await flushPromises();
+  const recognizer = FakeRecognizer.made[0];
+  assert.equal(mic.opened.length, 1, "one capture, never a second");
+  assert.equal(recognizer.heardFrom, mic.opened[0].track, "the recognizer listens to that same track");
+  assert.equal(subject.level(), 0.6);
+  recognizer.hear("ship it");
+  subject.stop();
+  assert.deepEqual(heard, ["ship it"]);
+  assert.equal(mic.opened[0].closed, true, "stopping closes the microphone");
+  assert.equal(subject.level(), 0);
+});
+
+test("voice input: stopping before the microphone opens starts nothing and keeps nothing open", async () => {
+  const mic = fakeMicrophone();
+  const { subject, heard, listening } = await dictation({ microphone: mic.open });
+
+  subject.start();
+  subject.stop();
+  assert.deepEqual(listening, [true, false]);
+  mic.allow();
+  await flushPromises();
+  assert.equal(FakeRecognizer.made[0].started, false);
+  assert.equal(mic.opened[0].closed, true, "a microphone that opens too late is closed at once");
+  assert.deepEqual(heard, []);
+  subject.start();
+  assert.equal(FakeRecognizer.made.length, 2, "the next start begins afresh");
+});
+
+test("voice input: a microphone the browser refuses is explained and nothing listens", async () => {
+  const blocked = fakeMicrophone();
+  const refused = await dictation({ microphone: blocked.open });
+  refused.subject.start();
+  blocked.refuse("NotAllowedError");
+  await flushPromises();
+  assert.deepEqual(refused.listening, [true, false]);
+  assert.match(refused.problems.at(-1) || "", /microphone is blocked/);
+
+  const missing = fakeMicrophone();
+  const absent = await dictation({ microphone: missing.open });
+  absent.subject.start();
+  missing.refuse("NotFoundError");
+  await flushPromises();
+  assert.match(absent.problems.at(-1) || "", /No microphone/);
+});
+
+test("voice input: a recognizer that cannot take a track still dictates, without a level or a held microphone", async () => {
+  class TracklessRecognizer extends FakeRecognizer {
+    start(track) {
+      if (track !== undefined) throw new TypeError("parameter 1 is not of type 'MediaStreamTrack'");
+      super.start(track);
+    }
+  }
+  const mic = fakeMicrophone();
+  const { subject, heard } = await dictation({ recognition: TracklessRecognizer, microphone: mic.open });
+
+  subject.start();
+  mic.allow();
+  await flushPromises();
+  assert.equal(FakeRecognizer.made[0].started, true);
+  assert.equal(mic.opened[0].closed, true);
+  assert.equal(subject.level(), 0);
+  FakeRecognizer.made[0].hear("still typed");
+  subject.stop();
+  assert.deepEqual(heard, ["still typed"]);
+});
+
+test("voice input: disposing while listening drops what was heard and releases the microphone", async () => {
+  const mic = fakeMicrophone();
+  const { subject, heard, listening } = await dictation({ microphone: mic.open });
+
+  subject.start();
+  mic.allow();
+  await flushPromises();
+  FakeRecognizer.made[0].hear("half a thought");
+  subject.dispose();
+  assert.equal(FakeRecognizer.made[0].aborted, true);
+  assert.deepEqual(heard, []);
+  assert.deepEqual(listening, [true, false]);
+  assert.equal(mic.opened[0].closed, true);
+});
+
+test("voice input: a browser without speech recognition disables the microphone and says so", async () => {
+  const chrome = await createChromeHarness();
+  const voice = chrome.element("chatVoice");
+
+  assert.equal(voice.disabled, true);
+  assert.equal(voice["aria-label"], "Voice input needs Chrome or Edge");
+  assert.equal(voice["data-tip"], "Voice input needs Chrome or Edge");
+  const down = chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  assert.equal(down.defaultPrevented, true, "the shortcut never types a space");
+  assert.match(chrome.element("chatVoiceNote").textContent, /Voice input needs Chrome or Edge/);
+});
+
+test("voice input: holding Ctrl+Shift+Space dictates into the message box at the caret and never sends", async () => {
+  const { chrome, posts, voice, note } = await voiceHarness();
+  const input = chrome.element("chatInput");
+  input.value = "Tighten cards";
+  input.setSelectionRange(7, 7);
+
+  assert.equal(voice.disabled, false);
+  assert.match(voice["data-tip"], /Hold Ctrl\+Shift\+Space/);
+  const down = chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  assert.equal(down.defaultPrevented, true, "the held space never types into the message box");
+  const recognizer = FakeRecognizer.made[0];
+  assert.equal(recognizer.started, true);
+  assert.equal(voice.classList.contains("recording"), true);
+  assert.equal(chrome.element("chatField").classList.contains("is-dictating"), true);
+  assert.equal(note.textContent, "Listening · release Ctrl+Shift+Space to type");
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space", { repeat: true }));
+  assert.equal(FakeRecognizer.made.length, 1);
+
+  recognizer.hear("the spacing on the");
+  const up = chrome.dispatchDocumentEvent("keyup", voiceKey("keyup", "Space"));
+
+  assert.equal(up.defaultPrevented, true);
+  assert.equal(input.value, "Tighten the spacing on the cards");
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [26, 26]);
+  assert.equal(input.focused, true);
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.equal(chrome.element("chatField").classList.contains("is-dictating"), false);
+  assert.equal(note.textContent, "");
+  await flushPromises();
+  assert.deepEqual(
+    posts.filter((url) => url.endsWith("/prompts")),
+    [],
+    "dictation never sends by itself",
+  );
+  assert.deepEqual(chrome.queued(), []);
+});
+
+test("a re-render keeps the keyboard on a queued note's remove button", async () => {
+  const chrome = await createChromeHarness({
+    storedQueue: [{ uid: "", prompt: "Already queued", selector: "h1", tag: "element", text: "Heading" }],
+  });
+  const [remove] = chrome.element("queuedLog").querySelectorAll("[data-focus-key]");
+  remove.focus();
+
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    prompt: { prompt: "Keep this for later", selector: "h2", tag: "annotation", text: "Later" },
+  });
+
+  const focused = chrome.context.document.activeElement;
+  assert.equal(focused?.dataset.focusKey, remove.dataset.focusKey);
+  assert.notEqual(focused, remove, "the queued notes were rebuilt");
+});
+
+// The microphone is the board's voice bubble: a click opens the recent dictations, each with Copy
+// and Paste into this box, and only the held key listens.
+test("voice input: listening, the voice bubble records and is named Listening", async () => {
+  const { chrome, voice } = await voiceHarness();
+
+  assert.equal(voice["aria-label"], "Recent dictations");
+  assert.equal(voice["data-tip"], "Hold Ctrl+Shift+Space to dictate");
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+
+  assert.equal(voice.classList.contains("recording"), true);
+  assert.equal(voice["aria-label"], "Listening");
+  assert.equal(voice["data-tip"], "Listening · release Ctrl+Shift+Space to type");
+
+  chrome.dispatchDocumentEvent("keyup", voiceKey("keyup", "Space"));
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.equal(voice["aria-label"], "Recent dictations");
+});
+
+test("voice input: a click on the voice bubble opens the recent dictations, newest first, and never listens", async () => {
+  const { chrome, voice } = await voiceHarness();
+  const card = chrome.element("chatVoiceRecent");
+  dictate(chrome, "make the header sticky");
+  dictate(chrome, "tighten the cards");
+  assert.equal(card.hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+
+  voice.click();
+
+  assert.equal(FakeRecognizer.made.length, 2, "a click never starts listening");
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.equal(card.hidden, false);
+  assert.equal(voice["aria-expanded"], "true");
+  const entries = recentEntries(chrome);
+  assert.deepEqual(
+    entries.map((entry) => entry.text),
+    ["tighten the cards", "make the header sticky"],
+  );
+  assert.deepEqual(buttonNames(entries[0]), ["Copy: tighten the cards", "Paste into this box: tighten the cards"]);
+  assert.deepEqual(
+    entries[0].buttons.map((button) => button["data-tip"]),
+    ["Copy", "Paste into this box"],
+  );
+  assert.match(entries[0].time, /\d/, "each dictation shows when it was said");
+  assert.equal(chrome.element("chatVoiceRecentEmpty").hidden, true);
+
+  voice.click();
+  assert.equal(card.hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+});
+
+test("voice input: Paste puts a recent dictation into the message box at the caret and closes the list", async () => {
+  const { chrome, voice, posts } = await voiceHarness();
+  const input = chrome.element("chatInput");
+  dictate(chrome, "the spacing on the");
+  input.value = "Tighten cards";
+  input.setSelectionRange(7, 7);
+  input.focused = false;
+
+  voice.click();
+  recentEntries(chrome)[0].buttons[1].click();
+
+  assert.equal(input.value, "Tighten the spacing on the cards");
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [26, 26]);
+  assert.equal(input.focused, true);
+  assert.equal(chrome.element("chatVoiceRecent").hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+  await flushPromises();
+  assert.deepEqual(
+    posts.filter((url) => url.endsWith("/prompts")),
+    [],
+    "a paste never sends by itself",
+  );
+});
+
+test("voice input: Copy puts a recent dictation on the clipboard and says so for a moment", async () => {
+  const { chrome, voice } = await voiceHarness();
+  dictate(chrome, "ship it");
+  voice.click();
+
+  recentEntries(chrome)[0].buttons[0].click();
+  await flushPromises();
+
+  assert.deepEqual(chrome.clipboardWrites, ["ship it"]);
+  let copy = recentEntries(chrome)[0].buttons[0];
+  assert.equal(copy["data-tip"], "Copied");
+  assert.equal(copy["aria-label"], "Copy: ship it");
+  assert.equal(chrome.element("chatVoiceRecent").hidden, false, "Copy leaves the list open");
+
+  chrome.runTimers(1400);
+  copy = recentEntries(chrome)[0].buttons[0];
+  assert.equal(copy["data-tip"], "Copy");
+});
+
+test("voice input: a page without a clipboard offers Paste alone", async () => {
+  const { chrome, voice } = await voiceHarness({ clipboard: false });
+  dictate(chrome, "ship it");
+
+  voice.click();
+
+  assert.deepEqual(buttonNames(recentEntries(chrome)[0]), ["Paste into this box: ship it"]);
+});
+
+test("voice input: with nothing dictated the list says so", async () => {
+  const { chrome, voice } = await voiceHarness();
+
+  voice.click();
+
+  assert.equal(chrome.element("chatVoiceRecent").hidden, false);
+  assert.equal(chrome.element("chatVoiceRecentEmpty").hidden, false);
+  assert.equal(chrome.element("chatVoiceRecentList").hidden, true);
+  assert.deepEqual(recentEntries(chrome), []);
+});
+
+test("voice input: Escape or the close button closes the recent dictations and puts the keyboard on the bubble", async () => {
+  const { chrome, voice } = await voiceHarness();
+  const card = chrome.element("chatVoiceRecent");
+  let stopped = false;
+
+  voice.click();
+  voice.focused = false;
+  chrome.element("chatVoiceDock").dispatch("keydown", {
+    key: "Escape",
+    stopPropagation() {
+      stopped = true;
+    },
+  });
+
+  assert.equal(card.hidden, true);
+  assert.equal(voice.focused, true);
+  assert.equal(stopped, true, "the Escape that closes the list closes nothing else");
+
+  voice.click();
+  voice.focused = false;
+  chrome.element("chatVoiceRecentClose").click();
+  assert.equal(card.hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+  assert.equal(voice.focused, true);
+});
+
+test("voice input: Escape closes the recent dictations wherever the keyboard is, and only them", async () => {
+  const { chrome, voice } = await voiceHarness();
+  const card = chrome.element("chatVoiceRecent");
+  let stopped = false;
+  chrome.element("chatVoiceDock").dispatch("keydown", {
+    key: "Escape",
+    stopPropagation() {
+      stopped = true;
+    },
+  });
+  assert.equal(stopped, false, "a closed list leaves Escape to the rest of the page");
+
+  voice.click();
+  chrome.element("chatInput").focus();
+  chrome.dispatchDocumentEvent("keydown", { key: "Escape" });
+
+  assert.equal(card.hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+  assert.equal(chrome.context.document.activeElement, chrome.element("chatInput"), "the keyboard stays in the box");
+});
+
+test("voice input: a re-render keeps the keyboard on the recent dictation's button", async () => {
+  const { chrome, voice } = await voiceHarness();
+  const focusedLabel = () => chrome.context.document.activeElement?.["aria-label"];
+  dictate(chrome, "ship it");
+  voice.click();
+
+  recentEntries(chrome)[0].buttons[1].focus();
+  chrome.eventSource().listeners.get("agent-presence")({ data: JSON.stringify({ state: "listening" }) });
+  assert.equal(focusedLabel(), "Paste into this box: ship it");
+
+  const copy = recentEntries(chrome)[0].buttons[0];
+  copy.focus();
+  copy.click();
+  await flushPromises();
+  assert.equal(recentEntries(chrome)[0].buttons[0]["data-tip"], "Copied");
+  assert.equal(focusedLabel(), "Copy: ship it");
+  chrome.runTimers(1400);
+  assert.equal(recentEntries(chrome)[0].buttons[0]["data-tip"], "Copy");
+  assert.equal(focusedLabel(), "Copy: ship it");
+});
+
+test("voice input: this visit's dictations stay listed when the browser refuses to keep them", async () => {
+  class RefusingStore extends Map {
+    /** @returns {never} */
+    set() {
+      throw new Error("QuotaExceededError");
+    }
+  }
+  const { chrome, voice } = await voiceHarness({ localStore: new RefusingStore() });
+  dictate(chrome, "first");
+  dictate(chrome, "second");
+
+  voice.click();
+
+  assert.deepEqual(
+    recentEntries(chrome).map((entry) => entry.text),
+    ["second", "first"],
+  );
+});
+
+test("voice input: the recent dictations follow the bubble in the page, so Tab goes from the bubble into them", () => {
+  const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
+  const bubble = html.search(/id="chatVoice"[\s>]/);
+  const card = html.indexOf('id="chatVoiceRecent"');
+
+  assert.ok(bubble > 0 && card > bubble, "the card comes after the bubble");
+});
+
+test("voice input: the list shows this review's five newest dictations and the browser keeps ten", async () => {
+  const localStore = new Map();
+  const phrases = Array.from({ length: 12 }, (_, index) => `note ${index + 1}`);
+  const first = await voiceHarness({ localStore });
+  for (const phrase of phrases) dictate(first.chrome, phrase);
+
+  first.voice.click();
+  assert.deepEqual(
+    recentEntries(first.chrome).map((entry) => entry.text),
+    ["note 12", "note 11", "note 10", "note 9", "note 8"],
+  );
+  const kept = JSON.parse(localStore.get("lavish-axi:dictations")).abc;
+  assert.deepEqual(
+    kept.map((entry) => entry.text),
+    phrases.slice(2).reverse(),
+  );
+
+  const reloaded = await voiceHarness({ localStore });
+  reloaded.voice.click();
+  assert.deepEqual(
+    recentEntries(reloaded.chrome).map((entry) => entry.text),
+    ["note 12", "note 11", "note 10", "note 9", "note 8"],
+    "a reload lists the same dictations",
+  );
+
+  const other = await voiceHarness({ localStore, sessionData: { ...defaultSessionData, key: "other" } });
+  other.voice.click();
+  assert.deepEqual(recentEntries(other.chrome), [], "another review lists only its own");
+});
+
+test("voice input: the browser keeps dictations for the twenty reviews used most recently", async () => {
+  const localStore = new Map();
+  const older = Object.fromEntries(
+    Array.from({ length: 20 }, (_, index) => [`review-${index}`, [{ text: `old ${index}`, at: 1000 + index }]]),
+  );
+  localStore.set("lavish-axi:dictations", JSON.stringify(older));
+  const { chrome } = await voiceHarness({ localStore });
+
+  dictate(chrome, "newest");
+
+  const kept = JSON.parse(localStore.get("lavish-axi:dictations"));
+  assert.equal(Object.keys(kept).length, 20);
+  assert.equal(kept.abc[0].text, "newest");
+  assert.equal(kept["review-0"], undefined, "the review used longest ago gives way");
+  assert.deepEqual(kept["review-19"], [{ text: "old 19", at: 1019 }]);
+});
+
+test("voice input: a broken dictation record reads as none and the next dictation is kept", async () => {
+  const localStore = new Map([["lavish-axi:dictations", "not json"]]);
+  const { chrome, voice } = await voiceHarness({ localStore });
+
+  voice.click();
+  assert.deepEqual(recentEntries(chrome), []);
+  voice.click();
+  dictate(chrome, "ship it");
+
+  assert.deepEqual(
+    JSON.parse(localStore.get("lavish-axi:dictations")).abc.map((entry) => entry.text),
+    ["ship it"],
+  );
+
+  localStore.set(
+    "lavish-axi:dictations",
+    JSON.stringify({ abc: [{ text: "kept", at: 5 }, { text: 7, at: 6 }, { text: "no time" }, null] }),
+  );
+  const reloaded = await voiceHarness({ localStore });
+  reloaded.voice.click();
+  assert.deepEqual(
+    recentEntries(reloaded.chrome).map((entry) => entry.text),
+    ["kept"],
+  );
+});
+
+test("voice input: ending the session closes the recent dictations", async () => {
+  const { chrome, voice } = await voiceHarness();
+  voice.click();
+
+  chrome.eventSource().listeners.get("ended")({ data: JSON.stringify({ ended_by: "agent" }) });
+
+  assert.equal(voice.disabled, true);
+  assert.equal(chrome.element("chatVoiceRecent").hidden, true);
+  assert.equal(voice["aria-expanded"], "false");
+});
+
+// On a plain-http link (an old tailnet link, or no https proxy at all) the browser refuses the
+// microphone, and "allow it in the site settings" sent the reader looking for a setting that cannot
+// fix it: the link is what has to change.
+test("voice input: a plain-http page says voice needs a secure link and never listens", async () => {
+  FakeRecognizer.made = [];
+  let microphones = 0;
+  const chrome = await createChromeHarness({
+    speech: {
+      Recognition: FakeRecognizer,
+      getUserMedia: async () => {
+        microphones += 1;
+        throw Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });
+      },
+    },
+    insecure: true,
+  });
+  const voice = chrome.element("chatVoice");
+  const note = chrome.element("chatVoiceNote");
+
+  assert.equal(voice["data-tip"], "Voice input needs this page's https link");
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  await flushPromises();
+
+  assert.equal(FakeRecognizer.made.length, 0);
+  assert.equal(microphones, 0);
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.match(note.textContent, /Voice input needs this page's https link/);
+  assert.match(note.textContent, /plain http/);
+  assert.doesNotMatch(note.textContent, /site settings/);
+});
+
+test("voice input: a denied microphone says so in plain words", async () => {
+  const { chrome, voice, note } = await voiceHarness({
+    getUserMedia: async () => {
+      throw Object.assign(new Error("Permission denied"), { name: "NotAllowedError" });
+    },
+  });
+
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  await flushPromises();
+
+  assert.equal(FakeRecognizer.made[0].started, false);
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.match(note.textContent, /The microphone is blocked for this page/);
+  assert.equal(note.classList.contains("is-problem"), true);
+  chrome.runTimers(6000);
+  assert.equal(note.textContent, "");
+});
+
+test("voice input: ending the session while listening drops the dictation and disables the microphone", async () => {
+  const { chrome, voice } = await voiceHarness();
+
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  const recognizer = FakeRecognizer.made[0];
+  recognizer.hear("half a thought");
+  chrome.eventSource().listeners.get("ended")({ data: JSON.stringify({ ended_by: "agent" }) });
+
+  assert.equal(recognizer.aborted, true);
+  assert.equal(chrome.element("chatInput").value, "");
+  assert.equal(voice.disabled, true);
+  assert.equal(voice.classList.contains("recording"), false);
+  assert.deepEqual(
+    JSON.parse(chrome.context.localStorage.getItem("lavish-axi:dictations") || "{}"),
+    {},
+    "a dropped dictation is never kept",
+  );
+});
+
+// The page's annotation box opens, as the SDK says it does: the card is up on an element.
+function openPageCard(chrome) {
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: { uid: "u-1", selector: "h2", tag: "h2", text: "Step 2. Payment" },
+    card: true,
+  });
+}
+
+function pageDictate(chrome, action) {
+  chrome.sendFrameMessage({ type: "lavish:dictate", action, artifact_load_token: chrome.artifactLoadToken() });
+}
+
+const lastVoiceState = (chrome) => chrome.postedToFrame.findLast((message) => message.type === "lavish:voiceState");
+
+test("voice input: the page's open annotation box draws its bubble from the chrome's voice", async () => {
+  const { chrome } = await voiceHarness();
+  dictate(chrome, "make the header sticky");
+  assert.equal(lastVoiceState(chrome), undefined, "nothing is told to a page with no box open");
+
+  openPageCard(chrome);
+
+  const state = lastVoiceState(chrome);
+  assert.equal(state.supported, true);
+  assert.equal(state.listening, false);
+  assert.equal(state.canCopy, true);
+  assert.deepEqual(
+    [...state.dictations.map((dictation) => dictation.text)],
+    ["make the header sticky"],
+    "the box lists this review's recent dictations",
+  );
+});
+
+test("voice input: the held keys in the page's annotation box dictate into that box, not the Conversation box", async () => {
+  const { chrome, voice, posts } = await voiceHarness();
+  const input = chrome.element("chatInput");
+  openPageCard(chrome);
+  chrome.context.navigator.userActivation = { isActive: true };
+
+  pageDictate(chrome, "start");
+
+  const recognizer = FakeRecognizer.made[0];
+  assert.equal(recognizer?.started, true, "the chrome listens for the page");
+  assert.equal(lastVoiceState(chrome).listening, true, "the page's bubble records");
+  assert.equal(voice.classList.contains("recording"), false, "the Conversation box's bubble does not");
+  recognizer.hear("say which address is billed");
+  pageDictate(chrome, "stop");
+
+  assert.deepEqual(
+    chrome.postedToFrame.filter((message) => message.type === "lavish:dictated").map((message) => message.text),
+    ["say which address is billed"],
+  );
+  assert.equal(input.value, "", "the Conversation box is untouched");
+  assert.equal(lastVoiceState(chrome).listening, false);
+  assert.deepEqual(
+    [...lastVoiceState(chrome).dictations.map((dictation) => dictation.text)],
+    ["say which address is billed"],
+    "the dictation joins this review's recent dictations",
+  );
+  await flushPromises();
+  assert.deepEqual(
+    posts.filter((url) => url.endsWith("/prompts")),
+    [],
+    "dictation never sends by itself",
+  );
+});
+
+test("voice input: the page cannot listen without an open box or a key press the reader just made", async () => {
+  const { chrome } = await voiceHarness();
+  chrome.context.navigator.userActivation = { isActive: true };
+  pageDictate(chrome, "start");
+  assert.equal(FakeRecognizer.made.length, 0, "no box is open");
+
+  openPageCard(chrome);
+  chrome.context.navigator.userActivation = { isActive: false };
+  pageDictate(chrome, "start");
+  assert.equal(FakeRecognizer.made.length, 0, "no key press of the reader's");
+
+  delete chrome.context.navigator.userActivation;
+  pageDictate(chrome, "start");
+  assert.equal(FakeRecognizer.made.length, 0, "a browser that cannot say so is never trusted");
+});
+
+test("voice input: closing the page's annotation box stops its dictation", async () => {
+  const { chrome } = await voiceHarness();
+  openPageCard(chrome);
+  chrome.context.navigator.userActivation = { isActive: true };
+  pageDictate(chrome, "start");
+  const recognizer = FakeRecognizer.made[0];
+  recognizer.hear("half a thought");
+
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: null,
+    card: false,
+  });
+
+  assert.equal(chrome.postedToFrame.findLast((message) => message.type === "lavish:dictated")?.text, "half a thought");
+  openPageCard(chrome);
+  assert.equal(lastVoiceState(chrome).listening, false, "the next box opens on a chrome that is not listening");
+});
+
+test("voice input: Copy in the page's list copies only one of this review's own dictations", async () => {
+  const { chrome } = await voiceHarness();
+  dictate(chrome, "ship it");
+  openPageCard(chrome);
+  const copied = () => chrome.postedToFrame.filter((message) => message.type === "lavish:dictationCopied");
+
+  chrome.sendFrameMessage({
+    type: "lavish:copyDictation",
+    text: "ship it",
+    artifact_load_token: chrome.artifactLoadToken(),
+  });
+  await flushPromises();
+  chrome.sendFrameMessage({
+    type: "lavish:copyDictation",
+    text: "anything the page wants",
+    artifact_load_token: chrome.artifactLoadToken(),
+  });
+  await flushPromises();
+
+  assert.deepEqual(chrome.clipboardWrites, ["ship it"]);
+  assert.deepEqual(
+    copied().map((message) => message.ok),
+    [true, false],
+  );
 });

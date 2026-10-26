@@ -1,5 +1,5 @@
 import crypto from "node:crypto";
-import { readFile, realpath, writeFile } from "node:fs/promises";
+import { readFile, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -84,14 +84,6 @@ export class SessionStore {
     return this.runExclusive(async () => {
       const state = await this.readState();
       return Object.values(state.sessions).sort((a, b) => a.file.localeCompare(b.file));
-    });
-  }
-
-  async findByFile(file) {
-    const absolute = await canonicalFile(file);
-    return this.runExclusive(async () => {
-      const state = await this.readState();
-      return state.sessions[sessionKey(absolute)] || null;
     });
   }
 
@@ -605,7 +597,7 @@ export class SessionStore {
       // failures can reach the agent without explicit user action.
       const artifactFailures = Array.isArray(session.artifact_failures) ? session.artifact_failures : [];
       const alreadyEnded = session.status === "ended";
-      if (prompts.length === 0 && artifactFailures.length === 0) {
+      if (!hasUndeliveredFeedback(session)) {
         return alreadyEnded ? { status: "ended", ended_by: session.ended_by } : { status: "waiting" };
       }
       const result = {
@@ -667,6 +659,30 @@ export class SessionStore {
       session.updated_at = new Date().toISOString();
       await this.writeState(state);
       return session;
+    });
+  }
+
+  // Ends, as the agent, every open session whose page file is gone and that holds nothing a poll
+  // would deliver; a gone page with undelivered feedback stays open for a poll to collect it. The
+  // check and the end share the lock, so feedback queued meanwhile is never ended out from under.
+  async endGoneSessions() {
+    return this.runExclusive(async () => {
+      const state = await this.readState();
+      const ended = [];
+      const pending = [];
+      for (const session of Object.values(state.sessions)) {
+        if (session.status === "ended" || !(await isFileGone(session.file))) continue;
+        if (hasUndeliveredFeedback(session)) {
+          pending.push(session);
+          continue;
+        }
+        session.status = "ended";
+        session.ended_by = "agent";
+        session.updated_at = new Date().toISOString();
+        ended.push(session);
+      }
+      if (ended.length > 0) await this.writeState(state);
+      return { ended, pending };
     });
   }
 
@@ -753,6 +769,40 @@ export class SessionStore {
 export async function canonicalFile(file) {
   const absolute = path.resolve(file);
   return realpath(absolute);
+}
+
+// The key path of a session that may outlive its page: a retired worktree takes the page with it
+// while the session stays in state.json. Once the file is gone this is the realpath of its nearest
+// surviving directory plus the rest of the path, which is what `canonicalFile` returned while the
+// file existed unless a symlink inside the deleted part redirected it. Finding an existing session
+// goes through here; opening or reading a page keeps `canonicalFile`, because those need the file.
+export async function canonicalSessionFile(file) {
+  const absolute = path.resolve(file);
+  try {
+    return await realpath(absolute);
+  } catch (error) {
+    if (!isGoneError(error)) throw error;
+    const parent = path.dirname(absolute);
+    if (parent === absolute) return absolute;
+    return path.join(await canonicalSessionFile(parent), path.basename(absolute));
+  }
+}
+
+// Only a missing path proves a page is gone; a page that cannot be read for another reason is not.
+export async function isFileGone(file) {
+  return stat(file).then(() => false, isGoneError);
+}
+
+function isGoneError(error) {
+  return error?.code === "ENOENT" || error?.code === "ENOTDIR";
+}
+
+// What a poll would deliver. A session holding any of it is never ended for being gone.
+function hasUndeliveredFeedback(session) {
+  return (
+    (session.prompts || []).length > 0 ||
+    (Array.isArray(session.artifact_failures) && session.artifact_failures.length > 0)
+  );
 }
 
 export function sessionKey(file) {

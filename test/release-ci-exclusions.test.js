@@ -225,8 +225,8 @@ test("every pull_request workflow ignores the full release-output set", () => {
 test("does not attach path filters to non-pull_request triggers on ci.yml", () => {
   const on = loadWorkflowOn(join(workflowsDir, "ci.yml"));
   assert.ok(on);
-  assert.deepEqual(on.push, { branches: ["main"] });
-  assert.deepEqual(on.pull_request.branches, ["main"]);
+  assert.deepEqual(on.push, { branches: ["main", "code-goblins"] });
+  assert.deepEqual(on.pull_request.branches, ["main", "code-goblins"]);
   assert.deepEqual(on.pull_request["paths-ignore"], [
     ".release-please-manifest.json",
     "CHANGELOG.md",

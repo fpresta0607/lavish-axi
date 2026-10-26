@@ -1,12 +1,13 @@
 import crypto from "node:crypto";
 import { EventEmitter } from "node:events";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { readFile, realpath } from "node:fs/promises";
 import { createServer, get as httpGet } from "node:http";
 import { isIP } from "node:net";
 import { homedir } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
+import { gzipSync } from "node:zlib";
 
 import chokidar from "chokidar";
 import express from "express";
@@ -23,6 +24,7 @@ import {
   isNativeInteractiveControl,
   isNearTotalOcclusion,
   isTrustedAttachmentResult,
+  rebuildKeepingFocus,
   attachmentSizeError,
   acceptedImageTypes,
   classifyAttachmentBatch,
@@ -36,8 +38,13 @@ import {
   serializeLayoutWarnings,
 } from "./layout-warnings.js";
 import * as artifactRevisions from "./artifact-revisions.js";
+import * as boardTips from "./board-tips.js";
+import * as messageBox from "./message-box.js";
+import { messageBoxHtml } from "./message-box.js";
 import * as mermaidNode from "./mermaid-node.js";
+import * as pageChoices from "./page-choices.js";
 import * as tableCellHelpers from "./table-cell.js";
+import * as pageColors from "./page-colors.js";
 import { extractMermaidSources, mermaidSourceHash } from "./mermaid-source.js";
 import {
   isValidDiagramIndex,
@@ -57,11 +64,21 @@ import { serializeChat, serializeChatAckIds, serializeChatSync } from "./chat-me
 import { formatServerLogLine, serverStdioIsTimestamped } from "./server-log.js";
 import { injectLavishSdk } from "./html-transform.js";
 import {
+  boardFontFaces,
+  boardRulesFor,
+  boardScrollbarThumb,
+  boardTokenDeclarations,
+  boardTokenValue,
+} from "./board-tokens.js";
+import { brandName, brandTitleSuffix, DEFAULT_BRAND } from "./brand.js";
+import { loadProjectTheme, projectThemeCss, SIQ_THEME, themeScheme } from "./project-theme.js";
+import {
   bindHost,
   extraAllowedHosts,
   hostForUrl,
   IPV6_LOOPBACK_HOST,
   isWildcardHost,
+  linkUrlOrigin,
   LOOPBACK_HOST,
   resolveConcreteListenHosts,
   resolveLinkHost,
@@ -69,8 +86,8 @@ import {
   sanitizeListenHosts,
   stateId,
 } from "./paths.js";
-import { detectTailscale } from "./tailscale.js";
-import { canonicalFile, SessionStore, sessionKey } from "./session-store.js";
+import { detectTailscale, readTailscaleServeStatus, tailscaleHttpsProxyOrigin } from "./tailscale.js";
+import { canonicalFile, canonicalSessionFile, SessionStore, sessionKey } from "./session-store.js";
 import { AsyncMutex } from "./async-mutex.js";
 import { generateSharePassword } from "./share-password.js";
 import {
@@ -86,7 +103,69 @@ import {
 
 const chromeClientUrl = new URL("./chrome-client.js", import.meta.url);
 const chromeCssUrl = new URL("./chrome.css", import.meta.url);
+// How the frame wears a project's saved theme (src/project-theme.js), after Scrawl's own rules.
+const projectThemeCssUrl = new URL("./project-theme.css", import.meta.url);
+// The Code Goblins board's look, by value: its token block, the rules copied from it, its fonts
+// and its goblin. test/board-tokens.test.js fails when the copies differ from the board's.
+const boardTokensUrl = new URL("./board-tokens.css", import.meta.url);
+const boardComponentsUrl = new URL("./board-components.css", import.meta.url);
+// The one message box both the Conversation panel and the annotation box draw (src/message-box.js).
+const messageBoxCssUrl = new URL("./message-box.css", import.meta.url);
+const boardFontsUrl = new URL("./fonts/", import.meta.url);
+const boardGoblinUrl = new URL("./assets/goblin-app.png", import.meta.url);
+const BOARD_FONT_FILES = new Set(["pixelify-sans.woff2", "nunito.woff2", "jetbrains-mono.woff2"]);
+const BOARD_ASSET_MAX_AGE_SECONDS = 7 * 24 * 60 * 60;
+const boardTokensCss = readFileSync(boardTokensUrl, "utf8");
+const boardComponentsCss = readFileSync(boardComponentsUrl, "utf8");
+const messageBoxCss = readFileSync(messageBoxCssUrl, "utf8");
+// The copied board rules the annotation UI inside a reviewed page is drawn with: base controls,
+// the comment box and its chip, the voice bubble and its card, and the question card.
+const BOARD_SDK_RULE_PREFIXES = [
+  "*",
+  "[data-tip",
+  "[hidden]",
+  "button",
+  "textarea",
+  "::placeholder",
+  "::selection",
+  ":focus-visible",
+  ".muted",
+  ".sr-only",
+  ".icon",
+  ".voice-",
+  ".primary",
+  ".delivery",
+  ".tip",
+  ".comment-",
+  ".question-",
+  ".choice-mark",
+  ".answered-by",
+  ".recommendation",
+  ".written-answer",
+  ".card-actions",
+  ".send-decision",
+  "@keyframes card-in",
+];
+// What the SDK takes from the board: the stylesheet for its shadow root, where `:root` selects
+// nothing so the tokens sit on `:host`; the font faces, which a shadow root cannot declare; and
+// the colours the page itself wears while it is annotated.
+const SDK_BOARD = {
+  shadowCss: [
+    `:host{${boardTokenDeclarations(boardTokensCss)}}`,
+    boardRulesFor(boardComponentsCss, BOARD_SDK_RULE_PREFIXES),
+    messageBoxCss,
+  ].join("\n"),
+  fontFaces: boardFontFaces(boardTokensCss),
+  accent: boardTokenValue(boardTokensCss, "--accent-green"),
+  scrollbarThumb: boardScrollbarThumb(boardComponentsCss),
+  scrollbarTrack: boardTokenValue(boardTokensCss, "--body-bg"),
+};
+// What a page links to wear the board's look: the board's token block, the same file the review
+// page is drawn from, and the page patterns laid out in it (src/board-page.css).
+const boardPageUrl = new URL("./board-page.css", import.meta.url);
 const designAssetUrls = {
+  "board-tokens.css": { packaged: boardTokensUrl, source: boardTokensUrl, type: "text/css" },
+  "board-page.css": { packaged: boardPageUrl, source: boardPageUrl, type: "text/css" },
   "daisyui.css": {
     packaged: new URL("./design/daisyui.css", import.meta.url),
     source: new URL("../node_modules/daisyui/daisyui.css", import.meta.url),
@@ -107,6 +186,8 @@ const designAssetUrls = {
 const DEFAULT_IDLE_TIMEOUT_MS = 30 * 60_000;
 const WHITEBOARD_CHANNEL_TOKEN_TTL_MS = 5 * 60_000;
 const NETWORK_RECONCILE_CACHE_MS = 1_000;
+// A socket's local address on the loopback interface, IPv4, IPv6 or IPv4-mapped.
+const LOOPBACK_ADDRESS_PATTERN = /^(127\.|::1$|::ffff:127\.)/;
 // Every concrete address gets this retry budget, not just the Tailscale one: an interface that is
 // still coming up fails the same way whichever host names it, and the single-pinned-host case has
 // no second listener to fall back on.
@@ -123,6 +204,10 @@ const WEBSOCKET_CLOSE_GRACE_MS = 250;
 // unanswered ping.
 const LIVE_EVENT_HEARTBEAT_MS = 30_000;
 const BROWSER_DISCONNECT_GRACE_MS = 10_000;
+// A supervisor polls in rounds, each a new `lavish-axi poll` process, so between two rounds no poll
+// holds the page for as long as a process takes to start. The page stays listening for this long
+// after a poll ends, so that gap never shows as the agent leaving.
+const POLL_RELEASE_GRACE_MS = 10_000;
 // An escaped popup can navigate to an artifact-owned HTML or SVG asset on the
 // server origin. Keep every artifact response sandboxed at the response layer
 // so active documents stay opaque-origin even when they are top-level.
@@ -282,12 +367,14 @@ export async function serve({
   pollHeartbeatMs = 15_000,
   liveEventHeartbeatMs = LIVE_EVENT_HEARTBEAT_MS,
   browserDisconnectGraceMs = BROWSER_DISCONNECT_GRACE_MS,
+  pollReleaseGraceMs = POLL_RELEASE_GRACE_MS,
   idleTimeoutMs = resolveIdleTimeoutMs(),
   host = bindHost(env),
   hosts,
   linkHost: linkHostName,
   allowedHosts,
   detectTailscale: detectTailscaleFn,
+  readTailscaleServeStatus: readTailscaleServeStatusFn,
   lookupHost,
   extraListenHosts = [],
   bindRecoveryDelaysMs = BIND_RECOVERY_DELAYS_MS,
@@ -299,6 +386,9 @@ export async function serve({
   const envHost = env.LAVISH_AXI_HOST?.trim();
   const autoTailscale = !envHost;
   const detect = detectTailscaleFn === undefined ? detectTailscale : detectTailscaleFn;
+  const readServeStatus =
+    readTailscaleServeStatusFn === undefined ? readTailscaleServeStatus : readTailscaleServeStatusFn;
+  const explicitLinkOrigin = linkUrlOrigin(env);
   const tailscale = !hosts?.length && autoTailscale && typeof detect === "function" ? await detect() : null;
   const requestedListenHosts = sanitizeListenHosts(
     hosts?.length
@@ -320,6 +410,9 @@ export async function serve({
   /** @type {Map<string, Error>} */
   const pendingBinds = new Map();
   let resolvedLinkHost = linkHostName ?? resolveLinkHost({ env, tailscale, fallbackHost: host });
+  // The https origin `tailscale serve` proxies to this server, if any, and when it was last read.
+  let httpsProxyOrigin = null;
+  let httpsProxyCheckedAt = 0;
   // Declared before anything listens: a live-event client or /shutdown can reach these handlers
   // the moment the first listener binds, while later addresses are still retrying. Declaring them
   // after the bind loop made that window a TDZ ReferenceError that crashed restarted servers.
@@ -331,6 +424,9 @@ export async function serve({
   const events = new EventEmitter();
   const watchers = new Map();
   const activePolls = new Map();
+  // A poll that just ended, still counted as listening until the release grace passes or a new
+  // poll claims the page. It never owns the page: ownership and idle shutdown read activePolls.
+  const lingeringPolls = new Map();
   const deliveredFeedback = new Set();
   const pollOwnershipLock = new AsyncMutex();
   // Keyed by session so a version-driven shutdown can reload the one chrome whose artifact is
@@ -369,13 +465,20 @@ export async function serve({
   // One listener per event scales independently of the number of open review tabs and avoids the
   // EventEmitter listener warning the former one-listener-per-SSE-client design reached at only a
   // few boards.
-  events.on("reload", (key) => broadcastLiveEvent("reload", key));
+  events.on("reload", (key) => {
+    clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events);
+    broadcastLiveEvent("reload", key);
+  });
   // The transcript the chrome renders is computed here (src/chat-messages.js): agent text ships
   // with its rendered html, user entries ship as text with their anchor, never as html.
   events.on("agent-reply", (key, entry) => broadcastLiveEvent("agent-reply", key, entry));
   events.on("chat-sync", (key, session) => broadcastLiveEvent("chat-sync", key, serializeChatSync(session)));
   events.on("agent-presence", (key, state) =>
-    broadcastLiveEvent("agent-presence", key, presenceEventData(key, state, activePolls, deliveredFeedback)),
+    broadcastLiveEvent(
+      "agent-presence",
+      key,
+      presenceEventData(key, state, activePolls, deliveredFeedback, lingeringPolls),
+    ),
   );
   events.on("layout-warnings", (key, warnings) => broadcastLiveEvent("layout-warnings", key, { warnings }));
   events.on("ended", (key, endedBy) => broadcastLiveEvent("ended", key, { ended_by: endedBy || null }));
@@ -432,8 +535,11 @@ export async function serve({
       return;
     }
     client.sendEvent("chat-sync", serializeChatSync(session));
-    const presence = computePresence(key, activePolls, deliveredFeedback);
-    client.sendEvent("agent-presence", presenceEventData(key, presence, activePolls, deliveredFeedback));
+    const presence = computePresence(key, activePolls, deliveredFeedback, lingeringPolls);
+    client.sendEvent(
+      "agent-presence",
+      presenceEventData(key, presence, activePolls, deliveredFeedback, lingeringPolls),
+    );
     // A connection that attaches after the live end event still needs the terminal snapshot.
     if (session?.status === "ended") client.sendEvent("ended", { ended_by: session.ended_by || null });
   }
@@ -456,7 +562,10 @@ export async function serve({
     const address = `${hostForUrl(listenHost)}:${publicPort || port}`;
     const reachable = `Lavish remains available on ${boundHosts.map((bound) => hostForUrl(bound)).join(", ") || "loopback"}`;
     if (listenHost === tailscale?.ipv4) {
-      return `Tailscale binding failed for ${address} (${why}); there is no phone access and tailnet review links do not load. ${reachable} and keeps retrying the tailnet address in the background.`;
+      const access = httpsProxyOrigin
+        ? `plain http tailnet links do not load, while ${httpsProxyOrigin} links through tailscale serve still load`
+        : "there is no phone access and tailnet review links do not load";
+      return `Tailscale binding failed for ${address} (${why}); ${access}. ${reachable} and keeps retrying the tailnet address in the background.`;
     }
     const fellBack = boundHosts.length > 0 && boundHosts.every((bound) => bound === LOOPBACK_HOST);
     return `Could not bind ${address} (${why}); ${fellBack ? "Lavish fell back to loopback and is" : "Lavish is"} not reachable at that address. ${reachable} and keeps retrying ${hostForUrl(listenHost)} in the background.`;
@@ -479,7 +588,23 @@ export async function serve({
   async function reconcileNetwork() {
     await retryPendingBinds();
     if (!(autoTailscale && typeof detect === "function")) return false;
-    return reconcileTailscaleNetwork();
+    const [stale] = await Promise.all([reconcileTailscaleNetwork(), refreshHttpsProxyOrigin()]);
+    return stale;
+  }
+
+  // `tailscale serve` adds and removes the https proxy while Lavish runs, so its status is re-read,
+  // at most once per NETWORK_RECONCILE_CACHE_MS, on every network reconcile, before a session
+  // link is minted, and before a page is sent on to it. The CLI reconciles before it opens a
+  // session, so the open itself rarely waits. Before the server stops on its own it reads afresh.
+  async function refreshHttpsProxyOrigin({ fresh = false } = {}) {
+    if (explicitLinkOrigin || !tailscale?.magicDnsName || typeof readServeStatus !== "function") return;
+    if (!fresh && Date.now() - httpsProxyCheckedAt < NETWORK_RECONCILE_CACHE_MS) return;
+    const status = await readServeStatus();
+    httpsProxyCheckedAt = Date.now();
+    const origin = tailscaleHttpsProxyOrigin(status, { magicDnsName: tailscale.magicDnsName, port: boundPort });
+    if (origin === httpsProxyOrigin) return;
+    httpsProxyOrigin = origin;
+    applyNetworkState();
   }
 
   async function reconcileTailscaleNetwork() {
@@ -509,7 +634,7 @@ export async function serve({
 
   function finishFeedbackDelivery(key, result) {
     if (result.status !== "feedback") return;
-    markFeedbackDelivered(key, activePolls, deliveredFeedback, events);
+    markFeedbackDelivered(key, activePolls, deliveredFeedback, lingeringPolls, events);
   }
 
   // `takeFeedback` is destructive: it clears the batch from `state.json` before anything is
@@ -587,7 +712,10 @@ export async function serve({
   // Loopback names are always accepted. Binding to a concrete interface
   // (LAVISH_AXI_HOST) or naming a link host (LAVISH_AXI_LINK_HOST) adds that host,
   // so an operator who intentionally exposes the server on a specific interface
-  // keeps rebinding protection while their chosen hostname works. Additional
+  // keeps rebinding protection while their chosen hostname works. The host of a
+  // link origin (LAVISH_AXI_LINK_URL, or the https proxy Tailscale serves to this
+  // server) is added the same way, because its proxy reaches Lavish on loopback
+  // carrying that name. Additional
   // names (a reverse-proxy hostname, extra interfaces) are an explicit opt-in via
   // LAVISH_AXI_ALLOWED_HOSTS; a lone "*" there disables the guard for operators
   // who front the server with their own authentication. When a reverse proxy sits
@@ -598,14 +726,26 @@ export async function serve({
   // The mutating-route origin/Referer guard is installed immediately after.
   const allowedHostnames = buildAllowedHostnames({
     host: requestedListenHosts[0],
-    hosts: [...requestedListenHosts, ...listenHosts],
+    hosts: [...requestedListenHosts, ...listenHosts, ...linkOriginHostnames()],
     linkHost: resolvedLinkHost,
     allowedHosts: extraHosts,
   });
   const allowAnyHostname = allowsAllHosts(extraHosts);
 
+  function linkOriginHostnames() {
+    return [explicitLinkOrigin, httpsProxyOrigin]
+      .filter((origin) => origin !== null)
+      .map((origin) => hostnameFromHostHeader(new URL(origin).host));
+  }
+
+  // Where every link this server reports points: LAVISH_AXI_LINK_URL, else the https proxy
+  // Tailscale serves to this server, else plain http on the link host.
+  function linkOrigin() {
+    return explicitLinkOrigin ?? httpsProxyOrigin ?? `http://${hostForUrl(resolvedLinkHost)}:${publicPort}`;
+  }
+
   function workingUrlFor(req, { includeSessionPath = true } = {}) {
-    const origin = `http://${hostForUrl(resolvedLinkHost)}:${publicPort}`;
+    const origin = linkOrigin();
     if (includeSessionPath && typeof req.path === "string" && req.path.startsWith("/session/")) {
       return `${origin}${req.path}`;
     }
@@ -648,9 +788,10 @@ export async function serve({
         status: 403,
         error: "forbidden host",
         title: "Wrong address",
-        message: tailscalePhoneReady
-          ? "This Lavish review server does not accept that host. Open the working URL below on this computer or your phone through Tailscale."
-          : "This Lavish review server does not accept that host. Open the working URL below on this computer. Phone access is unavailable.",
+        message:
+          tailscalePhoneReady || httpsProxyOrigin
+            ? `This ${brandTitleSuffix(brandName())} review server does not accept that host. Open the working URL below on this computer or your phone through Tailscale.`
+            : `This ${brandTitleSuffix(brandName())} review server does not accept that host. Open the working URL below on this computer. Phone access is unavailable.`,
       });
     });
   }
@@ -721,6 +862,9 @@ export async function serve({
       // Configured names sit beside the addresses they resolved to, so a CLI that resolves the same
       // name finds it served whichever form it compares.
       requested_hosts: [...new Set([...listenHosts, ...requestedListenHosts])],
+      // Where every link this server hands out points now. A session keeps the link it was opened
+      // with, so the CLI's session list builds each link from this instead.
+      link_origin: linkOrigin(),
       ...(networkStale ? { network_stale: true } : {}),
       ...(networkWarning ? { network_warning: networkWarning } : {}),
       listeners: [...activePolls].map(([key, holder]) => ({
@@ -753,7 +897,8 @@ export async function serve({
       const key = sessionKey(file);
       const reopen = Boolean(req.body.reopen);
       const existing = await store.findByKey(key);
-      const sessionUrl = `http://${hostForUrl(resolvedLinkHost)}:${publicPort}/session/${key}`;
+      await refreshHttpsProxyOrigin();
+      const sessionUrl = `${linkOrigin()}/session/${key}`;
       // A user-initiated end (ending or send-and-ending from the browser) means the human
       // deliberately closed the review surface. Silently reopening it on the next
       // `lavish-axi <file>` is the exact behavior this route exists to prevent - require an
@@ -773,7 +918,7 @@ export async function serve({
       const url = shouldDisableLayoutGateOpen(req.body || {}) ? appendNoGateParam(sessionUrl) : sessionUrl;
       const session = await store.upsertSession(file, sessionUrl);
       if (existing?.status === "ended") {
-        clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
+        clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events);
       }
       logEvent?.(`session opened key=${key} file=${file}`);
       await syncOutstandingRepairs(key);
@@ -801,7 +946,7 @@ export async function serve({
     events.emit("chat-sync", key, session);
     // The reply concludes the delivered-feedback "working" state. Human sends remain available
     // while working because the server queues them for the next poll.
-    clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
+    clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events);
     return session;
   }
 
@@ -824,6 +969,8 @@ export async function serve({
     let requestClosed = Boolean(req.aborted || (req.method !== "POST" && req.destroyed));
     let cleanupPoll = null;
     let claimedHolder = null;
+    // Only a round that ends empty is bridged: an answer hands off to "working" or ends the review.
+    let releaseGraceMs = pollReleaseGraceMs;
     const onRequestClose = () => {
       // A POST request emits `close` when its JSON body stream ends, before the long-poll
       // response has been written. `aborted` distinguishes that normal parser lifecycle from a
@@ -844,7 +991,7 @@ export async function serve({
     const detachRequestClose = () => req.off("close", onRequestClose);
     req.on("close", onRequestClose);
     try {
-      const file = await canonicalFile(String(req.query.file || ""));
+      const file = await canonicalSessionFile(String(req.query.file || ""));
       const key = sessionKey(file);
       const ownerValue = typeof req.query.owner === "string" ? req.query.owner.trim() : "";
       if (ownerValue.toLowerCase() === "none" || ownerValue.startsWith("-")) {
@@ -867,7 +1014,7 @@ export async function serve({
         if (currentHolder && !takeover) return { conflict: listenerConflict(currentHolder, "LISTENER_ACTIVE") };
         const nextHolder = { key, owner, startedAt: Date.now(), replaced: false, replace: null };
         claimedHolder = nextHolder;
-        const priorPresence = presenceSignature(key, activePolls, deliveredFeedback);
+        const priorPresence = presenceSignature(key, activePolls, deliveredFeedback, lingeringPolls);
         if (currentHolder) {
           // Install the successor before releasing the old response so its cleanup cannot emit a
           // transient "waiting" state or clear the successor's listener ownership.
@@ -877,6 +1024,7 @@ export async function serve({
         } else {
           activePolls.set(key, nextHolder);
         }
+        clearLingeringPoll(key, lingeringPolls);
         // Attaching a fresh round retires the prior delivery marker; releasing a poll never does.
         deliveredFeedback.delete(key);
         if (agentReply !== null) {
@@ -906,18 +1054,19 @@ export async function serve({
           await restoreClosedFeedback(key, immediate);
           detachRequestClose();
           res.json(listenerConflict(holder, "LISTENER_REPLACED"));
-          releasePollListener(holder, activePolls, deliveredFeedback, events);
+          releasePollListener(holder, activePolls, deliveredFeedback, lingeringPolls, events, releaseGraceMs);
           return;
         }
         if (requestClosed || res.writableEnded) {
           await restoreClosedFeedback(key, immediate);
-          releasePollListener(holder, activePolls, deliveredFeedback, events);
+          releasePollListener(holder, activePolls, deliveredFeedback, lingeringPolls, events, releaseGraceMs);
           detachRequestClose();
           return;
         }
         finishFeedbackDelivery(key, immediate);
-        releasePollListener(holder, activePolls, deliveredFeedback, events);
-        if (immediate.session_ended) clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
+        releaseGraceMs = 0;
+        releasePollListener(holder, activePolls, deliveredFeedback, lingeringPolls, events, releaseGraceMs);
+        if (immediate.session_ended) clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events);
         detachRequestClose();
         res.json(immediate);
         return;
@@ -925,11 +1074,11 @@ export async function serve({
       if (holder.replaced) {
         detachRequestClose();
         res.json(listenerConflict(holder, "LISTENER_REPLACED"));
-        releasePollListener(holder, activePolls, deliveredFeedback, events);
+        releasePollListener(holder, activePolls, deliveredFeedback, lingeringPolls, events, releaseGraceMs);
         return;
       }
       if (requestClosed || res.writableEnded) {
-        releasePollListener(holder, activePolls, deliveredFeedback, events);
+        releasePollListener(holder, activePolls, deliveredFeedback, lingeringPolls, events, releaseGraceMs);
         detachRequestClose();
         return;
       }
@@ -955,7 +1104,7 @@ export async function serve({
         events.off("feedback", onFeedback);
         events.off("ended", onFeedback);
         events.off("browser-disconnected", onBrowserDisconnected);
-        releasePollListener(holder, activePolls, deliveredFeedback, events);
+        releasePollListener(holder, activePolls, deliveredFeedback, lingeringPolls, events, releaseGraceMs);
         if (!activePolls.has(key)) {
           clearBrowserDisconnectTimer(key);
           browserDisconnectPending.delete(key);
@@ -987,6 +1136,7 @@ export async function serve({
           // is only the non-terminal replacement for a poll that would otherwise keep waiting.
           const responseResult = forcedResult && result.status === "waiting" ? forcedResult : result;
           finalSessionEnded = responseResult?.session_ended === true;
+          if (responseResult.status !== "waiting") releaseGraceMs = 0;
           if (holder.replaced) {
             if (responseResult.status !== "waiting") await restoreClosedFeedback(key, responseResult);
             if (!requestClosed && !res.writableEnded) {
@@ -1007,7 +1157,7 @@ export async function serve({
           }
         } finally {
           cleanup();
-          if (finalSessionEnded) clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
+          if (finalSessionEnded) clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events);
         }
       };
       function handleRespondError(error) {
@@ -1047,14 +1197,15 @@ export async function serve({
         onBrowserDisconnected(key);
         return;
       }
-      const nextPresence = presenceSignature(key, activePolls, deliveredFeedback);
+      const nextPresence = presenceSignature(key, activePolls, deliveredFeedback, lingeringPolls);
       if (nextPresence !== previousPresence) {
-        events.emit("agent-presence", key, computePresence(key, activePolls, deliveredFeedback));
+        events.emit("agent-presence", key, computePresence(key, activePolls, deliveredFeedback, lingeringPolls));
       }
       timer = timeoutMs === null ? null : setTimeout(() => respond().catch(handleRespondError), timeoutMs);
     } catch (error) {
       cleanupPoll?.();
-      if (claimedHolder) releasePollListener(claimedHolder, activePolls, deliveredFeedback, events);
+      if (claimedHolder)
+        releasePollListener(claimedHolder, activePolls, deliveredFeedback, lingeringPolls, events, releaseGraceMs);
       detachRequestClose();
       next(error);
     }
@@ -1115,7 +1266,8 @@ export async function serve({
         return;
       }
       const freshFeedback = session.fresh_feedback === true;
-      if (shouldEndSession) clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
+      if (shouldEndSession)
+        clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, lingeringPolls, events);
       let publishedSession = session;
       if (hasLayoutWarningPrompt) {
         await syncOutstandingRepairs(req.params.key);
@@ -1233,7 +1385,7 @@ export async function serve({
   app.post("/api/:key/end", async (req, res, next) => {
     try {
       const session = await store.endSession(req.params.key, "user");
-      clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, events);
+      clearFeedbackDelivery(req.params.key, activePolls, deliveredFeedback, lingeringPolls, events);
       events.emit("ended", req.params.key, session?.ended_by);
       res.json({ status: "ended" });
       await shutdownIfNoLiveSessions();
@@ -1372,10 +1524,10 @@ export async function serve({
 
   app.post("/api/end", async (req, res, next) => {
     try {
-      const file = await canonicalFile(req.body.file);
+      const file = await canonicalSessionFile(req.body.file);
       const key = sessionKey(file);
       const session = await store.endSession(key, "agent");
-      clearFeedbackDelivery(key, activePolls, deliveredFeedback, events);
+      clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events);
       events.emit("ended", key, session?.ended_by);
       res.json({ status: "ended" });
       await shutdownIfNoLiveSessions();
@@ -1384,8 +1536,34 @@ export async function serve({
     }
   });
 
+  app.post("/api/end-gone", async (_req, res, next) => {
+    try {
+      const { ended, pending } = await store.endGoneSessions();
+      for (const session of ended) {
+        clearFeedbackDelivery(session.key, activePolls, deliveredFeedback, lingeringPolls, events);
+        events.emit("ended", session.key, session.ended_by);
+      }
+      res.json({ ended: ended.map((session) => session.file), pending: pending.map((session) => session.file) });
+      await shutdownIfNoLiveSessions();
+    } catch (error) {
+      next(error);
+    }
+  });
+
   app.get("/session/:key", async (req, res, next) => {
     try {
+      // A plain-http link handed out before Tailscale served an https proxy (or by an older Lavish)
+      // reaches this page directly on a tailnet or LAN address, where the browser refuses the
+      // microphone. It goes on to the https link. The proxy itself, and localhost, arrive over
+      // loopback and are served in place, so this can never loop.
+      const localAddress = req.socket.localAddress;
+      if (localAddress && !LOOPBACK_ADDRESS_PATTERN.test(localAddress)) {
+        await refreshHttpsProxyOrigin();
+        if (httpsProxyOrigin) {
+          res.redirect(307, `${httpsProxyOrigin}${req.originalUrl}`);
+          return;
+        }
+      }
       const chromeLoad = await store.issueReviewerHandoff(req.params.key);
       if (!chromeLoad) {
         sendSessionNotFound(req, res);
@@ -1395,6 +1573,7 @@ export async function serve({
       await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
       const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
       const { faviconTag, title } = extractArtifactHead(artifactHtml);
+      const projectTheme = await loadProjectTheme(path.dirname(stateFile), session.file);
       // Nothing legitimately frames the review chrome - it is the top-level
       // page, and shares/exports ship standalone HTML rather than embedding it.
       // Refusing to be framed denies an attacker page both a window handle to
@@ -1404,17 +1583,22 @@ export async function serve({
       // frame-ancestors expression can name.
       res.setHeader("x-frame-options", "DENY");
       res.setHeader("content-security-policy", "frame-ancestors 'none'");
-      res.type("html").send(
+      sendText(
+        req,
+        res,
+        "html",
         createChromeHtml(session, {
           layoutGateEnabled: shouldEnableLayoutGate(req.query || {}),
           faviconTag,
-          title: title ? `${title} · Lavish` : "Lavish Editor",
+          title: title ? `${title} · ${brandTitleSuffix(brandName())}` : brandName(),
+          brand: brandName(),
           artifactRevision: chromeLoad.artifact_revision,
           artifactLoadToken: chromeLoad.artifact_load_token,
           artifactLoadSequence: chromeLoad.artifact_load_sequence,
           chromeLoadToken: chromeLoad.chrome_load_token,
           attachmentMaxBytes: attachmentConfig.maxBytes,
           attachmentMaxCount: attachmentConfig.maxPerPrompt,
+          projectTheme,
         }),
       );
     } catch (error) {
@@ -1485,7 +1669,7 @@ export async function serve({
           .status(409)
           .type("html")
           .send(
-            "<!doctype html><title>Artifact load expired</title><p>This artifact load is no longer current. Reload Lavish to continue.</p>",
+            `<!doctype html><title>Artifact load expired</title><p>This artifact load is no longer current. Reload ${escapeHtml(brandTitleSuffix(brandName()))} to continue.</p>`,
           );
         return;
       }
@@ -1496,7 +1680,7 @@ export async function serve({
           .status(409)
           .type("html")
           .send(
-            "<!doctype html><title>Artifact load expired</title><p>This artifact load is no longer current. Reload Lavish to continue.</p>",
+            `<!doctype html><title>Artifact load expired</title><p>This artifact load is no longer current. Reload ${escapeHtml(brandTitleSuffix(brandName()))} to continue.</p>`,
           );
         return;
       }
@@ -1539,7 +1723,13 @@ export async function serve({
 
   app.get("/chrome-client.js", async (req, res, next) => {
     try {
-      res.type("application/javascript").send(await readFile(chromeClientUrl, "utf8"));
+      const tips = `window.addEventListener("pagehide", (${boardTips.watchBoardTips.toString()})(document), {once:true});`;
+      sendText(
+        req,
+        res,
+        "application/javascript",
+        `${tips}\n${createChromeMessageBoxJs()}\n${await readFile(chromeClientUrl, "utf8")}`,
+      );
     } catch (error) {
       next(error);
     }
@@ -1547,10 +1737,28 @@ export async function serve({
 
   app.get("/chrome.css", async (req, res, next) => {
     try {
-      res.type("text/css").send(await readFile(chromeCssUrl, "utf8"));
+      sendText(req, res, "text/css", await readChromeCss());
     } catch (error) {
       next(error);
     }
+  });
+
+  // The board's fonts, at the address the board serves them from, so its font faces load here
+  // unchanged. The artifact frame has an opaque origin, and a font fetch from one is CORS-gated,
+  // so this static, public-content route answers any origin, as /whiteboard-assets does.
+  app.get("/assets/fonts/:name", (req, res) => {
+    if (!BOARD_FONT_FILES.has(req.params.name)) {
+      res.status(404).send("Not found");
+      return;
+    }
+    res.setHeader("access-control-allow-origin", "*");
+    res.setHeader("cache-control", `public, max-age=${BOARD_ASSET_MAX_AGE_SECONDS}`);
+    res.type("font/woff2").sendFile(fileURLToPath(new URL(req.params.name, boardFontsUrl)), { dotfiles: "allow" });
+  });
+
+  app.get("/assets/goblin-app.png", (req, res) => {
+    res.setHeader("cache-control", `public, max-age=${BOARD_ASSET_MAX_AGE_SECONDS}`);
+    res.type("image/png").sendFile(fileURLToPath(boardGoblinUrl), { dotfiles: "allow" });
   });
 
   app.get("/design/:asset", async (req, res, next) => {
@@ -1560,7 +1768,7 @@ export async function serve({
         res.status(404).send("Not found");
         return;
       }
-      res.type(asset.type).send(await readDesignAsset(asset));
+      sendText(req, res, asset.type, await readDesignAsset(asset));
     } catch (error) {
       next(error);
     }
@@ -1581,10 +1789,14 @@ export async function serve({
         res.status(409).json({ status: "stale" });
         return;
       }
-      res.type("application/javascript").send(
+      sendText(
+        req,
+        res,
+        "application/javascript",
         createSdkJs(String(req.query.key || ""), verified.artifact_revision, verified.artifact_load_token, {
           maxAttachmentCount: attachmentConfig.maxPerPrompt,
           maxAttachmentBytes: attachmentConfig.maxBytes,
+          projectTheme: await loadProjectTheme(path.dirname(stateFile), verified.session.file),
         }),
       );
     } catch (error) {
@@ -2021,7 +2233,12 @@ export async function serve({
     const servesHost = (candidate) => candidate !== tailscale?.ipv4 || tailscalePhoneReady;
     const nextAllowedHostnames = buildAllowedHostnames({
       host: requestedListenHosts[0],
-      hosts: [...requestedListenHosts.filter(servesHost), ...listenHosts.filter(servesHost), ...boundHosts],
+      hosts: [
+        ...requestedListenHosts.filter(servesHost),
+        ...listenHosts.filter(servesHost),
+        ...boundHosts,
+        ...linkOriginHostnames(),
+      ],
       linkHost: resolvedLinkHost,
       allowedHosts: extraHosts,
     });
@@ -2178,6 +2395,8 @@ export async function serve({
     liveEventClients.clear();
     for (const timer of browserDisconnectTimers.values()) clearTimeout(timer);
     browserDisconnectTimers.clear();
+    for (const { timer } of lingeringPolls.values()) clearTimeout(timer);
+    lingeringPolls.clear();
     for (const w of watchers.values()) {
       w.close().catch(() => {});
     }
@@ -2197,7 +2416,10 @@ export async function serve({
   }
 
   // Idle self-shutdown: the timer only runs while nothing is connected. Any live event chrome or
-  // active long-poll cancels it; losing the last connection (re)arms it.
+  // active long-poll cancels it; losing the last connection (re)arms it. A Tailscale https proxy to
+  // this server is a standing promise that its links answer: stopped, every link the reader holds
+  // gets a bare 502 from the proxy, and nothing of Lavish runs to start itself or say why. So
+  // while one points here, the timer only re-arms.
   function refreshIdleTimer() {
     if (idleTimer) {
       clearTimeout(idleTimer);
@@ -2205,8 +2427,13 @@ export async function serve({
     }
     if (shuttingDown || idleTimeoutMs == null) return;
     if (liveEventClients.size > 0 || activePolls.size > 0) return;
-    idleTimer = setTimeout(() => {
+    idleTimer = setTimeout(async () => {
       idleTimer = null;
+      await refreshHttpsProxyOrigin({ fresh: true });
+      if (httpsProxyOrigin) {
+        refreshIdleTimer();
+        return;
+      }
       if (!shuttingDown && liveEventClients.size === 0 && activePolls.size === 0) {
         shutdown("", "", `idle-timeout after ${idleTimeoutMs}ms with no connections`);
       }
@@ -2217,13 +2444,16 @@ export async function serve({
   // When the final open session ends with nothing connected, there is nothing left to serve,
   // so step down immediately rather than waiting out the idle timeout. If a browser chrome or
   // poll is still attached (e.g. the user is about to reopen), leave the server up and let the
-  // idle timer reap it once those connections drop. Best-effort: never let a read failure
-  // block the end response.
+  // idle timer reap it once those connections drop. A Tailscale https proxy keeps it up for the
+  // same reason as the idle timer: the links the reader holds, ended pages included, still answer.
+  // Best-effort: never let a read failure block the end response.
   async function shutdownIfNoLiveSessions() {
     if (liveEventClients.size > 0 || activePolls.size > 0) return;
     try {
       const sessions = await store.listSessions();
       if (sessions.every((session) => session.status === "ended")) {
+        await refreshHttpsProxyOrigin({ fresh: true });
+        if (httpsProxyOrigin) return;
         setImmediate(() => shutdown("", "", "last open session ended with no live connections"));
       }
     } catch {
@@ -2380,15 +2610,57 @@ function wantsHtml(req) {
   return accept.toLowerCase().includes("text/html");
 }
 
+// The landing page and a refused host's page stand alone: they carry the board's token block
+// inline, because a host this server refuses cannot fetch the review page's stylesheet.
+const STANDALONE_PAGE_CSS = `${boardTokensCss}body{margin:0;min-height:100vh;display:grid;place-items:center}.card{width:min(560px,calc(100% - 40px));padding:32px;border:1px solid var(--glass-border-hover);border-radius:var(--radius);background:var(--glass-bg),var(--hero-surface);box-shadow:var(--glass-shadow-hover)}h1{margin:0 0 12px;font:400 1.75rem/1.3 var(--font-display)}p{margin:0 0 18px}p:last-child{margin-bottom:0}.url{display:block;padding:12px 14px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);color:var(--mint);font-weight:700;overflow-wrap:anywhere}`;
+
+function createStandalonePageHtml(title, body) {
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${title}</title><style>${STANDALONE_PAGE_CSS}</style></head><body><main class="card">${body}</main></body></html>`;
+}
+
 function createLandingHtml() {
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Lavish Editor</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f4ef;color:#25221f;font:16px/1.5 system-ui,sans-serif}.card{width:min(560px,calc(100% - 40px));padding:32px;border:1px solid #d9d0c5;border-radius:16px;background:#fffdf9;box-shadow:0 12px 40px #25221f18}h1{margin:0 0 12px;font-size:26px}p{margin:0}</style></head><body><main class="card"><h1>Lavish Editor is running</h1><p>Open the review session URL printed by your agent.</p></main></body></html>`;
+  const brand = escapeHtml(brandName());
+  return createStandalonePageHtml(
+    brand,
+    `<h1>${brand} is running</h1><p>Open the review session URL printed by your agent.</p>`,
+  );
 }
 
 function createDeniedHtml({ title, message, workingUrl }) {
   const safeTitle = escapeHtml(title);
   const safeMessage = escapeHtml(message);
   const safeUrl = escapeHtml(workingUrl);
-  return `<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${safeTitle} - Lavish Editor</title><style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#f7f4ef;color:#25221f;font:16px/1.5 system-ui,sans-serif}.card{width:min(560px,calc(100% - 40px));padding:32px;border:1px solid #d9d0c5;border-radius:16px;background:#fffdf9;box-shadow:0 12px 40px #25221f18}h1{margin:0 0 12px;font-size:26px}p{margin:0 0 18px}.url{display:block;padding:12px 14px;border-radius:10px;background:#f0ebe4;color:#25221f;overflow-wrap:anywhere}a{color:inherit;font-weight:700}</style></head><body><main class="card"><h1>${safeTitle}</h1><p>${safeMessage}</p><p>Open this working URL:</p><a class="url" href="${safeUrl}">${safeUrl}</a></main></body></html>`;
+  return createStandalonePageHtml(
+    `${safeTitle} - ${escapeHtml(brandName())}`,
+    `<h1>${safeTitle}</h1><p>${safeMessage}</p><p>Open this working URL:</p><a class="url" href="${safeUrl}">${safeUrl}</a>`,
+  );
+}
+
+// The shell's text (its page, stylesheet, script, the SDK and a page's stylesheets) is sent
+// gzipped to a caller that accepts it. The board's rules and fonts make the shell larger than it
+// was; compressed, a page load transfers less than it did before, which matters most over a
+// tailnet. A caller that does not ask, such as a header-less CLI probe, gets the plain bytes.
+function sendText(req, res, type, body) {
+  res.type(type);
+  res.setHeader("vary", "accept-encoding");
+  if (/\bgzip\b/i.test(String(req.headers["accept-encoding"] || ""))) {
+    res.setHeader("content-encoding", "gzip");
+    res.send(gzipSync(body));
+    return;
+  }
+  res.send(body);
+}
+
+// The review page's stylesheet is one response: the board's token block, the rules copied from
+// the board, then Scrawl's own rules, which lay those out for a review page, and last the layer
+// that dresses them in a project's saved theme.
+async function readChromeCss() {
+  const parts = await Promise.all(
+    [boardTokensUrl, boardComponentsUrl, messageBoxCssUrl, chromeCssUrl, projectThemeCssUrl].map((url) =>
+      readFile(url, "utf8"),
+    ),
+  );
+  return parts.join("\n");
 }
 
 async function readDesignAsset(asset) {
@@ -2402,8 +2674,12 @@ async function readDesignAsset(asset) {
 
 // Map a legacy root-absolute `/design/<asset>` reference to the packaged design file on disk
 // (falling back to the node_modules source for source runs) so an export can inline it instead
-// of pointing back at this server's `/design` route.
+// of pointing back at this server's `/design` route. The board's fonts and goblin, which its
+// token block and page patterns name by their served address, map the same way.
 export function resolveDesignAssetPath(refPath) {
+  const font = /^\/assets\/fonts\/([^/?#]+)(?:[?#].*)?$/.exec(refPath);
+  if (font) return BOARD_FONT_FILES.has(font[1]) ? fileURLToPath(new URL(font[1], boardFontsUrl)) : null;
+  if (/^\/assets\/goblin-app\.png(?:[?#].*)?$/.test(refPath)) return fileURLToPath(boardGoblinUrl);
   const match = /^\/design\/([^/?#]+)(?:[?#].*)?$/.exec(refPath);
   if (!match) return null;
   const asset = designAssetUrls[match[1]];
@@ -2678,12 +2954,31 @@ export function hasLiveReloadRootOptIn(html) {
   return /<meta\b(?=[^>]*name=["']lavish-live-reload["'])(?=[^>]*content=["']root["'])[^>]*>/i.test(searchableHtml);
 }
 
-function releasePollListener(holder, activePolls, deliveredFeedback, events) {
+function releasePollListener(holder, activePolls, deliveredFeedback, lingeringPolls, events, graceMs) {
   if (activePolls.get(holder.key) !== holder) return;
-  const previousPresence = computePresence(holder.key, activePolls, deliveredFeedback);
+  const previousPresence = computePresence(holder.key, activePolls, deliveredFeedback, lingeringPolls);
   activePolls.delete(holder.key);
-  const nextPresence = computePresence(holder.key, activePolls, deliveredFeedback);
+  if (graceMs > 0) {
+    clearLingeringPoll(holder.key, lingeringPolls);
+    const timer = setTimeout(() => {
+      if (lingeringPolls.get(holder.key)?.holder !== holder) return;
+      const lingeringPresence = computePresence(holder.key, activePolls, deliveredFeedback, lingeringPolls);
+      lingeringPolls.delete(holder.key);
+      const settledPresence = computePresence(holder.key, activePolls, deliveredFeedback, lingeringPolls);
+      if (settledPresence !== lingeringPresence) events.emit("agent-presence", holder.key, settledPresence);
+    }, graceMs);
+    timer.unref?.();
+    lingeringPolls.set(holder.key, { holder, timer });
+  }
+  const nextPresence = computePresence(holder.key, activePolls, deliveredFeedback, lingeringPolls);
   if (nextPresence !== previousPresence) events.emit("agent-presence", holder.key, nextPresence);
+}
+
+function clearLingeringPoll(key, lingeringPolls) {
+  const lingering = lingeringPolls.get(key);
+  if (!lingering) return;
+  clearTimeout(lingering.timer);
+  lingeringPolls.delete(key);
 }
 
 function listenerLabel(holder) {
@@ -2702,36 +2997,36 @@ function listenerConflict(holder, code) {
   };
 }
 
-function markFeedbackDelivered(key, activePolls, deliveredFeedback, events) {
-  const previousPresence = computePresence(key, activePolls, deliveredFeedback);
+function markFeedbackDelivered(key, activePolls, deliveredFeedback, lingeringPolls, events) {
+  const previousPresence = computePresence(key, activePolls, deliveredFeedback, lingeringPolls);
   deliveredFeedback.add(key);
-  const nextPresence = computePresence(key, activePolls, deliveredFeedback);
+  const nextPresence = computePresence(key, activePolls, deliveredFeedback, lingeringPolls);
   if (nextPresence !== previousPresence) {
     events.emit("agent-presence", key, nextPresence);
   }
 }
 
-function clearFeedbackDelivery(key, activePolls, deliveredFeedback, events) {
-  const previousPresence = computePresence(key, activePolls, deliveredFeedback);
+function clearFeedbackDelivery(key, activePolls, deliveredFeedback, lingeringPolls, events) {
+  const previousPresence = computePresence(key, activePolls, deliveredFeedback, lingeringPolls);
   deliveredFeedback.delete(key);
-  const nextPresence = computePresence(key, activePolls, deliveredFeedback);
+  const nextPresence = computePresence(key, activePolls, deliveredFeedback, lingeringPolls);
   if (nextPresence !== previousPresence) {
     events.emit("agent-presence", key, nextPresence);
   }
 }
 
-export function computePresence(key, activePolls, deliveredFeedback) {
+export function computePresence(key, activePolls, deliveredFeedback, lingeringPolls) {
   if (deliveredFeedback.has(key)) return "working";
-  return activePolls.has(key) ? "listening" : "waiting";
+  return activePolls.has(key) || lingeringPolls.has(key) ? "listening" : "waiting";
 }
 
-function presenceSignature(key, activePolls, deliveredFeedback) {
-  return `${computePresence(key, activePolls, deliveredFeedback)}:${presenceMode(key, activePolls, deliveredFeedback)}`;
+function presenceSignature(key, activePolls, deliveredFeedback, lingeringPolls) {
+  return `${computePresence(key, activePolls, deliveredFeedback, lingeringPolls)}:${presenceMode(key, activePolls, deliveredFeedback, lingeringPolls)}`;
 }
 
-export function presenceMode(key, activePolls, deliveredFeedback) {
+export function presenceMode(key, activePolls, deliveredFeedback, lingeringPolls) {
   if (deliveredFeedback.has(key)) return "agent-busy";
-  const holder = activePolls.get(key);
+  const holder = activePolls.get(key) || lingeringPolls.get(key)?.holder;
   if (!holder) return "waiting-on-captain";
   // --owner is used by a supervisor process listening on behalf of a worker. A bare poll is the
   // agent's own waiting round; an identified holder must not make the composer invite captain
@@ -2739,56 +3034,41 @@ export function presenceMode(key, activePolls, deliveredFeedback) {
   return holder.owner ? "external-listener" : "agent-listener";
 }
 
-function presenceEventData(key, state, activePolls, deliveredFeedback) {
-  const mode = presenceMode(key, activePolls, deliveredFeedback);
+function presenceEventData(key, state, activePolls, deliveredFeedback, lingeringPolls) {
+  const mode = presenceMode(key, activePolls, deliveredFeedback, lingeringPolls);
   return mode === "waiting-on-captain" ? { state } : { state, mode };
 }
 
-function chromeIcon(paths, size = 16, strokeWidth = 1.7) {
-  return `<svg width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="${strokeWidth}" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${paths}</svg>`;
+// Line icons on the board's one 24px grid (code-goblins frontend/src/Icon.tsx), sized and stroked by
+// the board's own `.icon` rule. The paths the board has are the board's; the rest are drawn to match.
+function chromeIcon(path, extraClass = "") {
+  return `<svg class="icon${extraClass ? " " + extraClass : ""}" viewBox="0 0 24 24" aria-hidden="true" focusable="false"><path d="${path}"/></svg>`;
 }
 
 const chromeIcons = {
-  more: chromeIcon(
-    '<circle cx="12" cy="5" r="1.4"/><circle cx="12" cy="12" r="1.4"/><circle cx="12" cy="19" r="1.4"/>',
-  ),
-  file: chromeIcon(
-    '<path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/>',
-    13,
-  ),
-  copy: chromeIcon(
-    '<rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/>',
-    12,
-  ),
-  check: chromeIcon('<polyline points="20 6 9 17 4 12"/>', 12),
-  refresh: chromeIcon(
-    '<path d="M3 12a9 9 0 0 1 15-6.7L21 8"/><path d="M21 3v5h-5"/><path d="M21 12a9 9 0 0 1-15 6.7L3 16"/><path d="M3 21v-5h5"/>',
-    15,
-  ),
+  more: chromeIcon("M12 5.5v.01M12 12v.01M12 18.5v.01", "icon-dots"),
+  file: chromeIcon("M6.5 3.5h7l4 4v12a1 1 0 0 1-1 1h-10a1 1 0 0 1-1-1v-15a1 1 0 0 1 1-1ZM13.5 3.5v4h4"),
+  copy: chromeIcon("M9 9h10v11H9ZM5 15V4h10"),
+  check: chromeIcon("M5 12.5 9.5 17 19 7.5"),
+  close: chromeIcon("M6 6l12 12M18 6 6 18"),
+  refresh: chromeIcon("M19.5 12a7.5 7.5 0 1 1-2.2-5.3M19.5 4v4.5H15"),
   camera: chromeIcon(
-    '<path d="M14.5 4h-5L7 7H4a2 2 0 0 0-2 2v9a2 2 0 0 0 2 2h16a2 2 0 0 0 2-2V9a2 2 0 0 0-2-2h-3z"/><circle cx="12" cy="13" r="3"/>',
-    15,
+    "M9 5.5 7.5 8H5a1.5 1.5 0 0 0-1.5 1.5v8A1.5 1.5 0 0 0 5 19h14a1.5 1.5 0 0 0 1.5-1.5v-8A1.5 1.5 0 0 0 19 8h-2.5L15 5.5ZM12 10.5a3 3 0 1 0 0 6 3 3 0 0 0 0-6Z",
   ),
-  download: chromeIcon(
-    '<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/>',
-    15,
-  ),
-  globe: chromeIcon(
-    '<circle cx="12" cy="12" r="9"/><path d="M3 12h18"/><path d="M12 3a14.5 14.5 0 0 1 0 18a14.5 14.5 0 0 1 0-18z"/>',
-    15,
-  ),
-  exit: chromeIcon(
-    '<path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/>',
-    15,
-  ),
+  download: chromeIcon("M12 4v11M7 10.5l5 5 5-5M5 19.5h14"),
+  external: chromeIcon("M14 4h6v6M20 4l-8 8M10 5H6a2 2 0 0 0-2 2v11a2 2 0 0 0 2 2h11a2 2 0 0 0 2-2v-4"),
+  exit: chromeIcon("M9 20.5H5.5a2 2 0 0 1-2-2v-13a2 2 0 0 1 2-2H9M16 16.5l4.5-4.5L16 7.5M20.5 12H9"),
   warning: chromeIcon(
-    '<path d="M10.3 3.9 1.8 18a2 2 0 0 0 1.7 3h17a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/>',
-    16,
+    "M10.3 4.5 2.8 17.6A2 2 0 0 0 4.5 20.5h15a2 2 0 0 0 1.7-2.9L13.7 4.5a2 2 0 0 0-3.4 0ZM12 9.5v4.5M12 17.2v.3",
   ),
-  reveal: chromeIcon('<path d="M1 12s4-7 11-7 11 7 11 7-4 7-11 7-11-7-11-7z"/><circle cx="12" cy="12" r="3"/>', 13),
-  dismiss: chromeIcon('<line x1="18" y1="6" x2="6" y2="18"/><line x1="6" y1="6" x2="18" y2="18"/>', 13),
+  clock: chromeIcon("M12 3.5a8.5 8.5 0 1 0 0 17 8.5 8.5 0 0 0 0-17ZM12 7.5V12l3 2"),
+  comment: chromeIcon(
+    "M5 4.5h14A1.5 1.5 0 0 1 20.5 6v9a1.5 1.5 0 0 1-1.5 1.5h-7l-4.5 3.5v-3.5H5A1.5 1.5 0 0 1 3.5 15V6A1.5 1.5 0 0 1 5 4.5Z",
+  ),
+  pointer: chromeIcon("M6 4.5l12.5 6.5-5.5 1.7L11.3 18.5Z"),
+  send: chromeIcon("M20.5 3.5 10.5 13.5M20.5 3.5l-6.5 17-3.5-7-7-3.5Z"),
   // The mobile conversation sheet's only chevron: CSS rotates it when the sheet is open.
-  chevronUp: chromeIcon('<polyline points="6 15 12 9 18 15"/>', 18, 2),
+  chevronUp: chromeIcon("m6 15 6-6 6 6"),
 };
 
 // Display the path with the home directory shortened to "~", split so the directory part can
@@ -2898,7 +3178,9 @@ export const CHROME_LAYOUT_GATE_MAX_HOLD_MS = 12000;
 // The failsafe's button is the only control on a page whose client script is dead, so its own
 // probe is bounded too: a port that accepts and never answers must not disable it for good.
 const CHROME_BOOT_FAILSAFE_PROBE_TIMEOUT_MS = 4000;
-const CHROME_BOOT_FAILSAFE_JS = `(function(){
+// It names the product as the page does, since it speaks for a page whose client never ran.
+const chromeBootFailsafeJs = (product) => `(function(){
+var p=${jsonScript(product)};
 var t=setTimeout(fail,${CHROME_BOOT_FAILSAFE_MS});
 var o=document.getElementById("layoutGateOverlay"),h,c,a,b,gt=0,manual=false,ended=false;
 try{ended=JSON.parse(document.getElementById("lavish-session").textContent).initialEnded===true;}catch(e){}
@@ -2919,8 +3201,8 @@ if(window.__lavishChromeReady||ended)return;
 h=document.getElementById("layoutGateTitle");
 c=document.getElementById("layoutGateCopy");
 a=document.getElementById("layoutGateAction");
-if(h)h.textContent="Lavish could not finish loading.";
-if(c)c.textContent="The Lavish editor script did not load. The server usually restarted while this page was opening. Check and reload to reconnect.";
+if(h)h.textContent=p+" could not finish loading.";
+if(c)c.textContent="The "+p+" page script did not load. The server usually restarted while this page was opening. Check and reload to reconnect.";
 if(a){a.textContent="Check and reload";a.disabled=false;a.onclick=check;}
 showBypass();
 if(o)o.hidden=false;
@@ -2935,7 +3217,7 @@ fetch("/health",{cache:"no-store",signal:ctl.signal}).then(function(r){return r&
 clearTimeout(pt);
 if(outcome==="running"){location.reload();return;}
 if(a)a.disabled=false;
-if(c)c.textContent=outcome==="no-answer"?"Lavish did not answer the check, so this page cannot tell whether it is running. Try again in a moment.":"Lavish is still not running. Start it again with your agent, then use Check and reload.";
+if(c)c.textContent=outcome==="no-answer"?p+" did not answer the check, so this page cannot tell whether it is running. Try again in a moment.":p+" is still not running. Start it again with your agent, then use Check and reload.";
 });
 }
 })();`;
@@ -2945,7 +3227,8 @@ export function createChromeHtml(
   {
     layoutGateEnabled = true,
     faviconTag = LAVISH_DEFAULT_FAVICON,
-    title = "Lavish Editor",
+    title = DEFAULT_BRAND,
+    brand = DEFAULT_BRAND,
     artifactRevision = 0,
     artifactLoadToken = "",
     artifactLoadSequence = 0,
@@ -2953,12 +3236,17 @@ export function createChromeHtml(
     attachmentMaxBytes = 0,
     attachmentMaxCount = 0,
     attachmentAcceptedMime = ACCEPTED_IMAGE_MIME,
+    projectTheme = null,
   } = {},
 ) {
+  const theme = projectTheme || SIQ_THEME;
   const acceptedMime = attachmentAcceptedMime.map(String);
+  const product = brandTitleSuffix(brand);
+  const safeProduct = escapeHtml(product);
   const sessionJson = jsonScript({
     key: session.key,
     file: session.file,
+    product,
     // A page loaded (or reloaded) after the session already ended has no future live `ended`
     // event to wait for - it must start read-only instead of looking live until the user tries
     // to send and gets refused (#171).
@@ -2991,24 +3279,27 @@ export function createChromeHtml(
   const layoutGateHidden = layoutGateEnabled ? "" : " hidden";
   const modeHotkeyUpper = MODE_TOGGLE_HOTKEY_KEY.toUpperCase();
   const modeToggleHint = `Toggle annotate/explore mode (⌘${modeHotkeyUpper} / Ctrl+${modeHotkeyUpper})`;
+  // The browser paints what the head says before the stylesheet arrives, so the page colour and
+  // scheme come first: no white frame while the stylesheet loads.
   return `<!doctype html>
-<html>
+<html${projectTheme ? ` data-project-theme="${themeScheme(projectTheme)}"` : ""}>
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, interactive-widget=resizes-content">
+<meta name="color-scheme" content="${themeScheme(theme)}">
+<style>html{background:${theme.colors.page}}${projectTheme ? projectThemeCss(projectTheme) : ""}</style>
 <title>${escapeHtml(title)}</title>
 ${faviconTag}
 <link rel="stylesheet" href="/chrome.css">
 </head>
 <body class="${bodyClass}">
-<div class="bar"><div class="brand"><span class="brand-mark">Lavish</span><span class="brand-support">Editor</span></div><div class="spacer" aria-hidden="true"></div><div class="warnings-wrap" id="warningsWrap" hidden><button class="warnings-button" id="warningsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="warningsDrawer">${chromeIcons.warning}<span class="warnings-count" id="warningsCount">0</span></button><div class="menu warnings-drawer" id="warningsDrawer" role="dialog" aria-labelledby="warningsTitle" aria-describedby="warningsSummary" hidden><div class="warnings-head"><h2 class="warnings-title" id="warningsTitle">Layout issues</h2><p class="warnings-summary" id="warningsSummary"></p></div><div class="warnings-toolbar"><label class="warnings-selectall"><input type="checkbox" id="warningsSelectAll"><span>Select all</span></label><span class="warnings-selected" id="warningsSelected" role="status" aria-live="polite"></span></div><div class="warnings-list" id="warningsList"></div><div class="warnings-foot"><p class="warnings-note">Queueing sends a repair request with your next feedback. An issue is marked resolved only after a newer artifact load and a complete check at the same viewport no longer finds it.</p><button class="button" id="warningsQueueButton" type="button" disabled>Queue selected fixes</button></div></div></div><div class="revisions-wrap" id="revisionsWrap" hidden><button class="revisions-button" id="revisionsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="revisionsDrawer"><span class="revisions-button-text">Revisions</span><span class="revisions-count" id="revisionsCount">0</span></button><div class="menu revisions-drawer" id="revisionsDrawer" role="dialog" aria-labelledby="revisionsTitle" aria-describedby="revisionsSummary" hidden><div class="revisions-head"><h2 class="revisions-title" id="revisionsTitle">Revisions</h2><p class="revisions-summary" id="revisionsSummary"></p></div><div class="revisions-list" id="revisionsList"></div><div class="revisions-foot"><p class="revisions-note">The agent declares these in the artifact itself. Reveal flashes the next block it marked for that revision; nothing about the page is restyled, so the saved file still looks the way it does here.</p></div></div></div><button class="annotate-switch" id="annotation" type="button" aria-pressed="true" title="${escapeHtml(modeToggleHint)}"><span class="switch-track" aria-hidden="true"><span class="switch-knob"></span></span><span>Annotate</span></button><div class="more-wrap" id="moreWrap"><button class="more-button" id="moreButton" type="button" title="More" aria-haspopup="menu" aria-expanded="false">${chromeIcons.more}</button><div class="menu more-menu" id="moreMenu" hidden><div class="menu-head"><div class="menu-label">Editing</div><button class="menu-file" id="copyPath" type="button" title="Copy path · ${escapeHtml(session.file)}">${chromeIcons.file}<span class="menu-file-text"><span class="path-head">${escapeHtml(pathHead)}</span><span class="path-tail">${escapeHtml(pathTail)}</span></span><span class="copy-hint" id="copyHint"><span class="icon-copy">${chromeIcons.copy}</span><span class="icon-check">${chromeIcons.check}</span><span id="copyHintText">Copy</span></span></button></div><div class="menu-rule"></div><button class="menu-item" id="reloadArtifact" type="button">${chromeIcons.refresh}<span>Reload artifact</span></button><button class="menu-item" id="copySnapshot" type="button">${chromeIcons.camera}<span>Copy DOM snapshot</span></button><button class="menu-item" id="exportArtifact" type="button">${chromeIcons.download}<span>Export standalone HTML</span></button><button class="menu-item" id="shareArtifact" type="button">${chromeIcons.globe}<span>Publish link</span></button><div class="menu-rule"></div><button class="menu-item danger" id="end" type="button">${chromeIcons.exit}<span>End session</span></button></div></div></div>
-<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" data-artifact-src="/artifact/${session.key}/index.html"></iframe></div><div class="panel-scrim" id="panelScrim"></div><aside class="panel" id="panel"><div class="panel-head" id="panelHead"><span class="panel-handle" aria-hidden="true"></span><div class="panel-head-row"><h2>Conversation</h2><span class="panel-summary" id="panelSummary" role="status" aria-live="polite"></span><button class="panel-toggle" id="panelToggle" type="button" aria-expanded="false" aria-controls="panel" aria-label="Show conversation">${chromeIcons.chevronUp}</button></div></div><div class="panel-scroll" id="panelScroll"><div class="chat" id="chatLog"></div><div class="chat chat-queued" id="queuedLog"></div></div><div class="composer" id="chatComposer"><div class="presence-banner handoff-banner" id="handoffBanner" hidden><span>This review is open in another Lavish tab.</span><button class="handoff-takeover" id="handoffTakeover" type="button">Take over here</button></div><div class="presence-banner handoff-banner" id="outdatedBanner" hidden><span id="outdatedText">The Lavish server this page was connected to is no longer running. Reloading will work once it is running again.</span><span class="outdated-actions"><button class="handoff-takeover" id="outdatedReload" type="button">Check and reload</button><button class="handoff-takeover" id="outdatedDismiss" type="button">Dismiss</button></span></div><div class="presence-banner" id="presenceBanner" hidden>Your agent is not listening. If this persists, ask your agent to poll for updates from Lavish.</div><textarea id="chatInput" placeholder="Write a message for the agent..."></textarea><div class="chat-attachments" id="chatAttachments"></div><div class="chat-attachment-toolbar"><button class="chat-attach" id="chatAttach" type="button">Attach images</button><input id="chatAttachInput" type="file" accept="${escapeHtml(acceptedMime.join(","))}" multiple hidden><span class="chat-attachment-notice" id="chatAttachmentNotice" role="status"></span></div><div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first.</div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">${chromeIcons.exit}<span>Send &amp; End</span></button><button class="button" id="send">Send to Agent</button></div></div></aside></div>
-<div class="share-overlay" id="shareDialog" role="dialog" aria-modal="true" aria-labelledby="shareTitleText" hidden><form class="share-card" id="shareForm"><div class="share-head"><div><div class="share-kicker">Publish to <a class="share-link" href="https://ht-ml.app" target="_blank" rel="noopener noreferrer">ht-ml.app</a></div><h2 id="shareTitleText">Publish artifact</h2></div><button class="share-close" id="shareClose" type="button" aria-label="Close publish dialog"><svg width="14" height="14" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button></div><p class="share-note">ht-ml.app is a separate, third-party hosting service, not part of Lavish. Publishing sends this artifact to its servers.</p><p class="share-copy">This uploads this artifact to ht-ml.app with local assets inlined. Without a password, the page is PUBLIC and anyone with the link can open it. With a password, the page is PRIVATE and viewers must supply the password to view.</p><p class="share-note">Do not publish secrets. The Lavish annotation SDK is not included.</p><div class="share-grid"><label class="share-check"><input id="shareGenerate" type="checkbox"><span>Generate a password (makes this page private)</span></label><label>Password (optional)<input id="sharePassword" name="password" type="password" autocomplete="new-password" placeholder="Leave blank for a public page"></label></div><div class="share-status" id="shareStatus" role="status"></div><div class="share-result" id="shareResult" hidden><label id="shareUrlResult">Share URL<div class="share-copy-row"><input id="shareUrl" readonly><button class="share-copy-btn" id="copyShareUrl" type="button">Copy URL</button></div></label><label id="sharePasswordResult" hidden>Password (shared secret)<div class="share-copy-row"><input id="sharePasswordOut" readonly><button class="share-copy-btn" id="copySharePassword" type="button">Copy password</button></div></label><label id="shareSiteIdResult" hidden>Site ID<div class="share-copy-row"><input id="shareSiteId" readonly><button class="share-copy-btn" id="copyShareSiteId" type="button">Copy site ID</button></div></label><label id="shareUpdateKeyResult">Update key (secret)<div class="share-copy-row"><input id="shareUpdateKey" readonly><button class="share-copy-btn" id="copyUpdateKey" type="button">Copy key</button></div></label><p class="share-note" id="shareUpdateKeyNote">Keep the update key private. ht-ml.app returns it once and it is the only way to update this page later; the service has no delete. Republish this page&#39;s HTML with <code>lavish-axi share &lt;file&gt; --site &lt;site id&gt; --update-key &lt;key&gt;</code>, and add <code>--private</code> to also lock it behind a new generated password.</p></div><div class="share-actions"><button class="share-cancel" id="shareCancel" type="button">Cancel</button><button class="button" id="sharePublish" type="submit">Publish</button></div></form></div>
-<div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"${layoutGateHidden}><div class="ended-card"><div class="ended-title" id="layoutGateTitle">Checking layout.<br>One moment.</div><p class="ended-copy" id="layoutGateCopy">Lavish is waiting for fonts and final geometry before revealing this artifact.</p><button class="button ended-action" id="layoutGateAction" type="button">Show anyway</button><button class="button ended-action layout-gate-bypass" id="layoutGateBypass" type="button" hidden>Show anyway</button></div></div>
-<div class="ended-overlay" id="endedOverlay" hidden><div class="ended-card"><div class="ended-title">Session ended.<br>Return to your agent to continue.</div><p class="ended-copy">${escapeHtml(session.file)}</p></div></div>
-<div class="whiteboard-overlay" id="whiteboardOverlay" hidden><div class="whiteboard-shell"><div class="whiteboard-error" id="whiteboardError" hidden></div><button class="whiteboard-close" id="whiteboardClose" type="button" aria-label="Close whiteboard"><svg width="14" height="14" viewBox="0 0 10 10" fill="none" aria-hidden="true" focusable="false"><path d="M1 1L9 9M9 1L1 9" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"/></svg></button><iframe id="whiteboardFrame" title="Excalidraw whiteboard" sandbox="allow-scripts allow-popups"></iframe></div></div>
+<header class="bar topbar"><div class="brand"><img src="/assets/goblin-app.png" width="48" height="48" alt=""><h1 class="brand-mark">${escapeHtml(brand)}</h1></div><div class="panel-pill mode-switch" role="group" aria-label="Mode"><button id="annotation" type="button" aria-pressed="true" title="${escapeHtml(modeToggleHint)}">${chromeIcons.comment}<span>Annotate</span></button><button id="explore" type="button" aria-pressed="false" title="${escapeHtml(modeToggleHint)}">${chromeIcons.pointer}<span>Explore</span></button></div><div class="topbar-controls"><div class="warnings-wrap" id="warningsWrap" hidden><button class="warnings-button icon-button raised" id="warningsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="warningsDrawer">${chromeIcons.warning}<span class="warnings-count count-badge" id="warningsCount">0</span></button><div class="menu warnings-drawer" id="warningsDrawer" role="dialog" aria-labelledby="warningsTitle" aria-describedby="warningsSummary" hidden><div class="warnings-head"><h2 class="warnings-title" id="warningsTitle">Layout issues</h2><p class="warnings-summary" id="warningsSummary"></p></div><div class="warnings-toolbar"><label class="warnings-selectall"><input type="checkbox" id="warningsSelectAll"><span>Select all</span></label><span class="warnings-selected" id="warningsSelected" role="status" aria-live="polite"></span></div><div class="warnings-list" id="warningsList"></div><div class="warnings-foot"><p class="warnings-note">Queueing sends a repair request with your next feedback. An issue is marked resolved only after a newer artifact load and a complete check at the same viewport no longer finds it.</p><button class="button primary" id="warningsQueueButton" type="button" disabled>Queue selected fixes</button></div></div></div><div class="revisions-wrap" id="revisionsWrap" hidden><button class="revisions-button icon-button raised pill-link" id="revisionsButton" type="button" aria-haspopup="dialog" aria-expanded="false" aria-controls="revisionsDrawer">${chromeIcons.clock}<span class="revisions-button-text">Revisions</span><span class="revisions-count count-pill" id="revisionsCount">0</span></button><div class="menu revisions-drawer" id="revisionsDrawer" role="dialog" aria-labelledby="revisionsTitle" aria-describedby="revisionsSummary" hidden><div class="revisions-head"><h2 class="revisions-title" id="revisionsTitle">Revisions</h2><p class="revisions-summary" id="revisionsSummary"></p></div><div class="revisions-list" id="revisionsList"></div><div class="revisions-foot"><p class="revisions-note">The agent declares these in the artifact itself. Reveal flashes the next block it marked for that revision; nothing about the page is restyled, so the saved file still looks the way it does here.</p></div></div></div><div class="more-wrap" id="moreWrap"><button class="more-button icon-button raised" id="moreButton" type="button" aria-label="More" data-tip="More" data-tip-align="end" aria-haspopup="menu" aria-expanded="false">${chromeIcons.more}</button><div class="menu more-menu" id="moreMenu" hidden><div class="menu-head"><div class="menu-label">Editing</div><button class="menu-file" id="copyPath" type="button" title="Copy path · ${escapeHtml(session.file)}">${chromeIcons.file}<span class="menu-file-text"><span class="path-head">${escapeHtml(pathHead)}</span><span class="path-tail">${escapeHtml(pathTail)}</span></span><span class="copy-hint" id="copyHint"><span class="icon-copy">${chromeIcons.copy}</span><span class="icon-check">${chromeIcons.check}</span><span id="copyHintText">Copy</span></span></button></div><div class="menu-rule"></div><button class="menu-item" id="reloadArtifact" type="button">${chromeIcons.refresh}<span>Reload artifact</span></button><button class="menu-item" id="copySnapshot" type="button">${chromeIcons.camera}<span>Copy DOM snapshot</span></button><button class="menu-item" id="exportArtifact" type="button">${chromeIcons.download}<span>Export standalone HTML</span></button><button class="menu-item" id="shareArtifact" type="button">${chromeIcons.external}<span>Publish link</span></button><div class="menu-rule"></div><button class="menu-item danger" id="end" type="button">${chromeIcons.exit}<span>End session</span></button></div></div></div></header>
+<div class="layout"><div class="frame"><iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" data-artifact-src="/artifact/${session.key}/index.html"></iframe><div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"${layoutGateHidden}><div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"></span><h3 class="ended-title" id="layoutGateTitle">Opening this artifact.<br>One moment.</h3><p class="ended-copy" id="layoutGateCopy">${safeProduct} shows it as soon as it has loaded, then checks its layout on screen.</p><button class="button ended-action" id="layoutGateAction" type="button">Show anyway</button><button class="button ended-action layout-gate-bypass" id="layoutGateBypass" type="button" hidden>Show anyway</button></div></div></div><div class="panel-scrim" id="panelScrim"></div><aside class="panel" id="panel"><div class="panel-head" id="panelHead"><span class="panel-handle" aria-hidden="true"></span><div class="panel-head-row panel-header compact"><span class="goblin-avatar" aria-hidden="true"></span><div class="panel-identity"><h2>Conversation</h2><span class="panel-summary" id="panelSummary" role="status" aria-live="polite"></span></div><button class="panel-toggle" id="panelToggle" type="button" aria-expanded="false" aria-controls="panel" aria-label="Show conversation">${chromeIcons.chevronUp}</button></div></div><div class="panel-scroll" id="panelScroll"><div class="chat" id="chatLog"></div><div class="chat chat-queued" id="queuedLog"></div></div><div class="composer" id="chatComposer"><div class="presence-banner handoff-banner update-banner" id="handoffBanner" hidden><span>This review is open in another ${safeProduct} tab.</span><button class="handoff-takeover primary" id="handoffTakeover" type="button">Take over here</button></div><div class="presence-banner handoff-banner update-banner" id="outdatedBanner" hidden><span id="outdatedText">The ${safeProduct} server this page was connected to is no longer running. Reloading will work once it is running again.</span><span class="outdated-actions"><button class="handoff-takeover primary" id="outdatedReload" type="button">Check and reload</button><button class="handoff-takeover" id="outdatedDismiss" type="button">Dismiss</button></span></div><div class="composer-anchor" id="chatAnchor" hidden><span class="composer-anchor-on">On</span><span class="composer-anchor-target" id="chatAnchorTarget"></span><button class="icon-button composer-anchor-clear" id="chatAnchorClear" type="button" aria-label="Write about the whole page instead" data-tip="Whole page instead" data-tip-align="end">${chromeIcons.close}</button></div>${messageBoxHtml({ id: "chat", placeholder: "Write a note on the whole page...", accept: acceptedMime.join(",") })}<div class="chat-attachments" id="chatAttachments"></div><span class="chat-attachment-notice" id="chatAttachmentNotice" role="status"></span><div class="chat-voice-note" id="chatVoiceNote" role="status"></div><div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first.</div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">${chromeIcons.exit}<span>Send &amp; End</span></button><button class="button primary send-decision" id="send">${chromeIcons.send}<span>Send to Agent</span></button></div></div></aside></div>
+<div class="share-overlay" id="shareDialog" role="dialog" aria-modal="true" aria-labelledby="shareTitleText" hidden><form class="share-card" id="shareForm"><header class="command-center-heading share-head"><span class="goblin-avatar" aria-hidden="true"></span><h2 id="shareTitleText">Publish artifact<span class="share-kicker">to <a class="share-link" href="https://ht-ml.app" target="_blank" rel="noopener noreferrer">ht-ml.app</a></span></h2><button class="share-close icon-button" id="shareClose" type="button" aria-label="Close publish dialog" data-tip="Close" data-tip-align="end">${chromeIcons.close}</button></header><p class="share-note">ht-ml.app is a separate, third-party hosting service, not part of ${safeProduct}. Publishing sends this artifact to its servers.</p><p class="share-copy">This uploads this artifact to ht-ml.app with local assets inlined. Without a password, the page is PUBLIC and anyone with the link can open it. With a password, the page is PRIVATE and viewers must supply the password to view.</p><p class="share-note">Do not publish secrets. The ${safeProduct} annotation SDK is not included.</p><div class="share-grid"><label class="share-check"><input id="shareGenerate" type="checkbox"><span>Generate a password (makes this page private)</span></label><label>Password (optional)<input id="sharePassword" name="password" type="password" autocomplete="new-password" placeholder="Leave blank for a public page"></label></div><div class="share-status" id="shareStatus" role="status"></div><div class="share-result" id="shareResult" hidden><label id="shareUrlResult">Share URL<div class="share-copy-row"><input id="shareUrl" readonly><button class="share-copy-btn" id="copyShareUrl" type="button">Copy URL</button></div></label><label id="sharePasswordResult" hidden>Password (shared secret)<div class="share-copy-row"><input id="sharePasswordOut" readonly><button class="share-copy-btn" id="copySharePassword" type="button">Copy password</button></div></label><label id="shareSiteIdResult" hidden>Site ID<div class="share-copy-row"><input id="shareSiteId" readonly><button class="share-copy-btn" id="copyShareSiteId" type="button">Copy site ID</button></div></label><label id="shareUpdateKeyResult">Update key (secret)<div class="share-copy-row"><input id="shareUpdateKey" readonly><button class="share-copy-btn" id="copyUpdateKey" type="button">Copy key</button></div></label><p class="share-note" id="shareUpdateKeyNote">Keep the update key private. ht-ml.app returns it once and it is the only way to update this page later; the service has no delete. Republish this page&#39;s HTML with <code>lavish-axi share &lt;file&gt; --site &lt;site id&gt; --update-key &lt;key&gt;</code>, and add <code>--private</code> to also lock it behind a new generated password.</p></div><div class="share-actions"><button class="share-cancel" id="shareCancel" type="button">Cancel</button><button class="button primary" id="sharePublish" type="submit">Publish</button></div></form></div>
+<div class="ended-overlay" id="endedOverlay" hidden><div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"></span><h3 class="ended-title">Session ended.<br>Return to your agent to continue.</h3><div class="ended-replies" id="endedReplies" role="region" aria-label="Latest from your agent" hidden></div><p class="ended-copy">${escapeHtml(session.file)}</p></div></div>
+<div class="whiteboard-overlay" id="whiteboardOverlay" hidden><div class="whiteboard-shell"><div class="whiteboard-error" id="whiteboardError" hidden></div><button class="whiteboard-close icon-button raised" id="whiteboardClose" type="button" aria-label="Close whiteboard">${chromeIcons.close}</button><iframe id="whiteboardFrame" title="Excalidraw whiteboard" sandbox="allow-scripts allow-popups"></iframe></div></div>
 <script id="lavish-session" type="application/json">${sessionJson}</script>
-<script>${CHROME_BOOT_FAILSAFE_JS}</script>
+<script>${chromeBootFailsafeJs(product)}</script>
 <script src="/chrome-client.js" onerror="window.__lavishChromeBootFailed()"></script>
 </body>
 </html>`;
@@ -3020,7 +3311,7 @@ export function createWhiteboardFrameHtml(channelToken = "") {
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Lavish Whiteboard</title>
+<title>${escapeHtml(brandTitleSuffix(brandName()))} Whiteboard</title>
 <link rel="stylesheet" href="/whiteboard-assets/whiteboard.css">
 </head>
 <body>
@@ -3051,21 +3342,33 @@ function serializeModuleHelpers(module) {
   };
 }
 
+// The message box's helpers for the chrome client, which is served as it is on disk and cannot
+// import them: they arrive as `window.lavishMessageBox`, from the same module the SDK serializes.
+export function createChromeMessageBoxJs() {
+  const helpers = serializeModuleHelpers(messageBox);
+  return `window.lavishMessageBox=(() => {\n${helpers.declarations}\nreturn { ${helpers.names.join(", ")} };\n})();`;
+}
+
 /**
  * @param {string} key
  * @param {number} [artifactRevision]
  * @param {string} [artifactLoadToken]
- * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[] }} [options]
+ * @param {{ maxAttachmentCount?: number, maxAttachmentBytes?: number, acceptedImageMime?: string[], projectTheme?: ReturnType<typeof import("./project-theme.js").validateProjectTheme> | null }} [options]
  */
 export function createSdkJs(
   key,
   artifactRevision = 0,
   artifactLoadToken = "",
-  { maxAttachmentCount, maxAttachmentBytes, acceptedImageMime = ACCEPTED_IMAGE_MIME } = {},
+  { maxAttachmentCount, maxAttachmentBytes, acceptedImageMime = ACCEPTED_IMAGE_MIME, projectTheme = null } = {},
 ) {
+  const theme = projectTheme || SIQ_THEME;
   const mermaidHelperSource = serializeModuleHelpers(mermaidNode);
   const tableHelperSource = serializeModuleHelpers(tableCellHelpers);
   const revisionHelperSource = serializeModuleHelpers(artifactRevisions);
+  const choiceHelperSource = serializeModuleHelpers(pageChoices);
+  const tipHelperSource = serializeModuleHelpers(boardTips);
+  const pageColorHelperSource = serializeModuleHelpers(pageColors);
+  const messageBoxHelperSource = serializeModuleHelpers(messageBox);
   const revisionNumber = Number(artifactRevision);
   const revision = Number.isFinite(revisionNumber) && revisionNumber >= 0 ? Math.trunc(revisionNumber) : 0;
   const loadToken = String(artifactLoadToken || "").slice(0, 200);
@@ -3077,6 +3380,9 @@ export function createSdkJs(
     maxAttachmentCount: Number.isFinite(maxAttachmentCount) ? maxAttachmentCount : undefined,
     maxAttachmentBytes: Number.isFinite(maxAttachmentBytes) ? maxAttachmentBytes : undefined,
     acceptedImageMime: acceptedImageMime.map(String),
+    board: SDK_BOARD,
+    // What a page that sets no colours of its own is shown on: the frame's own page colours.
+    pageDefaults: { background: theme.colors.page, color: theme.colors.text, scheme: themeScheme(theme) },
   };
   return `(() => {
 const key=${JSON.stringify(key)};
@@ -3097,11 +3403,16 @@ const partitionDroppedFiles=${partitionDroppedFiles.toString()};
 const planClipboardPaste=${planClipboardPaste.toString()};
 const acceptedImageTypes=${acceptedImageTypes.toString()};
 const isTrustedAttachmentResult=${isTrustedAttachmentResult.toString()};
+const rebuildKeepingFocus=${rebuildKeepingFocus.toString()};
 const deriveAttachmentNoticeState=${deriveAttachmentNoticeState.toString()};
 ${mermaidHelperSource.declarations}
 const mermaidHelpers={ ${mermaidHelperSource.names.join(", ")} };
 ${tableHelperSource.declarations}
 ${revisionHelperSource.declarations}
+${choiceHelperSource.declarations}
+${tipHelperSource.declarations}
+${pageColorHelperSource.declarations}
+${messageBoxHelperSource.declarations}
 (${createArtifactSdk.toString()})(deriveQueueKey, isNativeInteractiveControl, mermaidHelpers, artifactRevision, artifactLoadToken, key, ${JSON.stringify(sdkOptions)});
 })();`;
 }

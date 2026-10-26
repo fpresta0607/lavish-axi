@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
-import { createServer } from "node:http";
+import { mkdir, mkdtemp, readdir, readFile, readlink, realpath, rm, writeFile } from "node:fs/promises";
+import { createServer, request as httpRequest } from "node:http";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -174,6 +174,50 @@ test("the design-priority rule is single-sourced and keeps its three-step semant
   assert.match(DESIGN_SYSTEM_HINT, /portable/);
   assert.match(DESIGN_SYSTEM_HINT, /lavish-axi design/);
   assert.match(DESIGN_SYSTEM_HINT, /state which of the three design sources/);
+});
+
+// In this fork a page with no design direction of its own starts in the Code Goblins board's
+// look, and still takes whatever style its content calls for when steps (1) or (2) say so.
+test("the design-priority rule's last step is the board look, with the CDN kit behind it", () => {
+  const lastStep = DESIGN_PRIORITY_RULE.slice(DESIGN_PRIORITY_RULE.indexOf("(3)"));
+
+  assert.match(lastStep, /Code Goblins board look/);
+  assert.match(lastStep, /page patterns/);
+  assert.ok(lastStep.indexOf("board look") < lastStep.indexOf("DaisyUI"), "the board look comes before the CDN kit");
+  assert.match(DESIGN_SYSTEM_HINT, /the board look's stylesheets and page patterns/);
+});
+
+test("design output gives the board look: two stylesheets, five page patterns and declared choices", async () => {
+  const { board_look: boardLook } = createDesignOutput();
+
+  assert.equal(
+    boardLook.stylesheet_snippet,
+    '<link rel="stylesheet" href="/design/board-tokens.css">\n<link rel="stylesheet" href="/design/board-page.css">',
+  );
+  assert.match(boardLook.use_when, /default/i);
+  assert.match(boardLook.how, /export/);
+  assert.match(boardLook.how, /never a new one/);
+  assert.deepEqual(
+    boardLook.patterns.map((pattern) => pattern.id),
+    ["report", "comparison", "before_after", "evidence", "decision"],
+  );
+  // Every class a pattern's markup uses is one the page stylesheet styles.
+  const pageCss = await readFile(new URL("../src/board-page.css", import.meta.url), "utf8");
+  for (const pattern of boardLook.patterns) {
+    assert.ok(pattern.use_when && pattern.markup, pattern.id);
+    for (const [, classes] of pattern.markup.matchAll(/class="([^"]+)"/g)) {
+      for (const name of classes.split(" ")) {
+        assert.ok(pageCss.includes("." + name), `${pattern.id} uses .${name}, which src/board-page.css styles`);
+      }
+    }
+  }
+  assert.match(boardLook.choices.snippet, /<script type="application\/json" data-lavish-choices>/);
+  assert.match(boardLook.choices.how, /exactly as declared/);
+  assert.match(boardLook.choices.use_when, /never build an answer form/i);
+  // The snippet is itself a declaration Scrawl would draw.
+  const { parsePageChoices } = await import("../src/page-choices.js");
+  const declared = boardLook.choices.snippet.replace(/<\/?script[^>]*>/g, "");
+  assert.equal(parsePageChoices(declared).length, 1);
 });
 
 test("design output is the sole emitted concise explicit-background guidance", () => {
@@ -1002,6 +1046,41 @@ test("export command writes a portable HTML file next to the artifact", async ()
     assert.match(exported, /<style>\.btn\{color:rebeccapurple\}<\/style>/);
     assert.match(exported, /<link rel="stylesheet" href="https:\/\/cdn\.example\/app\.css">/);
     assert.doesNotMatch(exported, /sdk\.js/);
+  } finally {
+    await rm(dir, { force: true, recursive: true });
+  }
+});
+
+test("open refuses an invalid LAVISH_AXI_LINK_URL before starting a server", async () => {
+  const dir = await mkdtemp(`${os.tmpdir()}/lavish-axi-link-url-test-`);
+  const artifact = `${dir}/report.html`;
+  await writeFile(artifact, "<!doctype html><html><body><h1>Hi</h1></body></html>", "utf8");
+  const probe = createServer();
+  await new Promise((resolve) => probe.listen(0, "127.0.0.1", () => resolve(undefined)));
+  const address = probe.address();
+  const port = address && typeof address === "object" ? address.port : 0;
+  await new Promise((resolve) => probe.close(() => resolve(undefined)));
+  try {
+    const result = spawnSync(
+      process.execPath,
+      [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), artifact, "--no-open"],
+      {
+        cwd: fileURLToPath(new URL("..", import.meta.url)),
+        env: {
+          ...process.env,
+          LAVISH_AXI_STATE_DIR: dir,
+          LAVISH_AXI_PORT: String(port),
+          LAVISH_AXI_TELEMETRY: "0",
+          LAVISH_AXI_LINK_URL: "https://review.example/scrawl",
+        },
+        encoding: "utf8",
+      },
+    );
+
+    assert.notEqual(result.status, 0);
+    assert.match(result.stdout, /VALIDATION_ERROR/);
+    assert.match(result.stdout, /LAVISH_AXI_LINK_URL must be an http or https origin/);
+    assert.equal(existsSync(`${dir}/server.log`), false);
   } finally {
     await rm(dir, { force: true, recursive: true });
   }
@@ -2390,6 +2469,69 @@ test("spawned poll with piped stderr banners once and leaves re-run guidance whe
   }
 });
 
+// A session keeps the link it was opened with. Pages opened before Tailscale served an https proxy
+// were listed with their plain-http link for good, and on the tailnet that page cannot use the
+// microphone.
+test("the session list gives each page the link the running server hands out now", async () => {
+  const stateDir = await mkdtemp(`${os.tmpdir()}/lavish-axi-home-links-`);
+  const artifact = `${stateDir}/artifact.html`;
+  await writeFile(artifact, "<html><body>hello</body></html>", "utf8");
+  const tailnetName = "review.tailnet.ts.net";
+  let serveStatus = "{}";
+  const server = await serve({
+    port: 0,
+    stateFile: `${stateDir}/state.json`,
+    version: VERSION,
+    env: {},
+    detectTailscale: async () => ({ ipv4: "192.0.2.1", magicDnsName: tailnetName }),
+    readTailscaleServeStatus: async () => serveStatus,
+    log: () => {},
+    idleTimeoutMs: null,
+  });
+  const base = `http://127.0.0.1:${server.port}`;
+  const open = (file) =>
+    fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file }),
+    }).then((response) => response.json());
+  try {
+    const before = await open(artifact);
+    assert.equal(before.url, `${base}/session/${before.key}`);
+
+    serveStatus = JSON.stringify({
+      TCP: { 4388: { HTTPS: true } },
+      Web: { [`${tailnetName}:4388`]: { Handlers: { "/": { Proxy: base } } } },
+    });
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const second = `${stateDir}/second.html`;
+    await writeFile(second, "<html><body>second</body></html>", "utf8");
+    await open(second);
+
+    const child = spawn(process.execPath, [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url))], {
+      cwd: fileURLToPath(new URL("..", import.meta.url)),
+      env: {
+        ...process.env,
+        LAVISH_AXI_STATE_DIR: stateDir,
+        LAVISH_AXI_PORT: String(server.port),
+        LAVISH_AXI_TELEMETRY: "0",
+      },
+    });
+    let stdout = "";
+    child.stdout.on("data", (chunk) => {
+      stdout += chunk.toString();
+    });
+    const [code] = await once(child, "close");
+
+    assert.equal(code, 0);
+    assert.match(stdout, new RegExp(`https://${tailnetName.replaceAll(".", "\\.")}:4388/session/${before.key}`));
+    assert.doesNotMatch(stdout, /http:\/\/127\.0\.0\.1/);
+  } finally {
+    await server.close();
+    await rm(stateDir, { force: true, recursive: true });
+  }
+});
+
 test("browser-disconnected poll output asks before reopening or ending the resumable session", () => {
   const output = createPollOutput({
     file: "/tmp/report.html",
@@ -2877,18 +3019,103 @@ test("telemetry command names are anonymous and do not include file paths", () =
 });
 
 test("server spawn options detach without inheriting invalid streams", () => {
-  const options = createServerSpawnOptions();
+  const options = createServerSpawnOptions(os.tmpdir());
 
   assert.equal(options.detached, true);
   assert.equal(options.stdio, "ignore");
 });
 
 test("server spawn options can persist detached server output to a log fd", () => {
-  const options = createServerSpawnOptions(17);
+  const options = createServerSpawnOptions(os.tmpdir(), 17);
 
   assert.equal(options.detached, true);
   assert.deepEqual(options.stdio, ["ignore", 17, 17]);
 });
+
+for (const directory of [path.join(os.tmpdir(), "lavish-state"), "lavish-state"]) {
+  test(`server spawn options run the server in its state folder given ${path.isAbsolute(directory) ? "an absolute" : "a relative"} path`, () => {
+    const options = createServerSpawnOptions(directory);
+
+    assert.equal(options.cwd, path.resolve(directory));
+    // Relative to the server's new folder, a relative path would name another state file than the CLI's.
+    assert.equal(options.env?.LAVISH_AXI_STATE_DIR, path.resolve(directory));
+  });
+}
+
+// The detached server's pid, found by the port on its command line.
+async function linuxServerPid(port) {
+  for (const entry of await readdir("/proc")) {
+    if (!/^\d+$/.test(entry)) continue;
+    // A process can exit between the listing and the read.
+    const args = (await readFile(`/proc/${entry}/cmdline`, "utf8").catch(() => "")).split("\0");
+    if (args.some((arg) => arg.endsWith("lavish-axi-server.js")) && args[args.indexOf("--port") + 1] === String(port)) {
+      return Number(entry);
+    }
+  }
+  return null;
+}
+
+// A goblin presents a page from its worktree and the worktree is removed while the server still runs.
+// Windows refuses to remove a folder a process runs in, and Linux shows where the server runs.
+test(
+  "the server runs in its state folder, so the folder of the command that started it can be removed",
+  { timeout: 60_000 },
+  async () => {
+    const dir = await realpath(await mkdtemp(path.join(os.tmpdir(), "lavish-server-cwd-")));
+    const stateDir = path.join(dir, "state");
+    const worktree = path.join(dir, "worktree");
+    await mkdir(worktree);
+    const artifact = path.join(worktree, "page.html");
+    await writeFile(artifact, "<!doctype html><html><body>page</body></html>", "utf8");
+    const probe = createServer();
+    await new Promise((resolve) => probe.listen(0, "127.0.0.1", () => resolve(undefined)));
+    const address = probe.address();
+    const port = address && typeof address === "object" ? address.port : 0;
+    await new Promise((resolve) => probe.close(() => resolve(undefined)));
+    const cli = async (cwd, ...args) => {
+      const child = spawn(
+        process.execPath,
+        [fileURLToPath(new URL("../bin/lavish-axi.js", import.meta.url)), ...args],
+        {
+          cwd,
+          env: {
+            ...process.env,
+            LAVISH_AXI_STATE_DIR: stateDir,
+            LAVISH_AXI_PORT: String(port),
+            LAVISH_AXI_HOST: "127.0.0.1",
+            LAVISH_AXI_TELEMETRY: "0",
+            LAVISH_AXI_NO_OPEN: "1",
+            // A server a failed stop leaves behind ends itself.
+            LAVISH_AXI_IDLE_TIMEOUT_MS: "60000",
+          },
+          stdio: ["ignore", "pipe", "pipe"],
+          windowsHide: true,
+        },
+      );
+      let output = "";
+      child.stdout.on("data", (chunk) => (output += chunk));
+      child.stderr.on("data", (chunk) => (output += chunk));
+      const [code] = await once(child, "close");
+      return { code, output };
+    };
+    try {
+      const opened = await cli(worktree, artifact, "--no-open");
+      assert.equal(opened.code, 0, opened.output);
+
+      await rm(worktree, { recursive: true });
+
+      const health = await fetch(`http://127.0.0.1:${port}/health`).then((response) => response.json());
+      assert.equal(health.ok, true, "the server stopped before the worktree was removed");
+      if (process.platform === "linux") {
+        assert.equal(await readlink(`/proc/${await linuxServerPid(port)}/cwd`), stateDir);
+      }
+    } finally {
+      await cli(dir, "stop", "--port", String(port));
+      // The stopped server can still be exiting, and until it has Windows keeps its folder.
+      await rm(dir, { recursive: true, force: true, maxRetries: 10 });
+    }
+  },
+);
 
 test("detached server entry dispatches the CLI", () => {
   const entry = fileURLToPath(new URL("../bin/lavish-axi-server.js", import.meta.url));
@@ -3277,18 +3504,27 @@ test("opening an artifact names that session as the one to reload across a versi
     assert.equal(code, 0, stderr);
     assert.deepEqual(recorder.bodies, [{ reload_key: sessionKey(await canonicalFile(artifact)), reason: "upgrade" }]);
   } finally {
-    // The CLI replaced the recorder with a real server on that port; stop it again.
-    await fetch(`${base}/shutdown`, { method: "POST" }).catch(() => {});
+    // The CLI replaced the recorder with a real server on that port; stop it again. Plain node:http,
+    // not fetch: Node 24.21's fetch throws an uncaught EINVAL on macOS for a socket the closing
+    // server already reset.
+    const answers = (method, pathname) =>
+      new Promise((resolve) => {
+        const request = httpRequest(`${base}${pathname}`, { method, agent: false }, (response) => {
+          response.on("error", () => {});
+          response.resume();
+          resolve(true);
+        });
+        request.on("error", () => resolve(false));
+        request.end();
+      });
+    await answers("POST", "/shutdown");
     for (let i = 0; i < 30; i += 1) {
-      const alive = await fetch(`${base}/health`).then(
-        () => true,
-        () => false,
-      );
-      if (!alive) break;
+      if (!(await answers("GET", "/health"))) break;
       await new Promise((resolve) => setTimeout(resolve, 100));
     }
     recorder.close();
-    await rm(dir, { recursive: true, force: true });
+    // The stopped server can still be exiting, and until it has Windows keeps its folder.
+    await rm(dir, { recursive: true, force: true, maxRetries: 10 });
   }
 });
 

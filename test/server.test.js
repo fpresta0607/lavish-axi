@@ -8,6 +8,7 @@ import path from "node:path";
 import { Readable } from "node:stream";
 import test from "node:test";
 import { runInNewContext } from "node:vm";
+import { gunzipSync } from "node:zlib";
 import WebSocket from "ws";
 
 process.env.LAVISH_AXI_HOST = "127.0.0.1";
@@ -34,6 +35,7 @@ import {
   resolveWatchTarget,
   serve,
 } from "../src/server.js";
+import { buildSelfContainedHtml } from "../src/export-bundle.js";
 import { canonicalFile, sessionKey, SessionStore } from "../src/session-store.js";
 import { symlinkTest } from "./symlink-support.js";
 
@@ -42,7 +44,12 @@ async function chromeClientSource() {
 }
 
 async function chromeCssSource() {
-  return normalizeCssForAssertions(await readFile(new URL("../src/chrome.css", import.meta.url), "utf8"));
+  const parts = await Promise.all(
+    ["board-tokens.css", "board-components.css", "message-box.css", "chrome.css"].map((name) =>
+      readFile(new URL("../src/" + name, import.meta.url), "utf8"),
+    ),
+  );
+  return normalizeCssForAssertions(parts.join("\n"));
 }
 
 function normalizeCssForAssertions(css) {
@@ -135,6 +142,30 @@ test("server delegates artifact SDK generation to a dedicated source module", as
   const source = await readFile(new URL("../src/server.js", import.meta.url), "utf8");
 
   assert.match(source, /from "\.\/artifact-sdk\.js"/);
+});
+
+test("the chrome's top bar names Lavish Editor, or the brand that replaces it, beside the board's goblin", () => {
+  const lavish = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
+  const branded = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" }, { brand: "Acme <Review>" });
+  const goblin = '<img src="/assets/goblin-app.png" width="48" height="48" alt="">';
+
+  assert.ok(lavish.includes(`<div class="brand">${goblin}<h1 class="brand-mark">Lavish Editor</h1></div>`));
+  assert.ok(branded.includes(`<div class="brand">${goblin}<h1 class="brand-mark">Acme &lt;Review&gt;</h1></div>`));
+});
+
+test("everything the chrome says about itself uses the brand's name", () => {
+  const lavish = bootChromeFailsafe();
+  const branded = bootChromeFailsafe({ brand: "Scrawl", title: "Plan · Scrawl" });
+  assert.match(lavish.html, /"product":"Lavish"/);
+  assert.match(branded.html, /"product":"Scrawl"/);
+  assert.doesNotMatch(branded.html, /Lavish/);
+
+  lavish.runTimers();
+  branded.runTimers();
+
+  assert.equal(lavish.element("layoutGateTitle").textContent, "Lavish could not finish loading.");
+  assert.equal(branded.element("layoutGateTitle").textContent, "Scrawl could not finish loading.");
+  assert.match(branded.element("layoutGateCopy").textContent, /^The Scrawl page script did not load\./);
 });
 
 test("server serves chrome browser behavior from a dedicated source file", async () => {
@@ -263,7 +294,7 @@ test("the chrome boot failsafe turns the layout gate into a reloadable failure w
     boot.pendingDelays().sort((left, right) => left - right),
     [CHROME_LAYOUT_GATE_MAX_HOLD_MS, CHROME_BOOT_FAILSAFE_MS],
   );
-  assert.match(boot.element("layoutGateTitle").textContent, /Checking layout/);
+  assert.match(boot.element("layoutGateTitle").textContent, /Opening this artifact/);
 
   boot.runTimers();
 
@@ -470,7 +501,9 @@ test("server serves chrome styles from a dedicated source file", async () => {
 
   assert.match(source, /chrome\.css/);
   assert.match(html, /<link rel="stylesheet" href="\/chrome\.css">/);
-  assert.doesNotMatch(html, /<style>/);
+  // The one inline rule is the first-paint page colour, so nothing paints white before the
+  // stylesheet arrives; every other style comes from the stylesheet.
+  assert.deepEqual(html.match(/<style>[^<]*<\/style>/g), ["<style>html{background:#03050a}</style>"]);
 });
 
 test("export content disposition uses a safe fallback and encoded UTF-8 filename", () => {
@@ -583,17 +616,20 @@ test("artifact SDK isolates Lavish annotation UI in Shadow DOM", () => {
   assert.match(js, /lavish-annotation-root/);
 });
 
-test("annotation card does not block its own Queue button", () => {
+test("annotation card does not block its own add button", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /sendButton\.onclick\s*=\s*\(\)\s*=>/);
+  assert.match(js, /addButton\.onclick\s*=\s*\(\)\s*=>/);
   assert.doesNotMatch(js, /card\.addEventListener\('click',event=>event\.stopPropagation\(\),true\)/);
 });
 
-test("annotation card labels its submit action as Queue", () => {
+test("annotation card labels its button as adding the note to his notes", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, />Queue<\/button>/);
+  assert.match(
+    js,
+    /class="icon-button send lavish-add" type="button" aria-label="Add to your notes" data-tip="Add to your notes\. Send to Agent sends them all" data-tip-align="end">/,
+  );
   assert.doesNotMatch(js, /Queue Prompt/);
 });
 
@@ -687,7 +723,8 @@ test("chrome client toggles annotation mode via Cmd/Ctrl+I and on request from t
   assert.doesNotMatch(js, /const MODE_TOGGLE_HOTKEY_KEY = "i";/);
   assert.match(js, /function isModeToggleHotkeyEvent\(event\)/);
   assert.match(js, /function toggleAnnotationMode\(\)/);
-  assert.match(js, /annotationSwitch\.onclick = toggleAnnotationMode;/);
+  assert.match(js, /annotationSwitch\.onclick = \(\) => \{\s*if \(!annotation\) toggleAnnotationMode\(\);\s*\};/);
+  assert.match(js, /exploreSwitch\.onclick = \(\) => \{\s*if \(annotation\) toggleAnnotationMode\(\);\s*\};/);
   assert.match(js, /if \(msg\.type === "lavish:toggleAnnotationMode"\) toggleAnnotationMode\(\);/);
   assert.match(
     js,
@@ -760,71 +797,94 @@ test("annotation card title renders selected tag as an html element name", () =>
   assert.match(js, /"Annotate &lt;" \+ c\.tag \+ "&gt;"/);
 });
 
-test("annotation card shadow styles use Lavish design-system variables", () => {
+test("annotation card shadow styles are the board's tokens and its copied rules", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /--ink-900:#0f1115/);
-  assert.match(js, /--accent:#f4c95d/);
-  assert.match(js, /--font-sans:/);
-  assert.match(js, /font-family:var\(--font-sans\)/);
-  assert.match(js, /:focus-visible\{outline:2px solid var\(--accent\);outline-offset:2px/);
+  // The tokens sit on :host, where a shadow root reads them; the card is the board's comment box.
+  assert.match(js, /:host\{color-scheme: dark;/);
+  assert.match(js, /--accent-green: #00e59b;/);
+  assert.match(js, /--font-body: \\"Nunito\\"/);
+  assert.match(js, /\.comment-overlay \{ display: grid;/);
+  assert.match(js, /\.comment-overlay \.send:not\(:disabled\) \{ background: var\(--accent-green\)/);
+  assert.match(js, /outline: var\(--focus-ring\); outline-offset: 3px;/);
+  // None of the board's shell-only rules ride along into the page. The board draws the voice card's
+  // pixel buttons in rules it shares with its dialogue, which come along whole for the voice card.
+  assert.doesNotMatch(js, /\.topbar \{/);
+  assert.doesNotMatch(js, /\.dialogue-box \{/);
+  assert.doesNotMatch(js, /\.dialogue \{/);
+  assert.match(js, /\.voice-bubble::before \{ background: var\(--hide\)/);
+  assert.doesNotMatch(js, /#f4c95d/);
 });
 
-test("chrome top bar uses an Annotate switch instead of a labeled toggle button", () => {
+test("the page gets the board's font faces only once Scrawl draws its own UI there", () => {
+  const js = createSdkJs("abc");
+
+  assert.match(js, /fonts\.id = "lavish-font-style";\s*fonts\.textContent = board\.fontFaces;/);
+  assert.match(
+    js,
+    /@font-face \{ font-family: \\"Pixelify Sans\\"; src: url\(\\"\/assets\/fonts\/pixelify-sans\.woff2\\"\)/,
+  );
+});
+
+test("chrome top bar offers Annotate and Explore as the board's mode pill", () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
 
-  assert.match(html, /class="annotate-switch" id="annotation"[^>]*aria-pressed="true"/);
-  assert.match(html, /class="switch-track"/);
-  assert.match(html, />Annotate</);
+  assert.match(html, /<div class="panel-pill mode-switch" role="group" aria-label="Mode">/);
+  assert.match(
+    html,
+    /<button id="annotation" type="button" aria-pressed="true"[^>]*>.*<span>Annotate<\/span><\/button>/,
+  );
+  assert.match(html, /<button id="explore" type="button" aria-pressed="false"[^>]*>.*<span>Explore<\/span><\/button>/);
   assert.doesNotMatch(html, /Annotation: On/);
   assert.doesNotMatch(html, /Inspect/);
 });
 
-test("annotate switch shows a brass track and ink knob when enabled", async () => {
+test("the mode pill lights the chosen mode with the board's electric ring", async () => {
   const js = await chromeClientSource();
   const css = await chromeCssSource();
 
-  assert.match(css, /\.annotate-switch\[aria-pressed="true"\] \.switch-track\{background:var\(--accent\)/);
-  assert.match(css, /\.annotate-switch\[aria-pressed="true"\] \.switch-knob\{[^}]*background:var\(--accent-ink\)/);
+  assert.match(
+    css,
+    /\.panel-pill button\[aria-pressed="true"\]\{[^}]*var\(--electric-ring\) border-box;box-shadow:var\(--electric-glow\)/,
+  );
   assert.match(js, /annotationSwitch\.setAttribute\("aria-pressed", String\(annotation\)\)/);
+  assert.match(js, /exploreSwitch\.setAttribute\("aria-pressed", String\(!annotation\)\)/);
 });
 
-test("chrome declares the Lavish design-system tokens", async () => {
+test("chrome declares the board's tokens and its own layout measures", async () => {
   const css = await chromeCssSource();
 
-  assert.match(css, /--ink-900:#0f1115/);
-  assert.match(css, /--cream-100:#f7f3ea/);
-  assert.match(css, /--brass-500:#f4c95d/);
-  assert.match(css, /--font-serif:/);
-  assert.match(css, /--font-sans:/);
-  assert.match(css, /--text-display:92px/);
-  assert.match(css, /--lh-display:1/);
-  assert.match(css, /--space-32:64px/);
-  assert.match(css, /--shadow-floating:0 20px 70px rgba\(0,0,0,.35\)/);
+  assert.match(css, /--accent-green:#00e59b/);
+  assert.match(css, /--body-bg:#03050a/);
+  assert.match(css, /--font-display:"Pixelify Sans"/);
+  assert.match(css, /--font-body:"Nunito"/);
+  assert.match(css, /--font-mono:"JetBrains Mono"/);
+  assert.match(css, /--lantern:#65efcd/);
+  assert.match(css, /--radius:.625rem/);
   assert.match(css, /--ease:cubic-bezier\(.2,.6,.2,1\)/);
   assert.match(css, /--dur-slow:320ms/);
-  assert.match(css, /--bar-h:56px/);
-  assert.match(css, /--panel-w:360px/);
+  assert.match(css, /--bar-h:72px/);
+  assert.match(css, /--panel-w:420px/);
+  // The upstream palette is gone, not aliased.
+  assert.doesNotMatch(css, /--brass-|--ink-|--steel-|--cream-|#f4c95d/);
 });
 
-test("artifact SDK uses design-token aliases for annotation highlight and shadow UI", () => {
+test("artifact SDK highlights with the board's accent, handed over by the server", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /--lavish-accent:#f4c95d/);
+  assert.match(js, /"accent":"#00e59b"/);
+  assert.match(js, /":root\{--lavish-accent:" \+\s*board\.accent \+/);
   assert.match(js, /--lavish-annotate-outline:2px solid var\(--lavish-accent\)/);
-  assert.match(js, /el\.style\.outline\s*=\s*["']var\(--lavish-annotate-outline,2px solid #f4c95d\)["']/);
+  assert.match(js, /el\.style\.outline = "var\(--lavish-annotate-outline,2px solid " \+ board\.accent \+ "\)"/);
   assert.match(js, /el\.style\.outlineOffset\s*=\s*["']var\(--lavish-annotate-offset,2px\)["']/);
-  assert.match(js, /--fg-faint:var\(--steel-300\)/);
-  assert.match(js, /textarea::placeholder\{color:var\(--fg-faint\)\}/);
-  assert.doesNotMatch(js, /placeholder\{color:#aeb6c6\}/);
+  assert.match(js, /::placeholder \{ color: #869da9; \}/);
 });
 
-test("chrome uses the annotation outline as the keyboard focus outline", async () => {
+test("chrome uses the board's focus ring as the keyboard focus outline", async () => {
   const css = await chromeCssSource();
 
-  assert.match(css, /:focus-visible\{outline:var\(--annotate-outline\);outline-offset:var\(--annotate-offset\)/);
-  assert.match(css, /--annotate-outline:2px solid var\(--accent\)/);
-  assert.match(css, /--annotate-offset:2px/);
+  assert.match(css, /:focus-visible\{outline:var\(--focus-ring\);outline-offset:3px;\}/);
+  assert.match(css, /--focus-ring:3px solid var\(--accent-blue\)/);
 });
 
 test("chrome page ships the phone conversation dock and the viewport contract it relies on", () => {
@@ -847,15 +907,15 @@ test("chrome page ships the phone conversation dock and the viewport contract it
   assert.match(html, /<span class="panel-summary" id="panelSummary" role="status" aria-live="polite"><\/span>/);
 });
 
-test("chrome top bar follows the design mock wordmark and overflow menu treatment", async () => {
+test("chrome top bar follows the board's wordmark and overflow menu treatment", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const css = await chromeCssSource();
 
-  assert.match(html, /class="brand-mark">Lavish/);
-  assert.match(html, /class="brand-support">Editor/);
-  assert.match(css, /font-family:var\(--font-serif\)/);
-  assert.match(css, /letter-spacing:\.18em/);
-  assert.match(html, /class="more-button" id="moreButton"/);
+  assert.match(html, /<header class="bar topbar">/);
+  assert.match(html, /class="brand-mark">Lavish Editor</);
+  assert.match(css, /\.brand h1\{[^}]*background:var\(--brand-gradient\)/);
+  assert.match(css, /h1,h2,h3\{font-family:var\(--font-display\)/);
+  assert.match(html, /class="more-button icon-button raised" id="moreButton"/);
   assert.match(html, /class="menu more-menu" id="moreMenu" hidden/);
   assert.doesNotMatch(html, /class="file-input"/);
   assert.doesNotMatch(html, /class="divider"/);
@@ -870,7 +930,7 @@ test("overflow menu shows the artifact path with a copy affordance", async () =>
   assert.match(html, /class="menu-file" id="copyPath"[^>]*title="Copy path · \/tmp\/artifact\/index\.html"/);
   assert.match(html, /class="copy-hint"/);
   assert.match(css, /\.menu-file\{[^}]*font-family:var\(--font-mono\)/);
-  assert.match(css, /\.copy-hint\.copied\{color:var\(--accent-hover\)/);
+  assert.match(css, /\.copy-hint\.copied\{color:var\(--mint\)/);
 });
 
 test("overflow menu path keeps the file name visible and elides the directories", async () => {
@@ -946,7 +1006,7 @@ test("overflow menu offers publishing an ht-ml.app link via a share dialog", asy
   assert.match(html, /id="shareDialog"/);
   assert.match(
     html,
-    /Publish to <a class="share-link" href="https:\/\/ht-ml\.app" target="_blank" rel="noopener noreferrer">ht-ml\.app<\/a>/,
+    /Publish artifact<span class="share-kicker">to <a class="share-link" href="https:\/\/ht-ml\.app" target="_blank" rel="noopener noreferrer">ht-ml\.app<\/a>/,
   );
   assert.match(html, /third-party hosting service, not part of Lavish/);
   assert.match(html, /id="sharePassword"/);
@@ -959,11 +1019,10 @@ test("overflow menu offers publishing an ht-ml.app link via a share dialog", asy
   assert.match(css, /\.share-overlay\{[^}]*z-index:80;/);
   assert.match(css, /\.share-card/);
   assert.match(css, /\.share-link/);
-  assert.match(css, /box-shadow:var\(--shadow-floating\)/);
-  // The codebase has no global [hidden] rule, so display-setting overlays need explicit
-  // [hidden] rules or they show through before they should (e.g. the result block).
-  assert.match(css, /\.share-overlay\[hidden\]\{display:none;?\}/);
-  assert.match(css, /\.share-result\[hidden\]\{display:none;?\}/);
+  assert.match(css, /\.share-card\{[^}]*box-shadow:var\(--glass-shadow-hover\)/);
+  // The board's global [hidden] rule keeps display-setting overlays from showing through before
+  // they should (e.g. the result block).
+  assert.match(css, /\[hidden\]\{display:none !important;\}/);
   assert.match(js, /const shareArtifactButton/);
   assert.match(js, /async function publishShare/);
   assert.match(js, /fetch\("\/api\/" \+ key \+ "\/share"/);
@@ -1013,22 +1072,25 @@ test("clipboard copy falls back when navigator clipboard rejects", async () => {
   assert.doesNotMatch(js, /navigator\.clipboard\.writeText\(text\)\.catch/);
 });
 
-test("chrome centers the top bar row while bottom-aligning the identity cluster", async () => {
+test("chrome top bar is the board's: brand, the mode pill in its middle, controls on the right", async () => {
   const css = await chromeCssSource();
 
-  assert.match(css, /\.bar\{[^}]*align-items:center/);
-  assert.match(css, /\.brand\{[^}]*height:22px/);
-  assert.match(css, /\.brand\{[^}]*align-items:flex-end/);
+  assert.match(css, /\.topbar\{[^}]*grid-template-columns:minmax\(0,1fr\) auto minmax\(0,1fr\);align-items:center/);
+  assert.match(css, /\.topbar\{[^}]*background:var\(--glass-bg\)/);
+  assert.match(css, /\.brand\{[^}]*align-items:center/);
 });
 
-test("chrome chat bubbles follow the preview mock shades", async () => {
+test("chrome chat bubbles are the board's dialogue box for the agent and its comment chip for the user", async () => {
   const css = await chromeCssSource();
+  const js = await chromeClientSource();
 
-  assert.match(css, /\.bubble\.user\{[^}]*background:var\(--bg-elevated\)/);
-  assert.match(css, /\.bubble\.user\{[^}]*border-color:var\(--border-strong\)/);
-  assert.match(css, /\.bubble\.agent\{[^}]*background:transparent/);
-  assert.match(css, /\.bubble\.agent\{[^}]*border-color:var\(--border-subtle\)/);
-  assert.match(css, /border-top-color:var\(--accent\)/);
+  assert.match(js, /el\.className = role === "agent" \? "bubble agent dialogue" : "bubble user";/);
+  assert.match(
+    css,
+    /\.dialogue-box::before,\.dialogue-portrait::before\{border:2px solid var\(--soot\);background:var\(--hide\)/,
+  );
+  assert.match(css, /\.bubble\.user\{[^}]*border:1px solid var\(--glass-border\)/);
+  assert.match(css, /\.bubble\.user\{[^}]*background:var\(--field-bg\)/);
 });
 
 test("chrome includes a chat-like prompt composer and agent reply listener", async () => {
@@ -1060,28 +1122,24 @@ test("chrome client renders persisted chat history", async () => {
   assert.match(js, /initialChat\.forEach/);
 });
 
-test("chrome shows agent working state when a previous poll has released", async () => {
-  const js = await chromeClientSource();
-
-  assert.match(js, /agent-presence/);
-  assert.match(js, /Working\.\.\./);
-  assert.match(js, /spinner/);
-});
-
 test("composer offers two always-visible top-level send actions", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const css = await chromeCssSource();
 
-  assert.match(html, /class="button" id="send">Send to Agent</);
+  assert.match(html, /class="button primary send-decision" id="send">.*<span>Send to Agent<\/span><\/button>/);
   assert.match(html, /class="button button-danger" id="sendAndEnd"[^<]*>.*Send &amp; End</);
   assert.match(
     html,
-    /<div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first\.<\/div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">.*<button class="button" id="send">Send to Agent<\/button><\/div>/,
+    /<div class="send-hint" id="sendHint" hidden>Write a message or annotate an element first\.<\/div><div class="actions" id="sendActions"><button class="button button-danger" id="sendAndEnd" type="button">.*<button class="button primary send-decision" id="send">.*<span>Send to Agent<\/span><\/button><\/div>/,
   );
   assert.doesNotMatch(html, /id="sendCaret"/);
   assert.doesNotMatch(html, /id="sendMenu"/);
   assert.doesNotMatch(html, /id="sendFromMenu"/);
-  assert.match(css, /\.button-danger\{[^}]*color:var\(--danger\)/);
+  assert.match(
+    css,
+    /\.primary\{background:var\(--accent-green\);border-color:var\(--accent-green\);border-radius:999px/,
+  );
+  assert.match(css, /\.button-danger\{[^}]*color:var\(--danger-ink\)/);
   assert.match(css, /\.actions\{[^}]*min-width:0/);
 });
 
@@ -1093,15 +1151,15 @@ test("chrome only marks session ended after the end request succeeds", async () 
   assert.match(js, /if \(!response\.ok\) throw new Error\("failed to end session"\);\n {2}markSessionEnded\(\)/);
 });
 
-test("chrome shows a waiting banner when no agent has attached", async () => {
+test("chrome never tells him his agent is not listening", async () => {
   const html = createChromeHtml({ key: "abc", file: "/tmp/artifact.html" });
   const js = await chromeClientSource();
   const css = await chromeCssSource();
 
-  assert.match(html, /id="presenceBanner"/);
-  assert.match(html, /Your agent is not listening/);
-  assert.match(js, /presenceBanner\.hidden = ended \|\| agentPresence !== "waiting"/);
-  assert.match(css, /\.presence-banner\{/);
+  for (const source of [html, js, css]) {
+    assert.doesNotMatch(source, /not listening/i);
+    assert.doesNotMatch(source, /presenceBanner|agent-offline/);
+  }
 });
 
 test("chrome keeps queued notes at the tail of the one conversation, above the sticky composer", async () => {
@@ -1138,7 +1196,7 @@ test("composer textarea is sized within the right panel", async () => {
   assert.match(css, /\.chat\{[^}]*min-height:0/);
   assert.match(css, /\.composer\{[^}]*min-width:0/);
   assert.match(css, /\.composer\{[^}]*flex-shrink:0/);
-  assert.match(css, /\.composer textarea\{[^}]*box-sizing:border-box/);
+  assert.match(css, /\.composer-field textarea\{[^}]*box-sizing:border-box/);
 });
 
 test("hot reload resets iframe src instead of crossing sandbox location", async () => {
@@ -1222,7 +1280,9 @@ test("chrome remembers the artifact scroll position across reloads", async () =>
   assert.match(js, /let lastScroll = \{ x: 0, y: 0 \}/);
   assert.match(js, /msg\.type === ["']lavish:scroll["']/);
   assert.match(js, /type:\s*["']lavish:restoreScroll["']/);
-  assert.match(js, /x:\s*lastScroll\.x,\s*y:\s*lastScroll\.y/);
+  // A reload restores the previous document's place, captured when the new load begins.
+  assert.match(js, /pendingScrollRestore = lastScroll\.x \|\| lastScroll\.y \? \{ \.\.\.lastScroll \} : null/);
+  assert.match(js, /x:\s*pendingScrollRestore\.x,\s*y:\s*pendingScrollRestore\.y/);
 });
 
 test("chrome ignores Lavish postMessages not sent by the artifact iframe", async () => {
@@ -1298,6 +1358,18 @@ function availableConcreteIpv4() {
     }
   }
   return null;
+}
+
+// The port is free at host only: the kernel checks no other address when it picks one. serve() with
+// port 0 binds loopback first and the LAN address at the same port after it, and on macOS a port free
+// on loopback can still be the local port of a connection at the LAN address, so a test that binds
+// both picks the port there.
+async function freePort(host) {
+  const probe = createServer();
+  await new Promise((resolve) => probe.listen({ port: 0, host }, () => resolve(undefined)));
+  const { port } = /** @type {{ port: number }} */ (probe.address());
+  await new Promise((resolve) => probe.close(() => resolve(undefined)));
+  return port;
 }
 
 test("resolved all-interfaces aliases are rejected before listening", async () => {
@@ -1511,7 +1583,7 @@ test("Tailscale mode binds concrete listeners, serves the MagicDNS link, and tea
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailscale-"));
   const magicDnsName = "review-phone.example.ts.net";
   const server = await serve({
-    port: 0,
+    port: await freePort(tailscaleIpv4),
     stateFile: path.join(dir, "state.json"),
     version: "9.9.9-test",
     env: {},
@@ -1562,7 +1634,7 @@ test("Tailscale mode binds concrete listeners, serves the MagicDNS link, and tea
       headers: { accept: "text/html" },
     });
     assert.equal(landing.status, 200);
-    assert.match(landing.body, /Lavish Editor is running/);
+    assert.match(landing.body, /Scrawl is running/);
 
     const shutdown = await rawRequest(server.port, "/shutdown", {
       method: "POST",
@@ -1621,6 +1693,329 @@ test("session URLs use the configured linkHost while binding to loopback", async
   }
 });
 
+const TAILNET_NAME = "review.tailnet.ts.net";
+const TAILNET_HTTPS_ORIGIN = `https://${TAILNET_NAME}:4388`;
+// What `tailscale serve` sends: the browser's Host, repeated as X-Forwarded-Host, and the scheme.
+const TAILNET_PROXIED = {
+  host: `${TAILNET_NAME}:4388`,
+  headers: { "x-forwarded-host": `${TAILNET_NAME}:4388`, "x-forwarded-proto": "https" },
+};
+
+function tailscaleHttpsServe(listenPort, proxy) {
+  return JSON.stringify({
+    TCP: { [listenPort]: { HTTPS: true } },
+    Web: { [`${TAILNET_NAME}:${listenPort}`]: { Handlers: { "/": { Proxy: proxy } } } },
+  });
+}
+
+// The tailnet listener at 192.0.2.1 never binds, so only a proxy that reaches Lavish over loopback
+// can make the MagicDNS name an allowed host.
+async function serveBehindTailnet(dir, { env = {}, readTailscaleServeStatus }) {
+  return serve({
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    env,
+    detectTailscale: async () => ({ ipv4: "192.0.2.1", magicDnsName: TAILNET_NAME }),
+    readTailscaleServeStatus,
+    log: () => {},
+    idleTimeoutMs: null,
+  });
+}
+
+async function openSession(port, artifact) {
+  const opened = await rawRequest(port, "/api/sessions", { method: "POST", body: JSON.stringify({ file: artifact }) });
+  return JSON.parse(opened.body);
+}
+
+test("session links use the https origin Tailscale serves to this port, and the proxied page stays live", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-https-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let lavishPort = 0;
+  const server = await serveBehindTailnet(dir, {
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, `http://127.0.0.1:${lavishPort}`),
+  });
+  lavishPort = server.port;
+  let socket;
+  try {
+    const opened = await openSession(server.port, artifact);
+    assert.equal(opened.url, `${TAILNET_HTTPS_ORIGIN}/session/${opened.key}`);
+    assert.match(
+      opened.network_warning,
+      /https:\/\/review\.tailnet\.ts\.net:4388 links through tailscale serve still load/,
+    );
+
+    const page = await rawRequest(server.port, `/session/${opened.key}`, {
+      host: TAILNET_PROXIED.host,
+      headers: { ...TAILNET_PROXIED.headers, accept: "text/html" },
+    });
+    assert.equal(page.status, 200);
+
+    socket = new WebSocket(`ws://127.0.0.1:${server.port}/events/${opened.key}`, {
+      origin: TAILNET_HTTPS_ORIGIN,
+      headers: { host: TAILNET_PROXIED.host, ...TAILNET_PROXIED.headers },
+    });
+    const messages = on(socket, "message");
+    const nextMessage = async () => JSON.parse(String((await messages.next()).value[0]));
+    await once(socket, "open");
+    assert.equal((await nextMessage()).type, "chat-sync");
+
+    const queued = await rawRequest(server.port, `/api/${opened.key}/prompts`, {
+      method: "POST",
+      host: TAILNET_PROXIED.host,
+      headers: { ...TAILNET_PROXIED.headers, origin: TAILNET_HTTPS_ORIGIN },
+      body: JSON.stringify({ prompts: [{ prompt: "sent from the phone", tag: "message" }] }),
+    });
+    assert.equal(queued.status, 200);
+    const delivered = await fetch(
+      `http://127.0.0.1:${server.port}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`,
+    ).then((response) => response.json());
+    assert.deepEqual(
+      delivered.prompts.map((prompt) => prompt.prompt),
+      ["sent from the phone"],
+    );
+    const reply = await fetch(`http://127.0.0.1:${server.port}/api/${opened.key}/agent-reply`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ text: "reply over the proxy" }),
+    });
+    assert.equal(reply.status, 200);
+    let event = await nextMessage();
+    while (event.type !== "agent-reply") event = await nextMessage();
+    assert.equal(event.data.text, "reply over the proxy");
+    await messages.return();
+
+    const refused = await rawRequest(server.port, "/health", {
+      host: `attacker.example:${server.port}`,
+      headers: { accept: "text/html" },
+    });
+    assert.equal(refused.status, 403);
+    assert.match(refused.body, new RegExp(`${TAILNET_HTTPS_ORIGIN}/`));
+    assert.match(refused.body, /phone through Tailscale/);
+  } finally {
+    socket?.close();
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("session links keep the http link when Tailscale serves no https proxy to this port", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-no-https-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  const server = await serveBehindTailnet(dir, {
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, "http://127.0.0.1:5173"),
+  });
+  try {
+    const opened = await openSession(server.port, artifact);
+    assert.equal(opened.url, `http://127.0.0.1:${server.port}/session/${opened.key}`);
+    const proxied = await rawRequest(server.port, "/health", TAILNET_PROXIED);
+    assert.equal(proxied.status, 403);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("LAVISH_AXI_LINK_URL overrides the Tailscale https proxy and is an allowed host", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-link-url-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let lavishPort = 0;
+  const server = await serveBehindTailnet(dir, {
+    env: { LAVISH_AXI_LINK_URL: "https://review.example:8443/" },
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, `http://127.0.0.1:${lavishPort}`),
+  });
+  lavishPort = server.port;
+  try {
+    const opened = await openSession(server.port, artifact);
+    assert.equal(opened.url, `https://review.example:8443/session/${opened.key}`);
+    const named = await rawRequest(server.port, "/health", {
+      host: "review.example:8443",
+      headers: { "x-forwarded-host": "review.example:8443", "x-forwarded-proto": "https" },
+    });
+    assert.equal(named.status, 200);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an invalid LAVISH_AXI_LINK_URL stops the server from starting", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-link-url-invalid-"));
+  try {
+    const starting = serve({
+      port: 0,
+      stateFile: path.join(dir, "state.json"),
+      version: "9.9.9-test",
+      env: { LAVISH_AXI_HOST: "127.0.0.1", LAVISH_AXI_LINK_URL: "https://review.example/scrawl" },
+      idleTimeoutMs: null,
+    });
+    await assert.rejects(
+      starting.then((server) => server.close()),
+      /LAVISH_AXI_LINK_URL must be an http or https origin/,
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a Tailscale https proxy added while Lavish runs reaches the next session link", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-https-added-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let serveStatus = "{}";
+  const server = await serveBehindTailnet(dir, { readTailscaleServeStatus: async () => serveStatus });
+  try {
+    const before = await openSession(server.port, artifact);
+    assert.equal(before.url, `http://127.0.0.1:${server.port}/session/${before.key}`);
+
+    serveStatus = tailscaleHttpsServe(4388, `http://127.0.0.1:${server.port}`);
+    // Past the one-second window in which a serve status read is reused.
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const after = await openSession(server.port, artifact);
+    assert.equal(after.url, `${TAILNET_HTTPS_ORIGIN}/session/${after.key}`);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// A Tailscale https proxy is a standing promise that the link answers: once the server idled out,
+// every link the Overlord held (on the board, in a message) answered a bare 502 from the proxy,
+// and nothing of Lavish was running to start itself or say why.
+test("a server Tailscale serves an https proxy to outlives its idle timeout, and stops once the proxy is gone", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-idle-"));
+  let serveStatus = "{}";
+  const server = await serve({
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    env: {},
+    detectTailscale: async () => ({ ipv4: "192.0.2.1", magicDnsName: TAILNET_NAME }),
+    readTailscaleServeStatus: async () => serveStatus,
+    log: () => {},
+    idleTimeoutMs: 150,
+  });
+  serveStatus = tailscaleHttpsServe(4388, `http://127.0.0.1:${server.port}`);
+  try {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    const health = await fetch(`http://127.0.0.1:${server.port}/health`);
+    assert.equal(health.status, 200);
+
+    serveStatus = "{}";
+    await expectDoneWithin(server, 3000);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("ending the last open session does not stop a server Tailscale serves an https proxy to", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-last-end-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let lavishPort = 0;
+  const server = await serveBehindTailnet(dir, {
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, `http://127.0.0.1:${lavishPort}`),
+  });
+  lavishPort = server.port;
+  try {
+    const opened = await openSession(server.port, artifact);
+    const ended = await fetch(`http://127.0.0.1:${server.port}/api/${opened.key}/end`, { method: "POST" });
+    assert.equal(ended.status, 200);
+    await new Promise((resolve) => setTimeout(resolve, 300));
+
+    // The ended page still answers through its link: it shows the agent's last words.
+    const page = await rawRequest(server.port, `/session/${opened.key}`, {
+      host: TAILNET_PROXIED.host,
+      headers: { ...TAILNET_PROXIED.headers, accept: "text/html" },
+    });
+    assert.equal(page.status, 200);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+// Links handed out before the https proxy existed (or by an older Lavish) are plain http on the
+// tailnet, where the page is not a secure context and the browser refuses the microphone. Such a
+// request reaches Lavish directly on a non-loopback address; the proxy and localhost reach it over
+// loopback, so only the stale link is sent on to the https one.
+test("a plain-http page link that reaches a non-loopback address goes to the https link", async (t) => {
+  const concrete = availableConcreteIpv4();
+  if (!concrete) {
+    t.skip("no non-loopback IPv4 address on this machine");
+    return;
+  }
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-upgrade-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let serveStatus = "{}";
+  const server = await serve({
+    port: await freePort(concrete),
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    env: {},
+    detectTailscale: async () => ({ ipv4: "192.0.2.1", magicDnsName: TAILNET_NAME }),
+    readTailscaleServeStatus: async () => serveStatus,
+    extraListenHosts: [concrete],
+    log: () => {},
+    idleTimeoutMs: null,
+  });
+  try {
+    const opened = await openSession(server.port, artifact);
+    const direct = { address: concrete, host: `${concrete}:${server.port}`, headers: { accept: "text/html" } };
+
+    // No https link to send it to: the page loads where it is.
+    const withoutProxy = await rawRequest(server.port, `/session/${opened.key}?gate=0`, direct);
+    assert.equal(withoutProxy.status, 200);
+
+    serveStatus = tailscaleHttpsServe(4388, `http://127.0.0.1:${server.port}`);
+    await new Promise((resolve) => setTimeout(resolve, 1100));
+    const upgraded = await rawRequest(server.port, `/session/${opened.key}?gate=0`, direct);
+    assert.equal(upgraded.status, 307);
+    assert.equal(upgraded.headers.location, `${TAILNET_HTTPS_ORIGIN}/session/${opened.key}?gate=0`);
+
+    const proxied = await rawRequest(server.port, `/session/${opened.key}`, {
+      host: TAILNET_PROXIED.host,
+      headers: { ...TAILNET_PROXIED.headers, accept: "text/html" },
+    });
+    assert.equal(proxied.status, 200);
+    const local = await rawRequest(server.port, `/session/${opened.key}`, {
+      host: `127.0.0.1:${server.port}`,
+      headers: { accept: "text/html" },
+    });
+    assert.equal(local.status, 200);
+    // Only the page moves: the API on the same address keeps answering in place.
+    const health = await rawRequest(server.port, "/health", { address: concrete, host: `${concrete}:${server.port}` });
+    assert.equal(health.status, 200);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("health reports the origin every link points at", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-tailnet-health-origin-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body>review</body></html>");
+  let lavishPort = 0;
+  const server = await serveBehindTailnet(dir, {
+    readTailscaleServeStatus: async () => tailscaleHttpsServe(4388, `http://127.0.0.1:${lavishPort}`),
+  });
+  lavishPort = server.port;
+  try {
+    await openSession(server.port, artifact);
+    const health = await fetch(`http://127.0.0.1:${server.port}/health`).then((response) => response.json());
+    assert.equal(health.link_origin, TAILNET_HTTPS_ORIGIN);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("session URLs can disable the layout gate for one open", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
@@ -1648,20 +2043,20 @@ test("session URLs can disable the layout gate for one open", async () => {
 // Issue a raw HTTP request so we can forge the Host header - browser `fetch`
 // treats Host as a forbidden header and won't let us override it, but a DNS
 // rebinding attack is exactly a real browser sending a foreign Host to this
-// loopback port. Connect to 127.0.0.1 while presenting an arbitrary Host.
+// loopback port. Connect to 127.0.0.1 (or `address`) while presenting an arbitrary Host.
 /**
  * @param {number} port
  * @param {string} pathname
- * @param {{ method?: string, host?: string, headers?: Record<string, string>, body?: string }} [options]
+ * @param {{ method?: string, host?: string, headers?: Record<string, string>, body?: string, address?: string }} [options]
  */
-function rawRequest(port, pathname, { method = "GET", host, headers = {}, body } = {}) {
+function rawRequest(port, pathname, { method = "GET", host, headers = {}, body, address = "127.0.0.1" } = {}) {
   return new Promise((resolve, reject) => {
     const finalHeaders = { ...headers };
     if (host !== undefined) finalHeaders.host = host;
     if (body !== undefined && finalHeaders["content-type"] === undefined) {
       finalHeaders["content-type"] = "application/json";
     }
-    const req = httpRequest({ host: "127.0.0.1", port, path: pathname, method, headers: finalHeaders }, (res) => {
+    const req = httpRequest({ host: address, port, path: pathname, method, headers: finalHeaders }, (res) => {
       let data = "";
       res.setEncoding("utf8");
       res.on("data", (chunk) => (data += chunk));
@@ -3314,6 +3709,10 @@ test("/chrome-client.js serves the extracted chrome client script", async () => 
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") || "", /application\/javascript/);
     assert.match(body, /const sessionData/);
+    // The message box the client draws arrives ahead of it, from the module the SDK serializes.
+    const helpers = body.indexOf("window.lavishMessageBox=");
+    assert.ok(helpers >= 0 && helpers < body.indexOf("const sessionData"), "the message box comes first");
+    assert.match(body, /const createVoiceBubble=/);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
@@ -3435,11 +3834,130 @@ test("/chrome.css serves the extracted chrome stylesheet", async () => {
 
     assert.equal(res.status, 200);
     assert.match(res.headers.get("content-type") || "", /text\/css/);
-    assert.match(normalizeCssForAssertions(body), /--ink-900:#0f1115/);
-    assert.match(
-      normalizeCssForAssertions(body),
-      /\.layout\{[^}]*grid-template-columns:minmax\(0,1fr\) ?var\(--panel-w\)/,
-    );
+    // One response carries the board's token block, the rules copied from the board, then
+    // Scrawl's own rules, in that order.
+    const css = normalizeCssForAssertions(body);
+    const tokens = css.indexOf("--accent-green:#00e59b");
+    const copied = css.indexOf(".topbar{");
+    const own = css.indexOf(".layout{");
+    assert.ok(tokens >= 0 && copied > tokens && own > copied, "tokens, copied rules, own rules, in order");
+    assert.match(css, /\.layout\{[^}]*grid-template-columns:minmax\(0,1fr\) ?var\(--panel-w\)/);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("/assets serves the board's fonts and goblin locally, and nothing else", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    for (const name of ["pixelify-sans.woff2", "nunito.woff2", "jetbrains-mono.woff2"]) {
+      const res = await fetch(`${base}/assets/fonts/${name}`);
+      const served = Buffer.from(await res.arrayBuffer());
+
+      assert.equal(res.status, 200, name);
+      assert.match(res.headers.get("content-type") || "", /font\/woff2/);
+      // The artifact frame has an opaque origin, and a font fetch from one is CORS-gated.
+      assert.equal(res.headers.get("access-control-allow-origin"), "*");
+      assert.match(res.headers.get("cache-control") || "", /max-age=604800/);
+      assert.deepEqual(served, await readFile(new URL("../src/fonts/" + name, import.meta.url)));
+    }
+
+    const goblin = await fetch(`${base}/assets/goblin-app.png`);
+    assert.equal(goblin.status, 200);
+    assert.match(goblin.headers.get("content-type") || "", /image\/png/);
+    await goblin.arrayBuffer();
+
+    for (const refused of ["nunito-OFL.txt", "unknown.woff2", "..%2Fchrome.css", "%2e%2e%2f%2e%2e%2fpackage.json"]) {
+      const res = await fetch(`${base}/assets/fonts/${refused}`);
+      await res.arrayBuffer();
+      assert.equal(res.status, 404, refused);
+    }
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+function requestBytes(port, pathname, headers = {}) {
+  return new Promise((resolve, reject) => {
+    const req = httpRequest({ host: "127.0.0.1", port, path: pathname, headers }, (res) => {
+      const chunks = [];
+      res.on("data", (chunk) => chunks.push(chunk));
+      res.on("end", () => resolve({ status: res.statusCode, headers: res.headers, bytes: Buffer.concat(chunks) }));
+    });
+    req.on("error", reject);
+    req.end();
+  });
+}
+
+// The board's rules and fonts make the shell larger than it was. Its text goes over the wire
+// gzipped to a browser, which keeps what a page load transfers below what it was before.
+test("the shell's text is gzipped for a caller that accepts it and plain for one that does not", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body><h1>Plan</h1></body></html>");
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const opened = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await opened.json();
+    const load = await beginArtifactLoad(base, key);
+    const sdk = `/sdk.js?key=${key}&artifact_revision=${load.artifact_revision}&artifact_load_token=${encodeURIComponent(load.artifact_load_token)}`;
+
+    for (const pathname of ["/chrome.css", "/chrome-client.js", sdk, "/design/board-page.css"]) {
+      const plain = await requestBytes(server.port, pathname);
+      const zipped = await requestBytes(server.port, pathname, { "accept-encoding": "gzip, deflate, br" });
+
+      assert.equal(plain.status, 200, pathname);
+      assert.equal(plain.headers["content-encoding"], undefined, pathname);
+      assert.equal(zipped.status, 200, pathname);
+      assert.equal(zipped.headers["content-encoding"], "gzip", pathname);
+      assert.match(String(zipped.headers.vary), /accept-encoding/i, pathname);
+      assert.equal(zipped.headers["content-type"], plain.headers["content-type"], pathname);
+      assert.deepEqual(gunzipSync(zipped.bytes), plain.bytes, `${pathname} unzips to the same bytes`);
+      assert.ok(zipped.bytes.length < plain.bytes.length / 2, `${pathname} is less than half the size zipped`);
+    }
+
+    // The review page itself carries a fresh handoff token on every load, so its two bodies
+    // differ; what matters is that the zipped one is the page.
+    const page = await requestBytes(server.port, `/session/${key}`, { "accept-encoding": "gzip" });
+    assert.equal(page.headers["content-encoding"], "gzip");
+    assert.match(gunzipSync(page.bytes).toString("utf8"), /<header class="bar topbar">/);
+    // Its framing guard is not lost with the encoding.
+    assert.equal(page.headers["x-frame-options"], "DENY");
+
+    // A font is already compressed, and an identity-only caller is never sent gzip.
+    const font = await requestBytes(server.port, "/assets/fonts/nunito.woff2", { "accept-encoding": "gzip" });
+    assert.equal(font.headers["content-encoding"], undefined);
+    const identity = await requestBytes(server.port, "/chrome.css", { "accept-encoding": "identity" });
+    assert.equal(identity.headers["content-encoding"], undefined);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("the landing page stands alone in the board's look", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const res = await fetch(`http://127.0.0.1:${server.port}/`, { headers: { accept: "text/html" } });
+    const body = await res.text();
+
+    assert.equal(res.status, 200);
+    assert.match(body, /<h1>Scrawl is running<\/h1>/);
+    // The tokens are inline: a host this server refuses cannot fetch the stylesheet.
+    assert.match(body, /--accent-green: #00e59b;/);
+    assert.match(body, /\.card\{[^}]*background:var\(--glass-bg\),var\(--hero-surface\)/);
+    assert.doesNotMatch(body, /<link rel="stylesheet"/);
+    assert.doesNotMatch(body, /#f7f4ef|#fffdf9/);
   } finally {
     await server.close();
     await rm(dir, { recursive: true, force: true });
@@ -3473,6 +3991,64 @@ test("/design serves local Tailwind and DaisyUI artifact assets", async () => {
 test("design asset resolver only trusts exact packaged design asset paths", () => {
   assert.equal(resolveDesignAssetPath("/design/daisyui.css/extra"), null);
   assert.equal(resolveDesignAssetPath("/design/tailwindcss-browser.js/extra"), null);
+  assert.equal(resolveDesignAssetPath("/design/board-page.css/extra"), null);
+  assert.equal(resolveDesignAssetPath("/assets/fonts/nunito-OFL.txt"), null);
+  assert.equal(resolveDesignAssetPath("/assets/fonts/../board-tokens.css"), null);
+});
+
+// A page in the board's look links two stylesheets the server serves: the board's token block,
+// the same file the review page itself is drawn from, and the page patterns laid out in it.
+test("/design serves the board look a page links: its tokens, then the page patterns", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const tokens = await fetch(`${base}/design/board-tokens.css`);
+    const page = await fetch(`${base}/design/board-page.css`);
+
+    assert.equal(tokens.status, 200);
+    assert.match(tokens.headers.get("content-type") || "", /text\/css/);
+    assert.equal(
+      await tokens.text(),
+      await readFile(new URL("../src/board-tokens.css", import.meta.url), "utf8"),
+      "a page wears the very token file the shell does",
+    );
+    assert.equal(page.status, 200);
+    assert.match(page.headers.get("content-type") || "", /text\/css/);
+    const pageCss = normalizeCssForAssertions(await page.text());
+    for (const pattern of [".page{", ".stats{", ".compare{", ".before-after{", ".evidence{", ".recommendation{"]) {
+      assert.ok(pageCss.includes(pattern), `the page stylesheet has ${pattern}`);
+    }
+    // Every colour comes from the board: its tokens, or a value its stylesheet writes out.
+    assert.doesNotMatch(pageCss, /#f4c95d|--brass|--ink-|daisyui/i);
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("an export of a page in the board's look carries its stylesheets and fonts inline", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-export-"));
+  try {
+    const html =
+      '<!doctype html><html><head><link rel="stylesheet" href="/design/board-tokens.css">' +
+      '<link rel="stylesheet" href="/design/board-page.css"></head><body><main class="page"></main></body></html>';
+    const { html: out, warnings } = await buildSelfContainedHtml(html, {
+      baseDir: dir,
+      confineDir: dir,
+      resolveAbsolute: resolveDesignAssetPath,
+    });
+
+    assert.deepEqual(warnings, []);
+    assert.doesNotMatch(out, /<link rel="stylesheet"/);
+    assert.match(out, /--accent-green: #00e59b;/);
+    assert.match(out, /\.before-after \{/);
+    // The three font faces no longer point at the server: each carries its font.
+    assert.doesNotMatch(out, /url\("?\/assets\/fonts\//);
+    assert.equal(out.split("data:font/woff2;base64,").length - 1, 3);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });
 
 test("GET /api/:key/export inlines local assets and leaves remote references intact", async () => {
@@ -5106,7 +5682,12 @@ test("event WebSocket agent-presence returns to waiting when a poll times out wi
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5133,11 +5714,98 @@ test("event WebSocket agent-presence returns to waiting when a poll times out wi
   }
 });
 
-test("SSE agent-presence returns to waiting when a poll disconnects without feedback", async () => {
+test("a poll that follows another within the release grace never reports waiting between them", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const pollReleaseGraceMs = 400;
+  const server = await serve({
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+    pollReleaseGraceMs,
+  });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+    const presence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await presence.next(), "waiting");
+      const pollOnce = async () => {
+        const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=20`);
+        assert.deepEqual(await poll.json(), { status: "waiting" });
+      };
+
+      // A supervisor polls in rounds, each a new process: the next round starts a moment after
+      // the last one timed out.
+      await pollOnce();
+      assert.equal(await presence.next(), "listening");
+      await pollOnce();
+      const lastRoundEndedAt = Date.now();
+
+      assert.equal(await presence.next(), "waiting");
+      assert.ok(
+        Date.now() - lastRoundEndedAt >= pollReleaseGraceMs - 50,
+        "waiting is reported only once the grace after the last round has passed",
+      );
+    } finally {
+      await presence.close();
+    }
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("feedback sent while no poll is live waits for the next poll", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
   const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  try {
+    const base = `http://127.0.0.1:${server.port}`;
+    const open = await fetch(`${base}/api/sessions`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ file: artifact }),
+    });
+    const { key } = await open.json();
+
+    const sent = await fetch(`${base}/api/${key}/prompts`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: base },
+      body: JSON.stringify({ prompts: [{ prompt: "Make the heading bigger", tag: "message" }] }),
+    });
+    assert.equal(sent.status, 200);
+
+    const poll = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=0`);
+    const feedback = await poll.json();
+    assert.equal(feedback.status, "feedback");
+    assert.deepEqual(
+      feedback.prompts.map((prompt) => prompt.prompt),
+      ["Make the heading bigger"],
+    );
+  } finally {
+    await server.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("SSE agent-presence returns to waiting when a poll disconnects without feedback", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+  const artifact = path.join(dir, "artifact.html");
+  await writeFile(artifact, "<!doctype html><html><body></body></html>");
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5173,7 +5841,7 @@ test("SSE agent-presence returns to waiting when poll feedback storage fails", a
   const artifact = path.join(dir, "artifact.html");
   const stateFile = path.join(dir, "state.json");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const server = await serve({ pollReleaseGraceMs: 20, port: 0, stateFile, version: "9.9.9-test" });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5223,7 +5891,12 @@ test("a poll dropped before it arms never leaves presence listening", async () =
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5233,20 +5906,32 @@ test("a poll dropped before it arms never leaves presence listening", async () =
     });
     const { key } = await open.json();
 
-    // Send a real poll request, then drop the socket while the handler is still inside its
-    // startup awaits - before it can register the long poll. A cleanup hook attached after
-    // that point never runs, so the poll would arm "listening" with nobody left to release it.
-    await new Promise((resolve, reject) => {
-      const socket = netConnect(server.port, "127.0.0.1", () => {
-        const target = `/api/poll?file=${encodeURIComponent(artifact)}`;
-        socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`, () => {
-          socket.destroy();
-          resolve();
+    // The dropped poll holds the listener until its take returns, then lingers for the release
+    // grace, so a fixed sleep loses to a slow take. Watch presence from before the poll is sent
+    // instead: its only event is the release back to "waiting", while a poll that armed with
+    // nobody left to release it announces "listening".
+    const releasePresence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await releasePresence.next(), "waiting");
+
+      // Send a real poll request, then drop the socket while the handler is still inside its
+      // startup awaits - before it can register the long poll. A cleanup hook attached after
+      // that point never runs, so the poll would arm "listening" with nobody left to release it.
+      await new Promise((resolve, reject) => {
+        const socket = netConnect(server.port, "127.0.0.1", () => {
+          const target = `/api/poll?file=${encodeURIComponent(artifact)}`;
+          socket.write(`GET ${target} HTTP/1.1\r\nHost: 127.0.0.1:${server.port}\r\n\r\n`, () => {
+            socket.destroy();
+            resolve();
+          });
         });
+        socket.on("error", reject);
       });
-      socket.on("error", reject);
-    });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+
+      assert.equal(await releasePresence.next(), "waiting");
+    } finally {
+      await releasePresence.close();
+    }
 
     const presence = await startPresenceStream(base, key);
     try {
@@ -5338,7 +6023,12 @@ test("a fresh poll attaching alone retires the previous round's working presence
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5361,17 +6051,13 @@ test("a fresh poll attaching alone retires the previous round's working presence
       assert.equal(await presence.next(), "working");
 
       // The agent came back and attached with no other poll in flight: that starts a new round,
-      // so the poll ending without feedback has to leave presence waiting - not stuck on
-      // "working", which hides the "your agent is not listening" banner while nothing is attached.
+      // so the poll ending without feedback has to leave presence waiting once its release grace
+      // passes - not stuck on "working" while nothing is attached.
       const next = await fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=1`);
       assert.deepEqual(await next.json(), { status: "waiting" });
 
-      const afterRound = await startPresenceStream(base, key);
-      try {
-        assert.equal(await afterRound.next(), "waiting");
-      } finally {
-        await afterRound.close();
-      }
+      assert.equal(await presence.next(), "listening");
+      assert.equal(await presence.next(), "waiting");
     } finally {
       await presence.close();
     }
@@ -5386,7 +6072,7 @@ test("a disconnect during immediate feedback take requeues the batch without wor
   const artifact = path.join(dir, "artifact.html");
   const stateFile = path.join(dir, "state.json");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const server = await serve({ pollReleaseGraceMs: 0, port: 0, stateFile, version: "9.9.9-test" });
   const originalTakeFeedback = SessionStore.prototype.takeFeedback;
   try {
     const base = `http://127.0.0.1:${server.port}`;
@@ -5448,10 +6134,18 @@ test("a disconnect during immediate feedback take requeues the batch without wor
       client.on("error", reject);
     });
     await takePending;
-    socket.on("error", () => {});
-    socket.destroy();
-    releaseTake();
-    await new Promise((resolve) => setTimeout(resolve, 50));
+    // The poll keeps its listener until the batch its take cleared is restored, so wait for the
+    // presence event that releases it: a fixed sleep loses to a slow state write.
+    const releasePresence = await startPresenceStream(base, key);
+    try {
+      assert.equal(await releasePresence.next(), "listening");
+      socket.on("error", () => {});
+      socket.destroy();
+      releaseTake();
+      assert.equal(await releasePresence.next(), "waiting");
+    } finally {
+      await releasePresence.close();
+    }
 
     const presence = await startPresenceStream(base, key);
     try {
@@ -5478,7 +6172,7 @@ test("a disconnect during event-driven feedback take requeues the batch without 
   const artifact = path.join(dir, "artifact.html");
   const stateFile = path.join(dir, "state.json");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile, version: "9.9.9-test" });
+  const server = await serve({ pollReleaseGraceMs: 20, port: 0, stateFile, version: "9.9.9-test" });
   const originalTakeFeedback = SessionStore.prototype.takeFeedback;
   const originalQueuePrompts = SessionStore.prototype.queuePrompts;
   try {
@@ -5676,7 +6370,12 @@ test("SSE agent-presence resets to waiting after ending and reopening a session"
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
   const artifact = path.join(dir, "artifact.html");
   await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
+  const server = await serve({
+    pollReleaseGraceMs: 20,
+    port: 0,
+    stateFile: path.join(dir, "state.json"),
+    version: "9.9.9-test",
+  });
   try {
     const base = `http://127.0.0.1:${server.port}`;
     const open = await fetch(`${base}/api/sessions`, {
@@ -5928,50 +6627,65 @@ test("immediate send-and-end delivery clears working presence without an active 
   }
 });
 
-test("SSE agent-presence returns to waiting after an agent reply", async () => {
-  const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
-  const artifact = path.join(dir, "artifact.html");
-  await writeFile(artifact, "<!doctype html><html><body></body></html>");
-  const server = await serve({ port: 0, stateFile: path.join(dir, "state.json"), version: "9.9.9-test" });
-  try {
-    const base = `http://127.0.0.1:${server.port}`;
-    const open = await fetch(`${base}/api/sessions`, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ file: artifact }),
+for (const completion of ["an agent reply", "an artifact update"]) {
+  test(`SSE agent-presence returns to waiting after ${completion}`, async () => {
+    const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
+    const artifact = path.join(dir, "artifact.html");
+    await writeFile(artifact, "<!doctype html><html><body></body></html>");
+    const server = await serve({
+      pollReleaseGraceMs: 20,
+      port: 0,
+      stateFile: path.join(dir, "state.json"),
+      version: "9.9.9-test",
     });
-    const { key } = await open.json();
-    const presence = await startPresenceStream(base, key);
     try {
-      assert.equal(await presence.next(), "waiting");
-
-      const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`).then((response) => response.json());
-      assert.equal(await presence.next(), "listening");
-      await fetch(`${base}/api/${key}/prompts`, {
-        method: "POST",
-        headers: { "content-type": "application/json", origin: base },
-        body: JSON.stringify({ prompts: [{ prompt: "hello", tag: "message" }] }),
-      });
-      await poll;
-      // An armed poll that drains the feedback and releases leaves presence "working".
-      assert.equal(await presence.next(), "working");
-
-      // The reply concludes that work. Without a clear here, presence stays "working" forever
-      // even though the agent has answered.
-      await fetch(`${base}/api/${key}/agent-reply`, {
+      const base = `http://127.0.0.1:${server.port}`;
+      const open = await fetch(`${base}/api/sessions`, {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ text: "done - applied your feedback" }),
+        body: JSON.stringify({ file: artifact }),
       });
-      assert.equal(await presence.next(), "waiting");
+      const { key } = await open.json();
+      const presence = await startPresenceStream(base, key);
+      try {
+        assert.equal(await presence.next(), "waiting");
+
+        const poll = fetch(`${base}/api/poll?file=${encodeURIComponent(artifact)}`).then((response) => response.json());
+        assert.equal(await presence.next(), "listening");
+        await fetch(`${base}/api/${key}/prompts`, {
+          method: "POST",
+          headers: { "content-type": "application/json", origin: base },
+          body: JSON.stringify({ prompts: [{ prompt: "hello", tag: "message" }] }),
+        });
+        await poll;
+        // An armed poll that drains the feedback and releases leaves presence "working".
+        assert.equal(await presence.next(), "working");
+
+        if (completion === "an artifact update") {
+          await writeFile(artifact, "<!doctype html><html><body><h1>Updated plan</h1></body></html>");
+        } else {
+          await fetch(`${base}/api/${key}/agent-reply`, {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ text: "done - applied your feedback" }),
+          });
+        }
+        assert.equal(await presence.next(), "waiting");
+        const resumed = await startPresenceStream(base, key);
+        try {
+          assert.equal(await resumed.next(), "waiting");
+        } finally {
+          await resumed.close();
+        }
+      } finally {
+        await presence.close();
+      }
     } finally {
-      await presence.close();
+      await server.close();
+      await rm(dir, { recursive: true, force: true });
     }
-  } finally {
-    await server.close();
-    await rm(dir, { recursive: true, force: true });
-  }
-});
+  });
+}
 
 test("SSE agent-presence stays working when resuming after immediate feedback", async () => {
   const dir = await mkdtemp(path.join(tmpdir(), "lavish-serve-"));
@@ -6143,7 +6857,7 @@ test("/health and the landing page stay responsive after opening two back-to-bac
       new Promise((_, reject) => setTimeout(() => reject(new Error("/ timed out")), 1000)),
     ]);
     assert.equal(rootRes.status, 200);
-    assert.match(await rootRes.text(), /Lavish Editor/);
+    assert.match(await rootRes.text(), /Scrawl is running/);
 
     assert.ok(Date.now() - start < 1000, "both probes should return well under one second");
   } finally {
@@ -6192,14 +6906,27 @@ test("ended session shows an overlay card over the dimmed chrome", async () => {
   const css = await chromeCssSource();
 
   assert.match(html, /class="ended-overlay" id="endedOverlay" hidden/);
-  assert.match(html, /class="ended-card"/);
+  assert.match(html, /class="ended-card done-card"/);
   assert.match(html, /Session ended\./);
   assert.match(html, /Return to your agent to continue\./);
   assert.match(html, /class="ended-copy">\/tmp\/artifact\.html</);
   assert.doesNotMatch(html, /The agent polling loop can stop\./);
-  assert.match(css, /\.ended-overlay\{[^}]*inset:var\(--bar-h\) 0 0 0/);
-  assert.match(css, /\.ended-overlay\{[^}]*background:rgba\(15,17,21,.86\)/);
-  assert.match(css, /\.ended-title\{[^}]*font-family:var\(--font-serif\)/);
+  // The card carries the agent's unanswered replies, which the overlay would otherwise cover. It
+  // starts hidden, so an ended page with no reply shows the card exactly as before.
+  assert.match(
+    html,
+    /Return to your agent to continue\.<\/h3><div class="ended-replies" id="endedReplies" role="region" aria-label="Latest from your agent" hidden><\/div><p class="ended-copy">/,
+  );
+  assert.match(css, /\.ended-overlay\{[^}]*inset:var\(--shell-top\) var\(--shell-pad\) var\(--shell-pad\)/);
+  assert.match(css, /\.ended-overlay\{[^}]*background:var\(--scrim\)/);
+  // A card taller than the screen (a long reply, a phone on its side) scrolls inside the overlay
+  // instead of running off it.
+  assert.match(css, /\.ended-overlay\{[^}]*overflow-y:auto/);
+  assert.match(css, /\.ended-card\{[^}]*margin:auto/);
+  // The card's own avatar rule must not reach the portrait in a reply's dialogue box.
+  assert.match(css, /\.ended-card > \.goblin-avatar\{[^}]*width:96px/);
+  assert.doesNotMatch(css, /\.ended-card \.goblin-avatar\{/);
+  assert.match(css, /\.ended-title\{[^}]*font-family:var\(--font-display\)/);
   assert.match(js, /endedOverlay\.hidden = false/);
   assert.match(js, /annotationSwitch\.disabled = true/);
   assert.match(js, /moreButton\.disabled = true/);
@@ -6217,45 +6944,50 @@ test("layout gate curtain reuses the ended overlay card styling", async () => {
     /<iframe id="artifact" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads" data-artifact-src="\/artifact\/abc\/index\.html"><\/iframe>/,
   );
   assert.doesNotMatch(html, /<iframe id="artifact"[^>]* src=/);
-  assert.match(html, /class="ended-overlay layout-gate-overlay" id="layoutGateOverlay"/);
-  assert.match(html, /<div class="ended-card"><div class="ended-title" id="layoutGateTitle">Checking layout/);
+  // The curtain concerns the artifact alone: it lives in the frame and covers only the frame, so
+  // the conversation beside it (or the phone's sheet over it) stays readable while it is up.
+  assert.match(
+    html,
+    /<div class="frame"><iframe id="artifact"[^>]*><\/iframe><div class="ended-overlay layout-gate-overlay" id="layoutGateOverlay">/,
+  );
+  assert.match(css, /\.frame\{[^}]*position:relative;isolation:isolate/);
+  assert.match(
+    css,
+    /\.ended-overlay\.layout-gate-overlay\{position:absolute;inset:0;animation:layout-gate-late 0s 1s both;\}/,
+  );
+  // A fast open never flashes the card: it appears only once the artifact has taken a second.
+  assert.match(css, /@keyframes layout-gate-late\{from\{visibility:hidden;\}\}/);
+  assert.match(
+    html,
+    /<div class="ended-card done-card"><span class="goblin-avatar" aria-hidden="true"><\/span><h3 class="ended-title" id="layoutGateTitle">Opening this artifact/,
+  );
   assert.match(html, /class="ended-copy" id="layoutGateCopy"/);
   assert.match(html, /class="button ended-action" id="layoutGateAction" type="button">Show anyway/);
   assert.match(css, /body\.layout-gate-active iframe#artifact\{[^}]*opacity:0/);
-  assert.match(css, /\.ended-action\{[^}]*margin-top:var\(--space-8\)/);
+  assert.match(css, /\.ended-action\{[^}]*margin-top:8px/);
   assert.match(js, /layoutGateAction\.onclick = \(\) => forceRevealLayoutGate\("manual"\)/);
   assert.match(noGateHtml, /<body class="lavish">/);
   assert.match(noGateHtml, /id="layoutGateOverlay" hidden/);
   assert.match(noGateHtml, /"layoutGateEnabled":false/);
 });
 
-test("annotation card queues prompt on Enter and inserts newline on Shift+Enter", () => {
+test("annotation card adds its note on Enter and inserts a newline on Shift+Enter", () => {
   const js = createSdkJs("abc");
 
   assert.match(js, /textarea\.addEventListener\(["']keydown["']/);
   assert.match(js, /event\.key === ["']Enter["'] && !event\.shiftKey/);
   assert.match(js, /event\.preventDefault\(\)/);
-  // Enter routes through tryQueue(), which gates on in-flight uploads (R2.4).
-  assert.match(js, /const queued = tryQueue\(\)/);
+  // Enter routes through tryQueue(), which gates on in-flight uploads (R2.4), and sends nothing.
+  assert.match(js, /together \(the Overlord, 2026-10-18\)\.\s*tryQueue\(\);/);
+  assert.match(js, /Enter adds it to your notes &middot; Shift\+Enter new line &middot; Esc cancels/);
 });
 
-test("annotation card queues and sends immediately on Ctrl+Enter or Cmd+Enter", () => {
+test("annotation card treats Ctrl+Enter and Cmd+Enter as Enter", () => {
   const js = createSdkJs("abc");
 
-  assert.match(js, /event\.ctrlKey \|\| event\.metaKey/);
-  assert.match(js, /sendQueuedPrompts\(\)/);
-  assert.match(js, /class="lavish-hint"/);
-  assert.match(js, /\+Enter to send/);
-  assert.match(js, /\.lavish-annotation-card \.lavish-hint\{/);
-});
-
-test("chrome client chat input sends on Enter and inserts newline on Shift+Enter", async () => {
-  const js = await chromeClientSource();
-
-  assert.match(js, /chatInput\.addEventListener\(["']keydown["']/);
-  assert.match(js, /event\.key === ["']Enter["'] && !event\.shiftKey/);
-  assert.match(js, /event\.preventDefault\(\)/);
-  assert.match(js, /sendQueued\(\)/);
+  assert.doesNotMatch(js, /queueOnly/);
+  assert.match(js, /class="muted lavish-hint"/);
+  assert.match(js, /\.lavish-hint\{flex:1;font-size:\.9375rem\}/);
 });
 
 async function startFakeHtmlApp(requests, responseBody = null) {
@@ -6531,7 +7263,7 @@ test("the live transcript carries rendered html for agent replies and never for 
       method: "POST",
       headers: { "content-type": "application/json", origin: base },
       body: JSON.stringify({
-        prompts: [{ uid: "", prompt: "<b>keep</b>", selector: "", tag: "message", text: "Freeform message" }],
+        prompts: [{ uid: "", prompt: "<b>keep</b>", selector: "", tag: "message", text: "Whole page" }],
       }),
     });
 
@@ -6542,7 +7274,7 @@ test("the live transcript carries rendered html for agent replies and never for 
       chat.map(({ at: _at, ...entry }) => entry),
       [
         { role: "agent", text: "Done.\n\n- one\n- two", html: "<p>Done.</p><ul><li>one</li><li>two</li></ul>" },
-        { role: "user", kind: "message", text: "<b>keep</b>" },
+        { role: "user", kind: "message", text: "<b>keep</b>", anchor: { kind: "page", label: "whole page" } },
       ],
     );
 

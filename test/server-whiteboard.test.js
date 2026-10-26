@@ -90,7 +90,9 @@ test("whiteboard confirms sanitized links inside the frame", async () => {
   assert.match(frame, /event\.key !== "Tab"/);
   assert.match(frame, /window\.open\(safe, "_blank", "noopener,noreferrer"\)/);
   assert.match(css, /\.wb-link-confirm/);
-  assert.match(css, /data-lavish-whiteboard-theme="dark"/);
+  // The frame's own chrome wears the board's look whatever theme the canvas has.
+  assert.match(css, /@import "\.\/board-tokens\.css";/);
+  assert.match(css, /\.wb-link-confirm-card \{[^}]*background: var\(--glass-bg\), var\(--hero-surface\);/);
 });
 
 test("whiteboard channel tokens are signed, session bound, and short lived", () => {

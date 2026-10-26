@@ -35,7 +35,7 @@ Seven-tab pool regression: `LAVISH_AXI_BROWSER_E2E=1 node --test test/event-tran
 - Human-authored PRs to `main` go through [no-mistakes](https://github.com/kunchenguid/no-mistakes) >= 1.46.0. [CONTRIBUTING.md](CONTRIBUTING.md) owns the gate, the attestation contract, and the workflow-pin rules.
 - Tests that start the server set `LAVISH_AXI_STATE_DIR` and use an ephemeral port.
 - `run()` returns on `--version` / `-v` / `-V` before `ensureStateDir` and telemetry (`test/cli-version.test.js`). New startup work goes after that short-circuit.
-- `canonicalFile` runs `realpath`. Two paths to the same file are one session.
+- `canonicalFile` runs `realpath`. Two paths to the same file are one session. Finding an existing session by path goes through `canonicalSessionFile`, never `realpath` of a page that may be gone ([Things to know when editing](docs/invariants.md#things-to-know-when-editing)).
 - `normalizeArgv` must let AXI `RESERVED_COMMANDS` (including `update`) pass through. A bare `lavish-axi update` must not become `open update`.
 
 ## Safety and correctness
@@ -47,8 +47,10 @@ Each line is the rule. [docs/invariants.md](docs/invariants.md) has the failure 
 - Adopt, replace, or stop only a server `isOwnedServer` owns. Another installation's server at a control address is a `SERVER_ERROR`, never used, replaced, or stopped. [Process model](docs/invariants.md#process-model).
 - Every server replacement passes all previously requested hosts through `inheritedListenHosts` (`--also-listen`), dropping only IPs no longer on a local interface. [Process model](docs/invariants.md#process-model).
 - Loopback is always requested. An unresolvable `LAVISH_AXI_HOST` is kept (`keepUnresolved`) and retried, never silently dropped. [Process model](docs/invariants.md#process-model).
+- Every link the server reports comes from `linkOrigin()` (`LAVISH_AXI_LINK_URL`, then the Tailscale https proxy, then http on the link host). Never build one from `http://` and the link host, and never report a session's stored link: the CLI's session list uses `/health`'s `link_origin`. [Process model](docs/invariants.md#process-model).
+- A server that a Tailscale https proxy points at never stops on its own, and a plain-http page request on a non-loopback address goes to that proxy's link. [Process model](docs/invariants.md#process-model).
 - A wildcard listen request becomes loopback, and an alias that resolves to an all-interfaces address is refused. Never open a wildcard listener. [Process model](docs/invariants.md#process-model).
-- Health probes use `node:http` and destroy the socket on every exit. Do not use `fetch`. [Process model](docs/invariants.md#process-model).
+- Every CLI request to a server uses `node:http`, and health probes destroy the socket on every exit. Do not use `fetch`. [Process model](docs/invariants.md#process-model).
 - Loopback binds first and is the port lock. A failed requested address stays in `pendingBinds` and is retried. Declare request-handler timers before the first bind. [Process model](docs/invariants.md#process-model).
 - Host allowlist, then Origin/Referer guard. Header-less CLI control requests must keep working. `*` skips hostname membership and still rejects a malformed forwarded authority. [Process model](docs/invariants.md#process-model).
 - Live-event WebSockets keep the ping/pong heartbeat so half-open sockets terminate. Idle self-shutdown keys off tracked live connections, not session status. [Process model](docs/invariants.md#process-model).
@@ -60,9 +62,11 @@ Each line is the rule. [docs/invariants.md](docs/invariants.md) has the failure 
 - Artifact asset serving (`/artifact/:key/<path>`) resolves with `realpath` and never serves a symlink target outside the artifact directory. [Request flow](docs/invariants.md#request-flow).
 - Layout detection never emits `feedback`. Only a user prompt and the narrow fatal artifact-failure path may wake `lavish-axi poll`. [Request flow](docs/invariants.md#request-flow).
 - Layout-diagnostics reports are fire-and-forget and never hold the artifact behind a round-trip. Ordinary layout findings are never relabelled fatal. [Request flow](docs/invariants.md#request-flow).
+- The gate lifts on the SDK's `lavish:readyToShow`, or on a reload's `load` once its scroll is restored, never on a layout pass or an animation frame: the gated iframe gets about one frame a second. [Request flow](docs/invariants.md#request-flow).
 - The chrome mints each queued prompt's `prompt_id` (never from the iframe) and removes a queued note only when the transcript acknowledges that id. Evicted ids stay on `chat_ack_ids`. [Request flow](docs/invariants.md#request-flow).
 - Only agent chat entries render as HTML. User entries are always escaped. [Request flow](docs/invariants.md#request-flow).
 - A note's Sending state is derived from the existing send bookkeeping, never tracked separately. [Request flow](docs/invariants.md#request-flow).
+- Nothing is sent note by note. Card Enter, composer Enter and a choice pick only queue, and `sendQueued` submits the whole queue in one request. [Board look](docs/invariants.md#board-look-code-goblins).
 - `/api/:key/prompts` rejects every new batch for an ended session. Only the internal `restore` replay is exempt. [Request flow](docs/invariants.md#request-flow).
 - A session the user ended never reopens without explicit opt-in (`reopen: true`, the CLI's `--reopen`). [Request flow](docs/invariants.md#request-flow).
 - Poll ownership is exclusive per session in `activePolls`. Takeover installs the new holder before releasing the old one, and claims, including the reply write, serialize through `pollOwnershipLock`. [Request flow](docs/invariants.md#request-flow).
@@ -108,6 +112,10 @@ Each line is the rule. [docs/invariants.md](docs/invariants.md) has the failure 
 - The share route echoes a password only when it minted one. [Hosted sharing (ht-ml.app)](docs/invariants.md#hosted-sharing-ht-mlapp).
 - Share writes classify failure through `hostRejectedShareWrite`, where only a 4xx proves nothing landed. An echoed `site_id` is untrusted, and recovery commands come only from `republishCommand`/`unpublishCommand`. [Hosted sharing (ht-ml.app)](docs/invariants.md#hosted-sharing-ht-mlapp).
 - Every surface reporting a page as newly gated carries the CDN public-to-private caveat. [Hosted sharing (ht-ml.app)](docs/invariants.md#hosted-sharing-ht-mlapp).
+- Scrawl's colours, fonts, edges and radii come only from `src/board-tokens.css` and `src/board-components.css`, copies of the Code Goblins board's own. Never hand-edit a value in them or add a palette; re-copy with `node scripts/sync-board-tokens.js`. [Board look](docs/invariants.md#board-look).
+- A note's `_lavishNoteId` is reported back to the page as `lavish:noteStatus` and stripped before anything reaches the server. [Board look](docs/invariants.md#board-look).
+- A pick on a page's declared choices is queued with no `data`: the prompt text is the option exactly as declared. An answer restored after a reload is never queued again. [Board look](docs/invariants.md#board-look).
+- A project theme reaches the chrome page only through `validateProjectTheme`, on save and on load. Never write a theme value into the page unchecked. [Board look](docs/invariants.md#board-look-code-goblins).
 - `DESIGN_PRIORITY_RULE` is stated once in `src/design-reference.js`. Do not restate it. Do not hardcode one Mermaid theme. [AXI integration](docs/invariants.md#axi-integration).
 - Poll wake-path guidance comes only from `POLL_WAKE_PATH_RULES`. [AXI integration](docs/invariants.md#axi-integration).
 - The internal brand skill keeps `metadata.internal: true`. The generated skill omits a `version` frontmatter field. [AXI integration](docs/invariants.md#axi-integration).
@@ -121,12 +129,15 @@ Each line is the rule. [docs/invariants.md](docs/invariants.md) has the failure 
 - Mermaid pan and zoom touch only the live SVG `viewBox`, never the saved artifact. `normalizeMermaidNodeTarget` strips node targets to their fixed shape. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - Table-cell annotations name a row or column only when it is provable and stay silent otherwise. `snapshot()` never computes table targets. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - A text annotation's `prompt.selector` names the container, not the selected range. Never target text by selector alone. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
+- A list of controls rebuilt on render goes through `rebuildKeepingFocus`, and each control carries a `data-focus-key`. A re-render never drops the keyboard. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - Annotation handlers ignore native controls, editable regions, and `data-lavish-action` elements. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
+- There is one message box (`src/message-box.js`). The Conversation box and the annotation card draw it and never a part of their own. The page dictates only through the chrome, for an open card on a fresh key press. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - `resetRevisionLegend()` runs only when `replaceArtifactFrame` actually assigns `frame.src`. Reject over-long revision ids and selectors. Lookups use `Map`/`Set`. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - The revision legend's per-row cap derives from `revisionPalette()` length, never a second number. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - A keyboard shortcut that must work in both chrome and the artifact needs a capture-phase listener in both `src/chrome-client.js` and `src/artifact-sdk.js`, and it requires a modifier. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - `MOBILE_SHEET_MEDIA` matches the CSS phone breakpoint, and the collapsed sheet is a `translateY`, never a height change. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - `CHROME_BOOT_FAILSAFE_JS` stays inlined before the `<script src="/chrome-client.js">` tag so the gate escape works when the client script hangs. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
+- No overlay hides what the reader still needs. The layout-gate curtain lives in `.frame` and covers only the artifact, and the ended card carries the agent's unanswered replies (`renderEndedReplies`). [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - A recoverable first artifact load retries through `ARTIFACT_LOAD_RECOVERY_DELAYS_MS` and then surfaces `setLayoutGateFailure`. `superseded` and `out-of-order` never retry. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - Self-paint stays a warning. Never block open and never auto-repair. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).
 - The layout audit fails open. An empty completed pass means repaired. A failed run publishes `complete: false` and no findings. [Things to know when editing](docs/invariants.md#things-to-know-when-editing).

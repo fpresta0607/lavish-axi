@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { detectTailscale, parseTailscaleStatus } from "../src/tailscale.js";
+import {
+  detectTailscale,
+  parseTailscaleStatus,
+  readTailscaleServeStatus,
+  tailscaleHttpsProxyOrigin,
+} from "../src/tailscale.js";
 
 test("parseTailscaleStatus returns the running node IPv4 and MagicDNS name", () => {
   const result = parseTailscaleStatus(
@@ -110,4 +115,137 @@ test("parseTailscaleStatus ignores malformed or non-running status", () => {
     parseTailscaleStatus(JSON.stringify({ BackendState: "Running", Self: { TailscaleIPs: ["999.1.1.1"] } })),
     null,
   );
+});
+
+const MAGIC_DNS_NAME = "review.tailnet.ts.net";
+const LAVISH_PORT = 4387;
+
+function httpsServe(listenPort, proxy, { mount = "/", host = MAGIC_DNS_NAME } = {}) {
+  return {
+    TCP: { [listenPort]: { HTTPS: true } },
+    Web: { [`${host}:${listenPort}`]: { Handlers: { [mount]: { Proxy: proxy } } } },
+  };
+}
+
+for (const { behavior, status, expected } of [
+  {
+    behavior: "returns the https origin of a proxy to the Lavish port",
+    status: httpsServe(4388, "http://127.0.0.1:4387"),
+    expected: "https://review.tailnet.ts.net:4388",
+  },
+  {
+    behavior: "accepts a localhost proxy target",
+    status: httpsServe(4388, "http://localhost:4387"),
+    expected: "https://review.tailnet.ts.net:4388",
+  },
+  {
+    behavior: "drops the default https port from the origin",
+    status: httpsServe(443, "http://127.0.0.1:4387"),
+    expected: "https://review.tailnet.ts.net",
+  },
+  {
+    behavior: "reads a foreground serve",
+    status: { Foreground: { "session-1": httpsServe(4388, "http://127.0.0.1:4387") } },
+    expected: "https://review.tailnet.ts.net:4388",
+  },
+  {
+    behavior: "picks the lowest port when several listeners proxy to Lavish",
+    status: {
+      TCP: { 4388: { HTTPS: true }, 443: { HTTPS: true } },
+      Web: {
+        [`${MAGIC_DNS_NAME}:4388`]: { Handlers: { "/": { Proxy: "http://127.0.0.1:4387" } } },
+        [`${MAGIC_DNS_NAME}:443`]: { Handlers: { "/": { Proxy: "http://127.0.0.1:4387" } } },
+      },
+    },
+    expected: "https://review.tailnet.ts.net",
+  },
+  { behavior: "returns null with no serve config", status: {}, expected: null },
+  {
+    behavior: "ignores a proxy to another port",
+    status: httpsServe(443, "http://localhost:5173"),
+    expected: null,
+  },
+  {
+    behavior: "ignores a plain http listener",
+    status: {
+      TCP: { 80: { HTTP: true } },
+      Web: { [`${MAGIC_DNS_NAME}:80`]: { Handlers: { "/": { Proxy: "http://127.0.0.1:4387" } } } },
+    },
+    expected: null,
+  },
+  {
+    behavior: "ignores a handler mounted below the root",
+    status: httpsServe(4388, "http://127.0.0.1:4387", { mount: "/scrawl" }),
+    expected: null,
+  },
+  {
+    behavior: "ignores a proxy target with a path",
+    status: httpsServe(4388, "http://127.0.0.1:4387/scrawl"),
+    expected: null,
+  },
+  {
+    behavior: "ignores a proxy target that is not loopback",
+    status: httpsServe(4388, "http://192.168.1.5:4387"),
+    expected: null,
+  },
+  {
+    behavior: "ignores a proxy target that is not plain http",
+    status: httpsServe(4388, "https+insecure://127.0.0.1:4387"),
+    expected: null,
+  },
+  {
+    behavior: "ignores a listener on another name",
+    status: httpsServe(4388, "http://127.0.0.1:4387", { host: "other.tailnet.ts.net" }),
+    expected: null,
+  },
+]) {
+  test(`tailscaleHttpsProxyOrigin ${behavior}`, () => {
+    const origin = tailscaleHttpsProxyOrigin(JSON.stringify(status), {
+      magicDnsName: MAGIC_DNS_NAME,
+      port: LAVISH_PORT,
+    });
+
+    assert.equal(origin, expected);
+  });
+}
+
+test("tailscaleHttpsProxyOrigin returns null without a status or a MagicDNS name", () => {
+  const status = JSON.stringify(httpsServe(4388, "http://127.0.0.1:4387"));
+
+  assert.equal(tailscaleHttpsProxyOrigin(null, { magicDnsName: MAGIC_DNS_NAME, port: LAVISH_PORT }), null);
+  assert.equal(tailscaleHttpsProxyOrigin("not json", { magicDnsName: MAGIC_DNS_NAME, port: LAVISH_PORT }), null);
+  assert.equal(tailscaleHttpsProxyOrigin(status, { magicDnsName: null, port: LAVISH_PORT }), null);
+});
+
+test("readTailscaleServeStatus returns the first answering command's serve status", async () => {
+  const attempts = [];
+  const status = await readTailscaleServeStatus({
+    commands: ["tailscale", "/usr/bin/tailscale"],
+    execFile: /** @type {any} */ (
+      async (command, args) => {
+        attempts.push([command, ...args]);
+        if (command === "tailscale") throw new Error("not installed");
+        return { stdout: "{}" };
+      }
+    ),
+  });
+
+  assert.equal(status, "{}");
+  assert.deepEqual(attempts, [
+    ["tailscale", "serve", "status", "--json"],
+    ["/usr/bin/tailscale", "serve", "status", "--json"],
+  ]);
+});
+
+test("readTailscaleServeStatus returns null when no command answers", async () => {
+  const status = await readTailscaleServeStatus({
+    commands: ["tailscale"],
+    execFile: /** @type {any} */ (
+      async () => {
+        throw new Error("not installed");
+      }
+    ),
+  });
+
+  assert.equal(status, null);
 });

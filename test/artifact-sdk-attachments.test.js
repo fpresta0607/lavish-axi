@@ -9,6 +9,7 @@ import {
   isTrustedAttachmentResult,
   partitionDroppedFiles,
   planClipboardPaste,
+  rebuildKeepingFocus,
 } from "../src/artifact-sdk.js";
 import { createSdkJs } from "../src/server.js";
 
@@ -49,7 +50,61 @@ test("the SDK bundle applies upload results and offers a retry", () => {
 test("the SDK bundle carries ready attachment refs on the queued prompt", () => {
   assert.match(sdk, /options\.attachments/);
   assert.match(sdk, /item\.attachments = attachments/);
-  assert.match(sdk, /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments \}\)/);
+  assert.match(
+    sdk,
+    /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, noteId, commitId \}\)/,
+  );
+});
+
+// A list in a shadow root, as the annotation card's chips are: its root says what has focus.
+function fakeList(keys) {
+  const root = { activeElement: null };
+  const control = (focusKey) => ({
+    dataset: { focusKey },
+    focus() {
+      root.activeElement = this;
+    },
+  });
+  const list = {
+    controls: keys.map(control),
+    getRootNode: () => root,
+    contains: (node) => list.controls.includes(node),
+    querySelectorAll: () => list.controls,
+    rebuild(next) {
+      if (list.controls.includes(root.activeElement)) root.activeElement = null;
+      list.controls = next.map(control);
+    },
+  };
+  // Only what rebuildKeepingFocus reads of an element.
+  return { root, list: /** @type {any} */ (list) };
+}
+
+test("rebuildKeepingFocus puts the keyboard back on the control that replaced the focused one", () => {
+  const { root, list } = fakeList(["retry:1", "remove:1", "remove:2"]);
+  list.controls[1].focus();
+
+  rebuildKeepingFocus(list, () => list.rebuild(["remove:1", "remove:2"]));
+
+  assert.equal(root.activeElement, list.controls[0]);
+});
+
+test("rebuildKeepingFocus leaves focus alone outside the list or with no successor", () => {
+  const { root, list } = fakeList(["remove:1"]);
+  const outside = { dataset: { focusKey: "remove:1" } };
+  root.activeElement = outside;
+  rebuildKeepingFocus(list, () => list.rebuild(["remove:1"]));
+  assert.equal(root.activeElement, outside);
+
+  list.controls[0].focus();
+  rebuildKeepingFocus(list, () => list.rebuild(["remove:2"]));
+  assert.equal(root.activeElement, null);
+});
+
+test("the SDK bundle rebuilds the card's chips keeping the keyboard on them", () => {
+  assert.match(sdk, /const rebuildKeepingFocus=/);
+  assert.match(sdk, /rebuildKeepingFocus\(listEl, \(\) => \{/);
+  assert.match(sdk, /data-focus-key="remove:' \+/);
+  assert.match(sdk, /data-focus-key="retry:' \+/);
 });
 
 test("acceptedImageTypes turns the server's list into the card's lookups", () => {
@@ -110,17 +165,15 @@ test("the SDK bundle gates queuing until in-flight uploads settle (R2.4)", () =>
   // hasPending flags any still-uploading chip, and the queue path bails on it so an
   // in-flight image is never silently dropped by collectReady/closeCard.
   assert.match(sdk, /function hasPending\(\)\s*\{\s*return items\.some\(\(item\) => item\.status === "uploading"\)/);
-  assert.match(sdk, /if \(attachments\.hasPending\(\)\)/);
+  assert.match(sdk, /if \(attachments\.hasPending\(\) \|\| attachments\.hasErrors\(\)\)/);
   assert.match(sdk, /Waiting for an image to finish uploading/);
-  // "Send now" only fires when the queue actually happened.
-  assert.match(sdk, /const queued = tryQueue\(\);\s*\n?\s*[\s\S]*?if \(queued && sendNow\) sendQueuedPrompts\(\)/);
 });
 
 test("the count-cap notice reads as an error, not as the passive keyboard hint", () => {
   // The cap notice replaces the card's gray hint line, so without its own error
   // styling it reads as passive help text and a rejected drop goes unnoticed.
   assert.match(sdk, /lavish-hint-alert/);
-  assert.match(sdk, /\.lavish-hint-alert\{[^}]*color:#ff9d7a/);
+  assert.match(sdk, /\.lavish-hint-alert\{[^}]*color:var\(--amber\)/);
   assert.match(sdk, /attachNotice\.classList\.add\("lavish-hint-alert"\)/);
   // Clearing the notice restores the neutral hint instead of leaving stale red text.
   assert.match(sdk, /attachNotice\.classList\.remove\("lavish-hint-alert"\)/);

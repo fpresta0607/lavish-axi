@@ -170,7 +170,6 @@ test(
 
     function populateComposer() {
       evaluate(`() => {
-        document.getElementById("presenceBanner").hidden = false;
         document.getElementById("chatAttachments").innerHTML = ${JSON.stringify(
           Array.from(
             { length: 4 },
@@ -244,7 +243,7 @@ test(
       open(url);
       let g = geometry();
       assertDocked(g);
-      assert.equal(g.summary, "Agent not listening");
+      assert.equal(g.summary, "");
 
       evaluate('() => { document.getElementById("panelHead").click(); return "ok"; }');
       wait(500);
@@ -321,7 +320,8 @@ test(
     } finally {
       run(process.execPath, ["bin/lavish-axi.js", "stop", "--port", String(port)], lavishEnv, 15_000);
       run("chrome-devtools-axi", ["stop"], chromeEnv);
-      await rm(temp, { recursive: true, force: true });
+      // Windows keeps the profile's lockfile a moment after Chrome exits.
+      await rm(temp, { recursive: true, force: true, maxRetries: 10 });
     }
   },
 );
