@@ -7971,8 +7971,7 @@ test("desktop chrome never turns the conversation panel into a sheet", async () 
 test("phone chrome boots with the conversation docked and raises it on tap", async () => {
   const chrome = await createChromeHarness({ mobile: true });
 
-  assert.equal(chrome.mediaQueries.length, 1);
-  assert.match(chrome.mediaQueries[0].media, /max-width/);
+  assert.equal(chrome.mediaQueries.filter((query) => /max-width/.test(query.media)).length, 1);
   const docked = sheetState(chrome);
   assert.equal(docked.open, false);
   // The hidden part of the sheet must be unreachable: a focus landing in the off-screen
@@ -9554,14 +9553,17 @@ class FakeRecognizer {
   aborted = false;
   heardFrom = "nothing";
   onresult = null;
+  onstart = null;
   onerror = null;
   onend = null;
+  results = [];
   constructor() {
     FakeRecognizer.made.push(this);
   }
   start(track) {
     this.heardFrom = track;
     this.started = true;
+    this.onstart?.();
   }
   stop() {
     this.onend?.();
@@ -9572,7 +9574,9 @@ class FakeRecognizer {
     this.onend?.();
   }
   hear(...finals) {
-    this.onresult?.({ resultIndex: 0, results: finals.map((transcript) => [{ transcript }]) });
+    const resultIndex = this.results.length;
+    this.results.push(...finals.map((transcript) => [{ transcript }]));
+    this.onresult?.({ resultIndex, results: this.results });
   }
 }
 
@@ -9732,7 +9736,9 @@ async function dictation({ recognition = FakeRecognizer, microphone = null } = {
   const subject = createDictation(
     {
       heard: (text) => heard.push(text),
-      listening: (on) => listening.push(on),
+      phase: (value) => {
+        if (value === "requesting" || value === "idle") listening.push(value !== "idle");
+      },
       problem: (note) => problems.push(note),
     },
     () => recognition,
@@ -9793,12 +9799,97 @@ test("voice input: stopping delivers every final phrase heard while listening, o
   assert.deepEqual(heard, ["open the pull request"]);
 });
 
+test("voice input: late callbacks cannot duplicate or corrupt a later dictation", async () => {
+  const { subject, heard } = await dictation();
+  subject.start();
+  const first = FakeRecognizer.made[0];
+  const lateResult = first.onresult;
+  const lateEnd = first.onend;
+  first.hear("first");
+  subject.stop();
+  subject.start();
+  const second = FakeRecognizer.made[1];
+  second.hear("second");
+  lateResult({ resultIndex: 0, results: [[{ transcript: "stale" }]] });
+  lateEnd();
+  subject.stop();
+  assert.deepEqual(heard, ["first", "second"]);
+});
+
+test("voice input: a throwing recognizer closes its capture and recovers", async () => {
+  class RefusedRecognizer extends FakeRecognizer {
+    start() {
+      throw Object.assign(new Error("blocked"), { name: "NotAllowedError" });
+    }
+  }
+  const mic = fakeMicrophone();
+  const { subject, problems } = await dictation({ recognition: RefusedRecognizer, microphone: mic.open });
+  subject.start();
+  mic.allow();
+  await flushPromises();
+  assert.equal(mic.opened[0].closed, true);
+  assert.match(problems.at(-1), /blocked/);
+});
+
+test("voice input: permission and finishing deadlines abort once and ignore late callbacks", async () => {
+  for (const stage of ["requesting", "finishing"]) {
+    const { chrome, voice, note } = await voiceHarness({ mobile: true });
+    const originalStart = FakeRecognizer.prototype.start;
+    if (stage === "requesting")
+      FakeRecognizer.prototype.start = function () {
+        this.started = true;
+      };
+    try {
+      voice.onclick({ detail: 0 });
+      const recognizer = FakeRecognizer.made[0];
+      const lateEnd = recognizer.onend;
+      if (stage === "finishing") {
+        recognizer.stop = () => {};
+        voice.onclick({ detail: 0 });
+      }
+      chrome.runTimers(stage === "requesting" ? 30_000 : 8000);
+      lateEnd();
+      assert.equal(recognizer.aborted, true);
+      assert.equal(voice.classList.contains("recording"), false);
+      assert.match(note.textContent, /timed out/);
+      assert.equal(chrome.element("chatInput").value, "");
+    } finally {
+      FakeRecognizer.prototype.start = originalStart;
+    }
+  }
+});
+
+test("voice input: repeated cumulative results insert each final phrase only once", async () => {
+  const { subject, heard } = await dictation();
+  subject.start();
+  const recognizer = FakeRecognizer.made[0];
+  recognizer.hear("one");
+  recognizer.onresult({ resultIndex: 0, results: [[{ transcript: "one" }]] });
+  recognizer.hear("two");
+  subject.stop();
+  assert.deepEqual(heard, ["one two"]);
+});
+
+test("voice input: a stale annotation id cannot start or stop a different box", async () => {
+  const { chrome } = await voiceHarness();
+  openPageCard(chrome);
+  chrome.context.navigator.userActivation = { isActive: true };
+  chrome.sendFrameMessage({ type: "lavish:dictate", action: "toggle", voice_id: "old-card" });
+  assert.equal(FakeRecognizer.made.length, 0);
+  pageDictate(chrome, "toggle");
+  assert.equal(FakeRecognizer.made.length, 1);
+  chrome.sendFrameMessage({ type: "lavish:dictate", action: "cancel", voice_id: "old-card" });
+  assert.equal(FakeRecognizer.made[0].aborted, false);
+  pageDictate(chrome, "cancel");
+  assert.equal(FakeRecognizer.made[0].aborted, true);
+});
+
 test("voice input: a browser without speech recognition says so and never listens", async () => {
   const { subject, listening, problems } = await dictation({ recognition: null });
 
   subject.start();
   assert.deepEqual(listening, []);
-  assert.match(problems.at(-1) || "", /Voice input needs Chrome or Edge/);
+  assert.match(problems.at(-1) || "", /This browser does not provide speech recognition/);
 });
 
 test("voice input: a microphone the recognizer is refused is reported and delivers nothing", async () => {
@@ -9806,7 +9897,7 @@ test("voice input: a microphone the recognizer is refused is reported and delive
 
   subject.start();
   FakeRecognizer.made[0].onerror({ error: "not-allowed" });
-  FakeRecognizer.made[0].onend();
+  FakeRecognizer.made[0].onend?.();
   assert.deepEqual(heard, []);
   assert.match(problems.at(-1) || "", /microphone is blocked/);
 });
@@ -9816,7 +9907,7 @@ test("voice input: the recognizer hears the one microphone track whose level the
   const { subject, heard, listening } = await dictation({ microphone: mic.open });
 
   subject.start();
-  assert.deepEqual(listening, [true], "the button shows listening at once");
+  assert.deepEqual(listening, [true], "the microphone request begins at once");
   assert.equal(subject.level(), 0, "no level before the microphone opens");
   mic.allow();
   await flushPromises();
@@ -9864,6 +9955,44 @@ test("voice input: a microphone the browser refuses is explained and nothing lis
   assert.match(absent.problems.at(-1) || "", /No microphone/);
 });
 
+test("voice input: cancellation closes capture while the audio context is still resuming", async () => {
+  const track = {
+    readyState: "live",
+    stop() {
+      this.readyState = "ended";
+    },
+  };
+  const audioResume = Promise.withResolvers();
+  const { chrome } = await voiceHarness({
+    getUserMedia: async () => ({ getTracks: () => [track], getAudioTracks: () => [track] }),
+  });
+  Object.assign(chrome.context.window, {
+    AudioContext: class {
+      createAnalyser() {
+        return { fftSize: 512 };
+      }
+      createMediaStreamSource() {
+        return { connect() {} };
+      }
+      resume() {
+        return audioResume.promise;
+      }
+      close() {
+        return Promise.resolve();
+      }
+    },
+  });
+
+  chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
+  await flushPromises();
+  chrome.dispatchDocumentEvent("keyup", voiceKey("keyup", "Space"));
+
+  assert.equal(track.readyState, "ended");
+  audioResume.resolve(undefined);
+  await flushPromises();
+  assert.equal(FakeRecognizer.made[0].started, false);
+});
+
 test("voice input: a recognizer that cannot take a track still dictates, without a level or a held microphone", async () => {
   class TracklessRecognizer extends FakeRecognizer {
     start(track) {
@@ -9905,11 +10034,11 @@ test("voice input: a browser without speech recognition disables the microphone 
   const voice = chrome.element("chatVoice");
 
   assert.equal(voice.disabled, true);
-  assert.equal(voice["aria-label"], "Voice input needs Chrome or Edge");
-  assert.equal(voice["data-tip"], "Voice input needs Chrome or Edge");
+  assert.equal(voice["aria-label"], "This browser does not provide speech recognition");
+  assert.equal(voice["data-tip"], "This browser does not provide speech recognition");
   const down = chrome.dispatchDocumentEvent("keydown", voiceKey("keydown", "Space"));
   assert.equal(down.defaultPrevented, true, "the shortcut never types a space");
-  assert.match(chrome.element("chatVoiceNote").textContent, /Voice input needs Chrome or Edge/);
+  assert.match(chrome.element("chatVoiceNote").textContent, /This browser does not provide speech recognition/);
 });
 
 test("voice input: holding Ctrl+Shift+Space dictates into the message box at the caret and never sends", async () => {
@@ -10333,11 +10462,17 @@ function openPageCard(chrome) {
     artifact_load_token: chrome.artifactLoadToken(),
     selection: { uid: "u-1", selector: "h2", tag: "h2", text: "Step 2. Payment" },
     card: true,
+    voice_id: "test-card",
   });
 }
 
 function pageDictate(chrome, action) {
-  chrome.sendFrameMessage({ type: "lavish:dictate", action, artifact_load_token: chrome.artifactLoadToken() });
+  chrome.sendFrameMessage({
+    type: "lavish:dictate",
+    action,
+    voice_id: "test-card",
+    artifact_load_token: chrome.artifactLoadToken(),
+  });
 }
 
 const lastVoiceState = (chrome) => chrome.postedToFrame.findLast((message) => message.type === "lavish:voiceState");
@@ -10425,7 +10560,11 @@ test("voice input: closing the page's annotation box stops its dictation", async
     card: false,
   });
 
-  assert.equal(chrome.postedToFrame.findLast((message) => message.type === "lavish:dictated")?.text, "half a thought");
+  assert.equal(
+    chrome.postedToFrame.findLast((message) => message.type === "lavish:dictated"),
+    undefined,
+  );
+  assert.equal(recognizer.aborted, true, "closing a box cancels its unfinished dictation");
   openPageCard(chrome);
   assert.equal(lastVoiceState(chrome).listening, false, "the next box opens on a chrome that is not listening");
 });

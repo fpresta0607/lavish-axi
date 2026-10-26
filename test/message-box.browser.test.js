@@ -145,7 +145,7 @@ const FAKE_VOICE = `() => {
   window.__voicePhrase = "";
   navigator.mediaDevices.getUserMedia = async () => microphone.stream;
   window.SpeechRecognition = class {
-    start() {}
+    start() { this.onstart?.(); }
     stop() {
       this.onresult?.({ resultIndex: 0, results: [[{ transcript: window.__voicePhrase }]] });
       this.onend?.();

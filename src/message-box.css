@@ -57,6 +57,11 @@
 .chat-voice:disabled {
   cursor: not-allowed;
 }
+.chat-voice {
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+  user-select: none;
+}
 .chat-voice.recording svg,
 .chat-voice:not(.recording) .chat-voice-dot,
 .chat-voice:not(.recording) .chat-voice-bars {

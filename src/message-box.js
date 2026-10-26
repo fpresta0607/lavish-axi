@@ -1,4 +1,4 @@
-/* global document */
+/* global document, window */
 
 // The one message box Scrawl draws. The Conversation box in the chrome and the annotation box on a
 // highlighted component are both this component, so neither can have a part the other lacks: one
@@ -28,12 +28,25 @@ export function messageBoxIcon(name) {
 // localhost, so the page's link, not a site setting, is what has to change.
 export function voiceCopy() {
   return {
-    unsupported: "Voice input needs Chrome or Edge",
+    unsupported: "This browser does not provide speech recognition",
     insecure: "Voice input needs this page's https link",
     idle: "Hold Ctrl+Shift+Space to dictate",
     held: "Listening · release Ctrl+Shift+Space to type",
     recent: "Recent dictations",
+    tap: "Tap to dictate; hold for recent dictations",
+    tapped: "Listening - tap to finish",
+    requesting: "Waiting for microphone permission",
+    finishing: "Finishing dictation",
   };
+}
+
+export function voiceStatus({ phase, mode }) {
+  const copy = voiceCopy();
+  if (phase === "requesting")
+    return copy.requesting + (mode === "tap" ? " - tap to cancel" : " - release Ctrl+Shift+Space to cancel");
+  if (phase === "finishing") return copy.finishing;
+  if (phase === "listening") return mode === "tap" ? copy.tapped : copy.held;
+  return "";
 }
 
 // The box's markup. Each part's id is the box's id and the part's name (`chatInput`, `chatVoice`),
@@ -80,7 +93,7 @@ export function messageBoxHtml(box) {
     id("VoiceRecentList") +
     '"></ul><p class="voice-empty" id="' +
     id("VoiceRecentEmpty") +
-    '">Nothing dictated yet.</p><p class="voice-footer">Hold Ctrl+Shift+Space, speak, release. Heard by this browser&#39;s speech recognition, which sends your voice to the browser&#39;s maker.</p></section></div></div></div>'
+    '">Nothing dictated yet.</p><p class="voice-footer">Tap to start and finish; hold for recent dictations. Or hold Ctrl+Shift+Space, speak, release. Heard by this browser&#39;s speech recognition, which sends your voice to the browser&#39;s maker.</p></section></div></div></div>'
   );
 }
 
@@ -118,14 +131,18 @@ export function voiceBarScale(level) {
 // listening, and whether it can take text. `fit` sizes the open card to the room its box has.
 /**
  * @param {{ field: HTMLElement, dock: HTMLElement, button: HTMLButtonElement, bars: HTMLElement, card: HTMLElement, list: HTMLElement, empty: HTMLElement, close: HTMLButtonElement }} parts
- * @param {{ dictations: () => Array<{ text: string, at: number }>, paste: (text: string) => void, copy: ((text: string) => Promise<unknown>) | null, fit: (card: HTMLElement) => void, rebuildKeepingFocus: (container: HTMLElement, rebuild: () => void) => void }} host
+ * @param {{ dictations: () => Array<{ text: string, at: number }>, paste: (text: string) => void, toggle: () => void, cancel: () => void, copy: ((text: string) => Promise<unknown>) | null, fit: (card: HTMLElement) => void, rebuildKeepingFocus: (container: HTMLElement, rebuild: () => void) => void }} host
  */
 export function createVoiceBubble(parts, host) {
   // The list shows this many of the box's dictations, and a copied one says so this long.
   const listed = 5;
   const copiedMs = 1400;
   const copy = voiceCopy();
-  let state = { supported: false, secure: true, listening: false, disabled: false };
+  let state = { supported: false, secure: true, listening: false, disabled: false, phase: "idle", mode: "hold" };
+  let isTouch = Boolean(window.matchMedia?.("(pointer: coarse)").matches);
+  let touchPress = null;
+  let pressTimer;
+  let suppressClick = false;
   let open = false;
   // The entry whose Copy just worked, which shows a check for a moment.
   let copied = "";
@@ -135,18 +152,38 @@ export function createVoiceBubble(parts, host) {
     state = { ...state, ...next };
     const { button } = parts;
     button.disabled = !state.supported || state.disabled;
+    const status = !state.secure
+      ? copy.insecure
+      : !state.supported
+        ? copy.unsupported
+        : state.phase === "requesting" || state.phase === "finishing"
+          ? voiceStatus(state)
+          : "";
     button.setAttribute(
       "aria-label",
-      !state.supported ? copy.unsupported : state.listening ? "Listening" : copy.recent,
+      status ||
+        (state.listening
+          ? state.mode === "tap"
+            ? copy.tapped
+            : "Listening"
+          : isTouch
+            ? "Start dictation"
+            : copy.recent),
     );
     button.setAttribute(
       "data-tip",
-      !state.supported ? copy.unsupported : !state.secure ? copy.insecure : state.listening ? copy.held : copy.idle,
+      status || (state.listening ? (state.mode === "tap" ? copy.tapped : copy.held) : isTouch ? copy.tap : copy.idle),
     );
+    button.setAttribute("aria-pressed", String(state.listening));
+    button.setAttribute("aria-busy", String(state.phase === "requesting" || state.phase === "finishing"));
+    button.setAttribute("aria-description", isTouch ? copy.tap : copy.idle);
     button.classList.toggle("recording", state.listening);
     parts.field.classList.toggle("is-dictating", state.listening);
     // A box that can no longer take text has no dictations to paste.
-    if (button.disabled && open) setOpen(false);
+    if (button.disabled) {
+      clearPress();
+      if (open) setOpen(false);
+    }
   }
 
   function showLevels(levels) {
@@ -207,6 +244,7 @@ export function createVoiceBubble(parts, host) {
         "Paste into this box",
         messageBoxIcon("paste"),
         () => {
+          host.cancel();
           host.paste(dictation.text);
           setOpen(false);
         },
@@ -249,15 +287,80 @@ export function createVoiceBubble(parts, host) {
     parts.button.focus();
   }
 
-  parts.button.onclick = () => setOpen(!open);
+  function clearPress() {
+    clearTimeout(pressTimer);
+    touchPress = null;
+  }
+
+  parts.button.addEventListener("pointerdown", (event) => {
+    isTouch = event.pointerType === "touch";
+    suppressClick = false;
+    render({});
+    if (!isTouch || parts.button.disabled) return;
+    event.preventDefault();
+    touchPress = { id: event.pointerId, x: event.clientX, y: event.clientY, held: false };
+    pressTimer = setTimeout(() => {
+      if (!touchPress) return;
+      touchPress.held = true;
+      setOpen(true);
+    }, 550);
+  });
+  parts.button.addEventListener("pointermove", (event) => {
+    if (touchPress && Math.hypot(event.clientX - touchPress.x, event.clientY - touchPress.y) > 10) {
+      suppressClick = true;
+      clearPress();
+    }
+  });
+  parts.button.addEventListener("pointerup", (event) => {
+    if (!touchPress || event.pointerId !== touchPress.id) return;
+    const held = touchPress.held;
+    clearPress();
+    suppressClick = true;
+    event.preventDefault();
+    if (!held && !parts.button.disabled) {
+      setOpen(false);
+      host.toggle();
+    }
+  });
+  parts.button.addEventListener("pointercancel", () => {
+    suppressClick = true;
+    clearPress();
+  });
+  parts.button.addEventListener("contextmenu", (event) => {
+    event.preventDefault();
+    clearPress();
+    suppressClick = true;
+    if (!parts.button.disabled) setOpen(true);
+  });
+  parts.button.onclick = (event) => {
+    if (suppressClick && event?.detail !== 0) {
+      suppressClick = false;
+      return;
+    }
+    if (isTouch) {
+      setOpen(false);
+      host.toggle();
+    } else setOpen(!open);
+  };
   parts.close.onclick = closeToBubble;
   // Escape from the bubble or from inside the list closes it, closes nothing else, and puts the
   // keyboard back on the bubble.
   parts.dock.addEventListener("keydown", (event) => {
-    if (!open || event.key !== "Escape") return;
+    if (event.key !== "Escape") return;
+    if (!open && state.phase !== "idle") {
+      event.stopPropagation();
+      host.cancel();
+      return;
+    }
+    if (!open) return;
     event.stopPropagation();
     closeToBubble();
   });
 
-  return { render, showLevels, setOpen, refresh, isOpen: () => open };
+  function dispose() {
+    clearPress();
+    clearTimeout(copiedTimer);
+  }
+
+  return { render, showLevels, setOpen, refresh, dispose, isOpen: () => open };
 }

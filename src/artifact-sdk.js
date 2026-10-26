@@ -2,7 +2,7 @@
 
 import { readArtifactRevisions } from "./artifact-revisions.js";
 import { watchBoardTips } from "./board-tips.js";
-import { createVoiceBubble, dictationKey, insertDictation, messageBoxHtml } from "./message-box.js";
+import { createVoiceBubble, dictationKey, insertDictation, messageBoxHtml, voiceStatus } from "./message-box.js";
 import { pageDefaultsCss, pageSetsItsOwnColors } from "./page-colors.js";
 import * as mermaidHelpers from "./mermaid-node.js";
 import { choiceAnswer, orderedChoices, parsePageChoices } from "./page-choices.js";
@@ -591,13 +591,16 @@ export function createArtifactSdk(
     supported: false,
     secure: true,
     listening: false,
+    phase: "idle",
+    mode: "hold",
     disabled: false,
     problem: "",
     canCopy: false,
     dictations: [],
   };
   // The open card's voice bubble and the text it dictates into.
-  /** @type {{ bubble: ReturnType<typeof createVoiceBubble>, textarea: HTMLTextAreaElement, notify: (message: string) => void } | null} */
+  let voiceBoxSequence = 0;
+  /** @type {{ id: string, selection: { start: number, end: number } | null, bubble: ReturnType<typeof createVoiceBubble>, textarea: HTMLTextAreaElement, notify: (message: string, isProblem?: boolean) => void } | null} */
   let activeVoice = null;
   // A Copy in the card's list waits for the chrome, which has the clipboard, to say how it went.
   /** @type {{ resolve: (value?: unknown) => void, reject: (reason?: unknown) => void } | null} */
@@ -1340,6 +1343,7 @@ export function createArtifactSdk(
           }
         : null,
       card: Boolean(activeCard),
+      voice_id: activeVoice?.id || "",
     };
     const key = JSON.stringify(report);
     if (key === reportedSelection) return;
@@ -2430,6 +2434,10 @@ export function createArtifactSdk(
   }
 
   function closeCard() {
+    if (activeVoice) {
+      postArtifactMessage("lavish:dictate", { action: "cancel", voice_id: activeVoice.id });
+      activeVoice.bubble.dispose();
+    }
     activeCardContext = null;
     activeCard = null;
     activeVoice = null;
@@ -2615,7 +2623,7 @@ export function createArtifactSdk(
       "</strong></header>" +
       messageBoxHtml({ id: "lavishCard", placeholder, accept: ATTACHMENT_IMAGE_TYPES.accept }) +
       '<div class="lavish-attachments" data-attachments hidden></div>' +
-      '<footer><span class="muted lavish-hint">Enter adds it to your notes &middot; Shift+Enter new line &middot; Esc cancels' +
+      '<footer><span class="muted lavish-hint" role="status">Enter adds it to your notes &middot; Shift+Enter new line &middot; Esc cancels' +
       '</span><button class="icon-button send lavish-add" type="button" aria-label="Add to your notes" data-tip="Add to your notes. Send to Agent sends them all" data-tip-align="end">' +
       PLUS_ICON +
       '</button><button class="icon-button lavish-cancel" type="button" aria-label="Cancel" data-tip="Cancel" data-tip-align="end">' +
@@ -2650,11 +2658,11 @@ export function createArtifactSdk(
     // the error color until cleared, and clearing restores the hint rather than
     // leaving stale red text behind.
     const defaultHintHtml = attachNotice ? attachNotice.innerHTML : "";
-    const notify = (message) => {
+    const notify = (message, isProblem = true) => {
       if (!attachNotice) return;
       if (message) {
         attachNotice.textContent = message;
-        attachNotice.classList.add("lavish-hint-alert");
+        attachNotice.classList.toggle("lavish-hint-alert", isProblem);
       } else {
         attachNotice.innerHTML = defaultHintHtml;
         attachNotice.classList.remove("lavish-hint-alert");
@@ -2677,6 +2685,8 @@ export function createArtifactSdk(
       {
         dictations: () => pageVoice.dictations,
         paste: (text) => insertDictatedText(textarea, text),
+        toggle: () => requestDictation("toggle"),
+        cancel: () => requestDictation("cancel"),
         get copy() {
           return pageVoice.canCopy ? copyThroughChrome : null;
         },
@@ -2685,7 +2695,8 @@ export function createArtifactSdk(
       },
     );
     bubble.render(pageVoice);
-    activeVoice = { bubble, textarea, notify };
+    activeVoice = { id: ATTACHMENT_NONCE + ":" + ++voiceBoxSequence, selection: null, bubble, textarea, notify };
+    textarea.addEventListener("input", () => requestDictation("cancel"));
 
     attachButton.onclick = () => attachInput.click();
     attachInput.addEventListener("change", () => {
@@ -2800,8 +2811,13 @@ export function createArtifactSdk(
   }
 
   // Dictated words land at the caret, as in the Conversation box, and are review context like typing.
-  function insertDictatedText(textarea, text) {
-    const next = insertDictation(textarea.value, textarea.selectionStart, textarea.selectionEnd, text);
+  function insertDictatedText(textarea, text, selection = null) {
+    const next = insertDictation(
+      textarea.value,
+      selection?.start ?? textarea.selectionStart,
+      selection?.end ?? textarea.selectionEnd,
+      text,
+    );
     textarea.value = next.value;
     textarea.focus();
     textarea.setSelectionRange(next.caret, next.caret);
@@ -2829,11 +2845,14 @@ export function createArtifactSdk(
   // The chrome's word on dictation, drawn on the open card's bubble. A problem says so on the card.
   function setPageVoice(msg) {
     const problem = String(msg.problem || "");
-    if (activeVoice && problem !== pageVoice.problem) activeVoice.notify(problem);
+    const previousPhase = pageVoice.phase;
+    const previousProblem = pageVoice.problem;
     pageVoice = {
       supported: msg.supported === true,
       secure: msg.secure !== false,
       listening: msg.listening === true,
+      phase: String(msg.phase || "idle"),
+      mode: String(msg.mode || "hold"),
       disabled: msg.disabled === true,
       problem,
       canCopy: msg.canCopy === true,
@@ -2843,6 +2862,10 @@ export function createArtifactSdk(
       })),
     };
     if (!activeVoice) return;
+    if (previousPhase !== pageVoice.phase || previousProblem !== problem) {
+      const hint = voiceStatus(pageVoice);
+      activeVoice.notify(problem || hint, Boolean(problem));
+    }
     activeVoice.bubble.render(pageVoice);
     activeVoice.bubble.refresh();
   }
@@ -2891,7 +2914,11 @@ export function createArtifactSdk(
     if (msg.type === "lavish:noteStatus") updateNoteStatus(msg.noteId, msg.status);
     if (msg.type === "lavish:voiceState") setPageVoice(msg);
     if (msg.type === "lavish:voiceLevels" && Array.isArray(msg.levels)) activeVoice?.bubble.showLevels(msg.levels);
-    if (msg.type === "lavish:dictated" && activeVoice) insertDictatedText(activeVoice.textarea, String(msg.text || ""));
+    if (msg.type === "lavish:dictated" && activeVoice?.selection && msg.voice_id === activeVoice.id) {
+      const selection = activeVoice.selection;
+      activeVoice.selection = null;
+      insertDictatedText(activeVoice.textarea, String(msg.text || ""), selection);
+    }
     if (msg.type === "lavish:dictationCopied" && pendingCopy) {
       if (msg.ok === true) pendingCopy.resolve();
       else pendingCopy.reject();
@@ -2967,14 +2994,23 @@ export function createArtifactSdk(
     const meaning = dictationKey(event);
     if (!meaning) return;
     if (meaning.swallow) event.preventDefault();
-    if (meaning.action) postArtifactMessage("lavish:dictate", { action: meaning.action });
+    if (meaning.action) requestDictation(meaning.action);
+  }
+  function requestDictation(action) {
+    if (!activeVoice) return;
+    if (action === "cancel") activeVoice.selection = null;
+    if ((action === "start" || action === "toggle") && (pageVoice.phase === "idle" || !activeVoice.selection)) {
+      activeVoice.selection = { start: activeVoice.textarea.selectionStart, end: activeVoice.textarea.selectionEnd };
+    }
+    postArtifactMessage("lavish:dictate", { action, voice_id: activeVoice.id });
   }
   document.addEventListener("keydown", handleDictationKey, true);
   document.addEventListener("keyup", handleDictationKey, true);
   // A page that loses focus may never see the held keys' release, so that stops listening.
   window.addEventListener("blur", () => {
-    if (pageVoice.listening) postArtifactMessage("lavish:dictate", { action: "stop" });
+    if (pageVoice.phase !== "requesting") requestDictation("cancel");
   });
+  window.addEventListener("pagehide", () => requestDictation("cancel"));
 
   // Report scroll position to the chrome so it can be restored across hot reloads.
   // The iframe is sandboxed without same-origin, so the chrome can't read scrollY directly.
