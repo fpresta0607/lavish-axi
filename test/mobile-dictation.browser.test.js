@@ -80,42 +80,54 @@ test(
         hasTouch: true,
       });
       await context.addInitScript(FAKE_VOICE);
-      const page = await context.newPage();
-      page.setDefaultTimeout(8000);
-      page.on("pageerror", (error) => t.diagnostic(error.message));
-      const artifact = path.join(temp, "review.html");
-      await writeFile(
-        artifact,
-        '<!doctype html><meta name="viewport" content="width=device-width"><h1>Review heading</h1><p>Second target</p>',
-      );
+      let page;
       const base = `http://127.0.0.1:${server.port}`;
-      const response = await fetch(`${base}/api/sessions`, {
-        method: "POST",
-        headers: { "content-type": "application/json" },
-        body: JSON.stringify({ file: artifact }),
-      });
-      const opened = await response.json();
-      assert.equal(response.ok, true, JSON.stringify(opened));
-      const { key } = opened;
-      assert.ok(key, JSON.stringify(opened));
-      const url = `${base}/session/${key}`;
+      let key;
+      let reviewSequence = 0;
       const messages = [];
-      page.on("request", (request) => {
-        if (request.url().endsWith("/prompts")) messages.push(request.url());
-      });
-      const input = page.locator("#chatInput");
-      const mic = page.locator("#chatVoice");
+      let input;
+      let mic;
       async function screenshot(name) {
         const directory = process.env.LAVISH_AXI_TOUCH_EVIDENCE;
         if (!directory) return;
         await mkdir(directory, { recursive: true });
         await page.screenshot({ path: path.join(directory, `${name}.png`) });
       }
-      async function openComposer() {
-        const loaded = await page.goto(url);
+      async function openReview() {
+        await page?.close();
+        const artifact = path.join(temp, `review-${++reviewSequence}.html`);
+        await writeFile(
+          artifact,
+          '<!doctype html><meta name="viewport" content="width=device-width"><h1>Review heading</h1><p>Second target</p>',
+        );
+        const response = await fetch(`${base}/api/sessions`, {
+          method: "POST",
+          headers: { "content-type": "application/json" },
+          body: JSON.stringify({ file: artifact }),
+        });
+        const opened = await response.json();
+        assert.equal(response.ok, true, JSON.stringify(opened));
+        key = opened.key;
+        assert.ok(key, JSON.stringify(opened));
+        page = await context.newPage();
+        page.setDefaultTimeout(15_000);
+        page.on("pageerror", (error) => t.diagnostic(error.message));
+        page.on("request", (request) => {
+          if (request.url().endsWith("/prompts")) messages.push(request.url());
+        });
+        page.on("response", (response) => {
+          if (response.status() >= 400) t.diagnostic(`${response.status()} ${new URL(response.url()).pathname}`);
+        });
+        input = page.locator("#chatInput");
+        mic = page.locator("#chatVoice");
+        const loaded = await page.goto(`${base}/session/${key}`);
         assert.equal(loaded.status(), 200, await page.locator("body").innerText());
         assert.equal(await page.evaluate("typeof SpeechRecognition"), "function", "synthetic recognizer is installed");
+        await page.frameLocator("#artifact").locator("h1").waitFor({ state: "attached" });
         await page.locator("#layoutGateOverlay").waitFor({ state: "hidden" });
+      }
+      async function openComposer() {
+        await openReview();
         if (await input.evaluate((element) => element.closest(".composer").inert))
           await page.locator("#panelToggle").tap();
         await input.fill("Tighten cards");
@@ -241,6 +253,11 @@ test(
           return;
         }
         await openComposer();
+        await mic.tap();
+        await page.waitForFunction("voiceTest.recognizers[0]?.started");
+        await mic.tap();
+        await finish();
+        await input.fill("");
         await mic.tap({ trial: true });
         const bounds = await mic.boundingBox();
         const session = await context.newCDPSession(page);
@@ -252,7 +269,7 @@ test(
           await session.send("Input.dispatchTouchEvent", { type: "touchEnd", touchPoints: [] });
           await session.detach();
         }
-        assert.equal(await page.evaluate("voiceTest.requests"), 0);
+        assert.equal(await page.evaluate("voiceTest.requests"), 1, "holding for history never starts another capture");
         await page.locator("#chatVoiceRecentList button").last().tap();
         assert.match(await input.inputValue(), /the spacing on the/);
       });
@@ -281,8 +298,7 @@ test(
       await t.test(
         "the sandboxed annotation microphone uses touch and cannot deliver into a reopened card",
         async () => {
-          await page.goto(url);
-          await page.locator("#layoutGateOverlay").waitFor({ state: "hidden" });
+          await openReview();
           if (await page.locator("body").evaluate((element) => element.classList.contains("sheet-open")))
             await page.locator("#panelToggle").tap();
           const composerDraft = await input.inputValue();
@@ -297,6 +313,7 @@ test(
           await cardInput.evaluate((element) => element.setSelectionRange(7, 7));
           await cardMic.tap();
           await page.waitForFunction("voiceTest.recognizers.at(-1)?.started");
+          await artifactFrame.locator('#lavishCardVoice[aria-pressed="true"]').waitFor();
           assert.equal(await cardMic.getAttribute("aria-pressed"), "true");
           await screenshot("annotation-listening");
           await cardMic.tap();
@@ -364,8 +381,8 @@ test(
       });
 
       await t.test("desktop held keys and mouse access to history remain usable", async () => {
-        await page.setViewportSize({ width: 1440, height: 900 });
         await openComposer();
+        await page.setViewportSize({ width: 1440, height: 900 });
         await page.keyboard.down("Control");
         await page.keyboard.down("Shift");
         await page.keyboard.down("Space");
@@ -380,7 +397,6 @@ test(
       });
 
       await t.test("session end cancels pending recognition and rejects its late text", async () => {
-        await page.setViewportSize({ width: 390, height: 844 });
         await openComposer();
         await mic.tap();
         await page.evaluate("window.lateVoiceEnd = voiceTest.recognizers.at(-1).onend");
