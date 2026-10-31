@@ -295,6 +295,8 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
   Closing a card cancels recognition, and `lavish:dictated` carries its owning id so a late result cannot land in a replacement card.
   The page is untrusted, so the open-card, user-activation, source and artifact-load checks remain required.
   Touch starts the native recognizer synchronously from the gesture, without opening a separate capture for a level meter; permission, recording and finishing have bounded deadlines and late callbacks are ignored after cancellation.
+  Stopping releases the active capture while its recognizer may still finish; pending results retain their destination and insert in capture order without changing a newer capture's state or focus.
+  Cancellation is scoped to the input that requested it, so a late annotation close cannot cancel a newer chat capture.
   A Copy in the card's list goes through `lavish:copyDictation`, which writes only one of this review's own dictations.
 - For text annotations, `prompt.selector` is the common ancestor/container selector, not the complete identity. Use the `target` range boundaries and snapshot context to locate the exact selected text.
 - For non-whiteboard Mermaid diagram nodes, a click annotates the whole rendered `<g>` node - not the sub-shape under the cursor - and hover highlights the same node. `SessionStore.normalizeTarget` routes these targets through `normalizeMermaidNodeTarget`, which strips them to the fixed `type`/`diagramId`/`nodeId`/`label`/`selector` shape, while text-range and other/legacy targets pass through unchanged.

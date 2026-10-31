@@ -233,6 +233,7 @@ pnpm link
   Holding it while an annotation card is open in the page dictates into that card instead: the chrome listens for the sandboxed page, and only on a key press the reader just made.
   What you said lands in the message box at the caret and becomes a note only when you add it; a browser without speech recognition shows the microphone disabled, and a blocked microphone is explained under the composer or on the card.
   On a touch screen, tap the microphone to start and tap again to finish, in either box; the first tap may ask for microphone permission, and another tap while permission is pending cancels.
+  After stopping, another tap can start a fresh capture while earlier words finish; results arrive in capture order in the box that requested them.
   Touch dictation uses the browser recognizer's own microphone, so its recording indicator does not measure audio levels.
   Waiting for permission, listening, finishing and errors are shown on the owning box; closing that box, editing its draft, leaving the page or ending the review cancels unfinished dictation.
   The microphone at the bottom right of each message box is the Code Goblins board's square voice bubble: a mouse click, a touch hold or its context menu opens the review's recent dictations, the newest five of the ten this browser keeps for each of the twenty reviews used most recently, each with Copy and Paste into the box, and Escape or its close button closes them.

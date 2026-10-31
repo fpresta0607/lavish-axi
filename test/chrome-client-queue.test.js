@@ -9816,6 +9816,168 @@ test("voice input: late callbacks cannot duplicate or corrupt a later dictation"
   assert.deepEqual(heard, ["first", "second"]);
 });
 
+test("voice input: mobile restarts while the previous stopped dictation is finishing", async () => {
+  const { chrome, voice } = await voiceHarness({ mobile: true });
+  const input = chrome.element("chatInput");
+  input.value = "Review";
+  input.setSelectionRange(6, 6);
+  voice.onclick({ detail: 0 });
+  const first = FakeRecognizer.made[0];
+  first.hear("first");
+  voice.onclick({ detail: 0 });
+  assert.equal(input.value, "Review first");
+
+  voice.onclick({ detail: 0 });
+  const second = FakeRecognizer.made[1];
+  second.stop = () => {};
+  voice.onclick({ detail: 0 });
+  voice.onclick({ detail: 0 });
+
+  assert.equal(FakeRecognizer.made.length, 3, "stopping must leave the next tap able to capture");
+  assert.equal(FakeRecognizer.made[2].started, true);
+  second.hear("second");
+  second.onend?.();
+  assert.equal(voice.classList.contains("recording"), true, "an older end cannot stop the new capture");
+  FakeRecognizer.made[2].hear("third");
+  voice.onclick({ detail: 0 });
+  assert.equal(input.value, "Review first second third");
+});
+
+test("voice input: stopped results finish in capture order even when callbacks arrive backwards", async () => {
+  const { subject, heard } = await dictation();
+  subject.start();
+  const first = FakeRecognizer.made[0];
+  first.stop = () => {};
+  subject.stop();
+  subject.start();
+  const second = FakeRecognizer.made[1];
+  second.hear("second");
+  subject.stop();
+  assert.deepEqual(heard, []);
+
+  first.hear("first");
+  first.onend();
+
+  assert.deepEqual(heard, ["first", "second"]);
+});
+
+test("voice input: cancelling an older destination leaves the newer capture and its microphone alone", async () => {
+  const mic = fakeMicrophone();
+  const { subject, heard } = await dictation({ microphone: mic.open });
+  subject.start(false, { target: "page" });
+  mic.allow();
+  await flushPromises();
+  const first = FakeRecognizer.made[0];
+  const lateEnd = first.onend;
+  first.stop = () => {};
+  subject.stop();
+  subject.start(false, { target: "chat" });
+  mic.allow();
+  await flushPromises();
+  const second = FakeRecognizer.made[1];
+
+  subject.dispose("page");
+  lateEnd();
+
+  assert.equal(first.aborted, true);
+  assert.equal(second.aborted, false);
+  assert.equal(mic.opened[0].closed, true);
+  assert.equal(mic.opened[1].closed, false);
+  second.hear("new destination");
+  subject.stop();
+  assert.deepEqual(heard, ["new destination"]);
+  assert.equal(mic.opened[1].closed, true);
+});
+
+test("voice input: an older transcription error cannot reset a newer capture", async () => {
+  const { subject, heard, listening, problems } = await dictation();
+  subject.start();
+  const first = FakeRecognizer.made[0];
+  first.stop = () => {};
+  subject.stop();
+  subject.start();
+  const second = FakeRecognizer.made[1];
+
+  first.onerror({ error: "network" });
+
+  assert.equal(listening.at(-1), true);
+  assert.equal(problems.at(-1), "");
+  assert.equal(second.aborted, false);
+  second.hear("still listening");
+  subject.stop();
+  assert.deepEqual(heard, ["still listening"]);
+});
+
+test("voice input: an older finishing timeout leaves the new mobile capture listening", async () => {
+  const { chrome, voice, note } = await voiceHarness({ mobile: true });
+  voice.onclick({ detail: 0 });
+  const first = FakeRecognizer.made[0];
+  first.stop = () => {};
+  voice.onclick({ detail: 0 });
+  voice.onclick({ detail: 0 });
+  const second = FakeRecognizer.made[1];
+
+  chrome.runTimers(8000);
+
+  assert.equal(first.aborted, true);
+  assert.equal(second.aborted, false);
+  assert.equal(voice.classList.contains("recording"), true);
+  assert.equal(note.classList.contains("is-problem"), false);
+  second.hear("next capture");
+  voice.onclick({ detail: 0 });
+  assert.equal(chrome.element("chatInput").value, "next capture");
+});
+
+test("voice input: microphone teardown can report end without delivering twice or closing twice", async () => {
+  let closes = 0;
+  const { subject, heard } = await dictation({
+    microphone: async () => ({
+      track: { kind: "audio" },
+      level: () => 0,
+      close() {
+        closes++;
+        FakeRecognizer.made[0].onend?.();
+      },
+    }),
+  });
+  subject.start();
+  await flushPromises();
+  FakeRecognizer.made[0].hear("finished once");
+
+  subject.stop();
+
+  assert.equal(closes, 1);
+  assert.deepEqual(heard, ["finished once"]);
+});
+
+test("voice input: closing a finishing annotation does not cancel a newer chat capture", async () => {
+  const { chrome, voice } = await voiceHarness({ mobile: true });
+  openPageCard(chrome);
+  chrome.context.navigator.userActivation = { isActive: true };
+  pageDictate(chrome, "toggle");
+  const first = FakeRecognizer.made[0];
+  const lateEnd = first.onend;
+  first.stop = () => {};
+  pageDictate(chrome, "toggle");
+  voice.onclick({ detail: 0 });
+  const second = FakeRecognizer.made[1];
+
+  chrome.sendFrameMessage({
+    type: "lavish:selection",
+    artifact_load_token: chrome.artifactLoadToken(),
+    selection: null,
+    card: false,
+  });
+  lateEnd();
+
+  assert.equal(first.aborted, true);
+  assert.equal(second.aborted, false);
+  assert.equal(voice.classList.contains("recording"), true);
+  second.hear("chat destination");
+  voice.onclick({ detail: 0 });
+  assert.equal(chrome.element("chatInput").value, "chat destination");
+});
+
 test("voice input: a throwing recognizer closes its capture and recovers", async () => {
   class RefusedRecognizer extends FakeRecognizer {
     start() {

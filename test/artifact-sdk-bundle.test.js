@@ -1450,10 +1450,10 @@ test("dictated text belongs to the requesting annotation box and is inserted onc
   const secondId = sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id;
   const textarea = sdk.card().querySelector("textarea");
 
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "wrong box", voice_id: firstId });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "wrong box", voice_id: firstId, capture_id: 1 });
   assert.equal(textarea.value, "");
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId });
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId, capture_id: 2 });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId, capture_id: 2 });
   assert.equal(textarea.value, "right box");
 });
 
