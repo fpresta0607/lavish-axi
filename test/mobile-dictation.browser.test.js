@@ -401,6 +401,106 @@ test(
         },
       );
 
+      await t.test("a pending chat result stays in its draft when an annotation capture starts", async () => {
+        await openComposer();
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await mic.tap();
+        await page.waitForFunction("voiceTest.recognizers[0]?.started");
+        await mic.tap();
+        await page.waitForFunction("voiceTest.recognizers[0].stops === 1");
+        const artifact = page.frameLocator("#artifact");
+        await artifact.locator("h1").click();
+        const cardInput = artifact.locator("#lavishCardInput");
+        const cardMic = artifact.locator("#lavishCardVoice");
+        await cardInput.fill("Annotation draft");
+        await cardMic.tap();
+        await page.waitForFunction("voiceTest.recognizers[1]?.started");
+
+        await page.evaluate("voiceTest.recognizers[0].finish('chat result')");
+
+        await screenshot("pending-chat-result-switch");
+        assert.equal(await input.inputValue(), "Tighten chat result cards");
+        assert.equal(await cardInput.inputValue(), "Annotation draft");
+        assert.equal(await cardMic.getAttribute("aria-pressed"), "true");
+        await cardMic.tap();
+        await page.waitForFunction("voiceTest.recognizers[1].stops === 1");
+        await page.evaluate("voiceTest.recognizers[1].finish('own result')");
+        await assertValue(cardInput, "Annotation draft own result");
+        await assertClosed();
+        assert.deepEqual(messages, []);
+      });
+
+      await t.test("a pending annotation result stays in its card when a chat capture starts", async () => {
+        await openComposer();
+        await page.setViewportSize({ width: 1440, height: 900 });
+        const artifact = page.frameLocator("#artifact");
+        await artifact.locator("h1").click();
+        const cardInput = artifact.locator("#lavishCardInput");
+        const cardMic = artifact.locator("#lavishCardVoice");
+        await cardInput.fill("Annotation draft");
+        await cardMic.tap();
+        await page.waitForFunction("voiceTest.recognizers[0]?.started");
+        await cardMic.tap();
+        await page.waitForFunction("voiceTest.recognizers[0].stops === 1");
+        await mic.tap();
+        await page.waitForFunction("voiceTest.recognizers[1]?.started");
+
+        await page.evaluate("voiceTest.recognizers[0].finish('own result')");
+
+        await assertValue(cardInput, "Annotation draft own result");
+        assert.equal(await input.inputValue(), "Tighten cards");
+        assert.equal(await mic.getAttribute("aria-pressed"), "true");
+        await mic.tap();
+        await page.waitForFunction("voiceTest.recognizers[1].stops === 1");
+        await page.evaluate("voiceTest.recognizers[1].finish('chat result')");
+        assert.equal(await input.inputValue(), "Tighten chat result cards");
+        await assertClosed();
+        assert.deepEqual(messages, []);
+      });
+
+      await t.test("focusing the artifact stops a capture while preserving earlier pending words", async () => {
+        await openComposer();
+        await page.setViewportSize({ width: 1440, height: 900 });
+        await mic.tap();
+        await page.waitForFunction("voiceTest.recognizers[0]?.started");
+        await mic.tap();
+        await mic.tap();
+        await page.waitForFunction("voiceTest.recognizers[1]?.started");
+
+        await page.frameLocator("#artifact").locator("h1").click();
+
+        assert.equal(await page.evaluate("voiceTest.recognizers[1].stops"), 1);
+        await assertClosed();
+        await page.evaluate("voiceTest.recognizers[1].finish('second')");
+        assert.equal(await input.inputValue(), "Tighten cards");
+        await page.evaluate("voiceTest.recognizers[0].finish('first')");
+        assert.equal(await input.inputValue(), "Tighten first second cards");
+        assert.deepEqual(messages, []);
+      });
+
+      await t.test("leaving document focus cancels listening and stopped chat results", async () => {
+        for (const phase of ["listening", "finishing"]) {
+          await openComposer();
+          await mic.tap();
+          await page.waitForFunction("voiceTest.recognizers[0]?.started");
+          if (phase === "finishing") await mic.tap();
+
+          await page.evaluate(`
+            const recognizer = voiceTest.recognizers[0];
+            const lateResult = recognizer.onresult;
+            const lateEnd = recognizer.onend;
+            Object.defineProperty(document, 'hasFocus', { value: () => false });
+            window.dispatchEvent(new Event('blur'));
+            lateResult({ resultIndex: 0, results: [[{ transcript: 'late' }]] });
+            lateEnd();
+          `);
+
+          assert.equal(await page.evaluate("voiceTest.recognizers[0].aborted"), true);
+          assert.equal(await input.inputValue(), "Tighten cards");
+          await assertClosed();
+        }
+      });
+
       await t.test("completed captures switch between chat and annotation without changing either draft", async () => {
         await openComposer();
         await mic.tap();

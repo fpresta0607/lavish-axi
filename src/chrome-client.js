@@ -5188,7 +5188,9 @@ document.addEventListener("keydown", handleVoiceKey, true);
 document.addEventListener("keyup", handleVoiceKey, true);
 // The page may never see a held shortcut's release once it loses focus, so that stops listening.
 window.addEventListener("blur", () => {
-  if (voicePhase !== "requesting") voiceDictation.dispose();
+  if (voicePhase === "requesting") return;
+  if (document.hasFocus()) voiceDictation.stop();
+  else voiceDictation.dispose();
 });
 window.addEventListener("pagehide", () => {
   voiceDictation.dispose();
