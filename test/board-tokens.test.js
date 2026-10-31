@@ -54,7 +54,11 @@ test("the token file equals the board's current token block", { skip }, async ()
 });
 
 test("every rule copied from the board is still in the board's stylesheet", { skip }, async () => {
-  const board = new Set(ruleLines(readBoardFile(boardDir, BOARD_STYLES, "utf8")));
+  const board = new Set(
+    ruleLines(
+      [BOARD_STYLES, "frontend/src/notice.css"].map((file) => readBoardFile(boardDir, file, "utf8")).join("\n"),
+    ),
+  );
   const copied = ruleLines(await readFile(new URL("../src/board-components.css", import.meta.url), "utf8"));
   const changed = copied.filter((line) => !board.has(line));
 

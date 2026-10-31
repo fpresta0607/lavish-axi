@@ -217,7 +217,7 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
 - **Two copies, one test.**
   `src/board-tokens.css` is the board's token block: its three font faces, its `:root` rule, and every later rule that declares only custom properties (the goblin palette the dialogue boxes share).
   `src/board-components.css` holds rules copied from the board's stylesheet word for word.
-  `test/board-tokens.test.js` reads the board's current `frontend/src/styles.css` from the code-goblins checkout beside this repository's main checkout (or `CODE_GOBLINS_DIR`), at `origin/main` as last fetched, and fails while the token file differs or any copied line is no longer in the board.
+  `test/board-tokens.test.js` reads the board's current `frontend/src/styles.css` and the notice component's `frontend/src/notice.css` from the code-goblins checkout beside this repository's main checkout (or `CODE_GOBLINS_DIR`), at `origin/main` as last fetched, and fails while the token file differs or any copied line is no longer in the board.
   The failure mode it closes: a hand-edited value, or a second palette growing beside the first, makes Scrawl drift from the board with nothing to notice it.
   `node scripts/sync-board-tokens.js` generates the token block and fonts; it does not generate component rules.
   Replace changed component rules by copying their current source verbatim, adapting Scrawl's markup and runtime to their contract rather than editing their values.
