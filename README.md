@@ -291,8 +291,7 @@ pnpm link
 - **Server port** - Set `LAVISH_AXI_PORT` to choose the server port; it defaults to `4387`.
 - **Brand name** - Set `LAVISH_AXI_BRAND` to show another name in the review page's top bar, tab titles and landing page, for a team that runs Lavish inside its own tool; it defaults to `Lavish Editor`, and a name longer than 48 characters keeps the default. The CLI and messages about the server keep the Lavish name. The server reads it when it starts.
 - **The Code Goblins look** - In this fork the review page, called Scrawl, wears the Code Goblins board's look by value, never a palette of its own.
-  `src/board-tokens.css` is a copy of the board's token block (its three self-hosted fonts, its `:root` rule and its goblin palette) and `src/board-components.css` holds rules copied from the board word for word.
-  `test/board-tokens.test.js` reads the board's current stylesheet from the code-goblins checkout beside this repository (or the one `CODE_GOBLINS_DIR` names) and fails while either copy differs; `node scripts/sync-board-tokens.js` copies the token block and fonts again.
+  Copy maintenance and drift checks are documented under [Board look](docs/invariants.md#board-look).
   The fonts (Pixelify Sans, Nunito, JetBrains Mono) and the goblin are served locally from `/assets`, with no font service.
 - **A project's own theme** - Scrawl's frame wears the theme of the project a page belongs to: its colours, fonts and corner radius, read once from the project's frontend by an agent and saved with `lavish-axi theme <project-dir> --set <file.json>`.
   The project is the git checkout the page is in, and a worktree counts as the checkout it was made from, so every page of a project wears one theme; a project with no saved theme wears the Code Goblins SIQ look above.

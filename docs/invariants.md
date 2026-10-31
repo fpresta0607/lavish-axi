@@ -292,7 +292,7 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
   The sandboxed page has no microphone, `localStorage` or clipboard of its own, so the card asks with `lavish:dictate` for held keys or touch taps.
   The chrome starts only for an open card (`pageCardOpen`) on a fresh user gesture (`navigator.userActivation.isActive`), with the same `voice_id` the card reported in `lavish:selection`.
   That id distinguishes successive boxes, including two opened on the same element; it is not authorization.
-  Closing a card cancels recognition, and `lavish:dictated` carries its owning id so a late result cannot land in a replacement card.
+  Closing a card cancels its recognition; `lavish:dictated` carries the owning `voice_id` and an increasing `capture_id`, so late results cannot reach a replacement card or insert twice.
   The page is untrusted, so the open-card, user-activation, source and artifact-load checks remain required.
   Touch starts the native recognizer synchronously from the gesture, without opening a separate capture for a level meter; permission, recording and finishing have bounded deadlines and late callbacks are ignored after cancellation.
   Stopping releases the active capture while its recognizer may still finish; pending results retain their destination and insert in capture order without changing a newer capture's state or focus.
