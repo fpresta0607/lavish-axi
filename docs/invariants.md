@@ -217,7 +217,7 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
 - **Two copies, one test.**
   `src/board-tokens.css` is the board's token block: its three font faces, its `:root` rule, and every later rule that declares only custom properties (the goblin palette the dialogue boxes share).
   `src/board-components.css` holds rules copied from the board's stylesheet word for word.
-  `test/board-tokens.test.js` reads the board's current `frontend/src/styles.css` from the code-goblins checkout beside this repository's main checkout (or `CODE_GOBLINS_DIR`), at `origin/main` as last fetched, and fails while the token file differs or any copied line is no longer in the board.
+  `test/board-tokens.test.js` reads the board's current `frontend/src/styles.css` and the notice component's `frontend/src/notice.css` from the code-goblins checkout beside this repository's main checkout (or `CODE_GOBLINS_DIR`), at `origin/main` as last fetched, and fails while the token file differs or any copied line is no longer in the board.
   The failure mode it closes: a hand-edited value, or a second palette growing beside the first, makes Scrawl drift from the board with nothing to notice it.
   `node scripts/sync-board-tokens.js` generates the token block and fonts; it does not generate component rules.
   Replace changed component rules by copying their current source verbatim, adapting Scrawl's markup and runtime to their contract rather than editing their values.
@@ -292,9 +292,11 @@ In this fork the review page is called Scrawl and wears the Code Goblins board's
   The sandboxed page has no microphone, `localStorage` or clipboard of its own, so the card asks with `lavish:dictate` for held keys or touch taps.
   The chrome starts only for an open card (`pageCardOpen`) on a fresh user gesture (`navigator.userActivation.isActive`), with the same `voice_id` the card reported in `lavish:selection`.
   That id distinguishes successive boxes, including two opened on the same element; it is not authorization.
-  Closing a card cancels recognition, and `lavish:dictated` carries its owning id so a late result cannot land in a replacement card.
+  Closing a card cancels its recognition; `lavish:dictated` carries the owning `voice_id` and an increasing `capture_id`, so late results cannot reach a replacement card or insert twice.
   The page is untrusted, so the open-card, user-activation, source and artifact-load checks remain required.
   Touch starts the native recognizer synchronously from the gesture, without opening a separate capture for a level meter; permission, recording and finishing have bounded deadlines and late callbacks are ignored after cancellation.
+  Stopping releases the active capture while its recognizer may still finish; pending results retain their destination and insert in capture order without changing a newer capture's state or focus.
+  Cancellation is scoped to the input that requested it, so a late annotation close cannot cancel a newer chat capture.
   A Copy in the card's list goes through `lavish:copyDictation`, which writes only one of this review's own dictations.
 - For text annotations, `prompt.selector` is the common ancestor/container selector, not the complete identity. Use the `target` range boundaries and snapshot context to locate the exact selected text.
 - For non-whiteboard Mermaid diagram nodes, a click annotates the whole rendered `<g>` node - not the sub-shape under the cursor - and hover highlights the same node. `SessionStore.normalizeTarget` routes these targets through `normalizeMermaidNodeTarget`, which strips them to the fixed `type`/`diagramId`/`nodeId`/`label`/`selector` shape, while text-range and other/legacy targets pass through unchanged.

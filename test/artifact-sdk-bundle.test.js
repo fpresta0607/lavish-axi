@@ -1419,7 +1419,7 @@ test("the held keys in an open annotation card ask the chrome to listen, and wha
   const down = sdk.documentKey("keydown", dictationKeyEvent);
   const up = sdk.documentKey("keyup", dictationKeyEvent);
   const voiceId = sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id;
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "the pricing", voice_id: voiceId });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "the pricing", voice_id: voiceId, capture_id: 1 });
 
   assert.deepEqual(dictateMessages(sdk), ["start", "stop"]);
   assert.equal(down.defaultPrevented, true, "the held space never types into the card");
@@ -1450,10 +1450,10 @@ test("dictated text belongs to the requesting annotation box and is inserted onc
   const secondId = sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id;
   const textarea = sdk.card().querySelector("textarea");
 
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "wrong box", voice_id: firstId });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "wrong box", voice_id: firstId, capture_id: 1 });
   assert.equal(textarea.value, "");
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId });
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId, capture_id: 2 });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "right box", voice_id: secondId, capture_id: 2 });
   assert.equal(textarea.value, "right box");
 });
 

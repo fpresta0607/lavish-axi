@@ -1424,7 +1424,7 @@ function setSheetOpen(open) {
   const next = Boolean(open);
   const changed = next !== sheetOpen;
   sheetOpen = next;
-  if (!next && voiceTarget === VOICE_TO_CHAT) voiceDictation.dispose();
+  if (!next) voiceDictation.dispose(VOICE_TO_CHAT);
   try {
     if (sheetOpen) sessionStorage.setItem(sheetStorageKey, "1");
     else sessionStorage.removeItem(sheetStorageKey);
@@ -1625,7 +1625,7 @@ function dropQueuedPrompt(queueKey) {
 // sandboxed artifact, and the server checks them again like any note's.
 function setPageSelection(selection, cardOpen, voiceId = "") {
   const nextVoiceId = typeof voiceId === "string" && voiceId.length <= 128 ? voiceId : "";
-  if (voiceTarget === VOICE_TO_PAGE && (!cardOpen || nextVoiceId !== pageVoiceId)) voiceDictation.dispose();
+  if (!cardOpen || nextVoiceId !== pageVoiceId) voiceDictation.dispose(VOICE_TO_PAGE);
   pageVoiceId = nextVoiceId;
   pageSelection =
     selection && typeof selection === "object"
@@ -1641,7 +1641,7 @@ function setPageSelection(selection, cardOpen, voiceId = "") {
   renderComposerAnchor();
   // An open box draws its voice bubble from the chrome's state; once it closes, it stops listening.
   if (pageCardOpen) postPageVoice(true);
-  else if (voiceTarget === VOICE_TO_PAGE) voiceDictation.dispose();
+  else voiceDictation.dispose(VOICE_TO_PAGE);
 }
 
 // The line above the message box names what a note written there goes on; with nothing selected
@@ -2070,44 +2070,51 @@ async function openMicrophone(signal) {
   }
 }
 
-// One dictation at a time. With a microphone, the recognizer listens to the track it opens, so the
-// waveform and the words come from one capture. What was heard is reported once listening ends.
+// One capture at a time. Stopped recognizers may still return words, in capture order, while a
+// fresh gesture starts the next capture. Each result keeps the destination that requested it.
 function createDictation(events, recognition, lang, microphone) {
   let active = null;
+  const pending = new Set();
 
   function phase(current, value) {
     current.phase = value;
-    events.phase(value);
+    if (!active || active === current) events.phase(value);
   }
 
   function release(current) {
-    current.captureAbort.abort();
-    current.capture?.close();
+    const capture = current.capture;
     current.capture = null;
+    capture?.close();
+    current.captureAbort.abort();
   }
 
   function finish(current, deliver) {
-    if (active !== current) return;
-    active = null;
+    if (!pending.has(current) || current.text !== null) return;
+    if (active === current) active = null;
     clearTimeout(current.timer);
-    release(current);
-    const text = deliver ? spokenText(current.phrases) : "";
+    current.text = deliver ? spokenText(current.phrases) : "";
     current.recognizer.onstart = null;
     current.recognizer.onresult = null;
     current.recognizer.onerror = null;
     current.recognizer.onend = null;
+    release(current);
     if (!deliver && current.started) current.recognizer.abort();
-    // Deliver before becoming idle so a new target cannot take these words.
-    if (text) events.heard(text);
-    phase(current, "idle");
+    for (const completed of pending) {
+      if (completed.text === null) break;
+      pending.delete(completed);
+      if (completed.text && !completed.isCancelled)
+        events.heard(completed.text, completed.context, !active && pending.size === 0);
+    }
+    if (!active) phase(current, pending.size ? "finishing" : "idle");
   }
 
   function deadline(current, milliseconds) {
     clearTimeout(current.timer);
     current.timer = setTimeout(() => {
-      if (active !== current) return;
+      if (!pending.has(current) || current.text !== null) return;
+      const shouldReport = !active || active === current;
       finish(current, false);
-      events.problem("Voice input timed out. Try again.");
+      if (shouldReport) events.problem("Voice input timed out. Try again.");
     }, milliseconds);
   }
 
@@ -2129,7 +2136,7 @@ function createDictation(events, recognition, lang, microphone) {
     }
   }
 
-  function start(direct = false) {
+  function start(direct = false, context = null) {
     if (active) return;
     const Recognition = recognition();
     if (!Recognition) {
@@ -2151,8 +2158,12 @@ function createDictation(events, recognition, lang, microphone) {
       phrases: [],
       phase: "requesting",
       timer: null,
+      text: null,
+      isCancelled: false,
+      context,
     };
     active = current;
+    pending.add(current);
     recognizer.continuous = true;
     recognizer.interimResults = false;
     recognizer.lang = lang;
@@ -2162,16 +2173,17 @@ function createDictation(events, recognition, lang, microphone) {
       deadline(current, 120_000);
     };
     recognizer.onresult = (event) => {
-      if (active !== current) return;
+      if (!pending.has(current) || current.text !== null) return;
       for (let index = event.resultIndex; index < event.results.length; index++) {
         if (event.results[index].isFinal !== false) current.phrases[index] = event.results[index][0].transcript;
       }
     };
     recognizer.onerror = (event) => {
-      if (active !== current) return;
+      if (!pending.has(current) || current.text !== null) return;
+      const shouldReport = !active || active === current;
       const note = dictationProblem(event.error);
       finish(current, false);
-      if (note) events.problem(note);
+      if (note && shouldReport) events.problem(note);
     };
     recognizer.onend = () => finish(current, true);
     phase(current, "requesting");
@@ -2203,16 +2215,17 @@ function createDictation(events, recognition, lang, microphone) {
   function stop() {
     const current = active;
     if (!current) return;
-    if (current.phase === "finishing") return;
     if (current.started) {
+      active = null;
       phase(current, "finishing");
-      release(current);
       deadline(current, 8000);
       try {
         current.recognizer.stop();
       } catch (error) {
         finish(current, false);
         events.problem(microphoneProblem(error));
+      } finally {
+        release(current);
       }
       return;
     }
@@ -2220,11 +2233,19 @@ function createDictation(events, recognition, lang, microphone) {
   }
 
   // Stops listening and reports nothing heard, for a composer that can no longer take text.
-  function dispose() {
-    if (active) finish(active, false);
+  function dispose(target = null) {
+    const cancelledCaptures = Array.from(pending).filter((current) => !target || current.context?.target === target);
+    for (const current of cancelledCaptures) current.isCancelled = true;
+    for (const current of cancelledCaptures) finish(current, false);
   }
 
-  return { start, stop, dispose, level: () => active?.capture?.level() || 0 };
+  return {
+    start,
+    stop,
+    dispose,
+    hasPending: (target) => Array.from(pending).some((current) => current.context?.target === target),
+    level: () => active?.capture?.level() || 0,
+  };
 }
 
 // A review whose record is broken reads as none, leaving the other reviews be.
@@ -2263,7 +2284,7 @@ function rememberDictation(text, at) {
 
 let voicePhase = "idle";
 let voiceMode = "hold";
-let voiceOwnerId = "";
+let voiceCaptureSequence = 0;
 let voiceSelection = null;
 let voiceTarget = VOICE_TO_CHAT;
 let voiceProblem = "";
@@ -2290,7 +2311,7 @@ const chatVoice = messageBox.createVoiceBubble(
     dictations: () => voiceDictations,
     paste: insertDictatedText,
     toggle: () => toggleVoice(VOICE_TO_CHAT),
-    cancel: () => voiceDictation.dispose(),
+    cancel: () => voiceDictation.dispose(VOICE_TO_CHAT),
     // A page served over plain http, such as an old tailnet link, has no clipboard.
     copy: navigator.clipboard ? (text) => navigator.clipboard.writeText(text) : null,
     // The room above the box, down from the top of the panel, which clips anything past it.
@@ -2303,10 +2324,18 @@ const chatVoice = messageBox.createVoiceBubble(
 );
 const voiceDictation = createDictation(
   {
-    heard(text) {
+    heard(text, context, shouldFocus) {
+      if (context.target === VOICE_TO_PAGE && (!pageCardOpen || context.ownerId !== pageVoiceId)) return;
       voiceDictations = rememberDictation(text, Date.now());
-      if (voiceTarget === VOICE_TO_PAGE) postToFrame({ type: "lavish:dictated", text, voice_id: voiceOwnerId });
-      else insertDictatedText(text, voiceSelection);
+      if (context.target === VOICE_TO_PAGE)
+        postToFrame({
+          type: "lavish:dictated",
+          text,
+          voice_id: context.ownerId,
+          capture_id: context.captureId,
+          focus: shouldFocus,
+        });
+      else insertDictatedText(text, context.selection, shouldFocus);
       chatVoice.refresh();
       postPageVoice();
     },
@@ -2321,7 +2350,7 @@ const voiceDictation = createDictation(
   navigator.mediaDevices?.getUserMedia ? openMicrophone : null,
 );
 
-function insertDictatedText(text, selection = null) {
+function insertDictatedText(text, selection = null, shouldFocus = true) {
   const next = messageBox.insertDictation(
     chatInput.value,
     selection?.start ?? chatInput.selectionStart,
@@ -2329,8 +2358,9 @@ function insertDictatedText(text, selection = null) {
     text,
   );
   chatInput.value = next.value;
-  chatInput.focus();
+  if (shouldFocus) chatInput.focus();
   chatInput.setSelectionRange(next.caret, next.caret);
+  if (selection) selection.start = selection.end = next.caret;
   hideSendHint();
 }
 
@@ -2367,7 +2397,7 @@ function renderVoice() {
     listening: voicePhase === "listening" && toChat,
     phase: toChat ? voicePhase : "idle",
     mode: voiceMode,
-    disabled: chatInput.disabled || (!toChat && voicePhase !== "idle"),
+    disabled: chatInput.disabled || (!toChat && voicePhase !== "idle" && voicePhase !== "finishing"),
   });
   const hint = messageBox.voiceStatus({ phase: voicePhase, mode: voiceMode });
   chatVoiceNote.textContent = toChat ? voiceProblem || hint : "";
@@ -2394,7 +2424,7 @@ function postPageVoice(force = false) {
     listening: voicePhase === "listening" && toPage,
     phase: toPage ? voicePhase : "idle",
     mode: voiceMode,
-    disabled: chatInput.disabled || (!toPage && voicePhase !== "idle"),
+    disabled: chatInput.disabled || (!toPage && voicePhase !== "idle" && voicePhase !== "finishing"),
     problem: toPage ? voiceProblem : "",
     canCopy: Boolean(navigator.clipboard),
     dictations: voiceDictations.slice(0, LISTED_DICTATIONS),
@@ -2406,23 +2436,28 @@ function postPageVoice(force = false) {
 }
 
 function startVoice(target, mode = "hold") {
-  if (chatInput.disabled || voicePhase !== "idle") return;
+  if (chatInput.disabled || (voicePhase !== "idle" && voicePhase !== "finishing")) return;
+  if (target === VOICE_TO_CHAT && !voiceDictation.hasPending(VOICE_TO_CHAT))
+    voiceSelection = { start: chatInput.selectionStart, end: chatInput.selectionEnd };
   voiceTarget = target;
   voiceMode = mode;
-  voiceOwnerId = target === VOICE_TO_PAGE ? pageVoiceId : "";
-  voiceSelection = target === VOICE_TO_CHAT ? { start: chatInput.selectionStart, end: chatInput.selectionEnd } : null;
   if (window.isSecureContext === false) {
     showVoiceProblem(VOICE_INSECURE_COPY + ": browsers refuse the microphone on plain http.");
     return;
   }
-  voiceDictation.start(mode === "tap");
+  voiceDictation.start(mode === "tap", {
+    target,
+    captureId: ++voiceCaptureSequence,
+    ownerId: target === VOICE_TO_PAGE ? pageVoiceId : "",
+    selection: target === VOICE_TO_CHAT ? voiceSelection : null,
+  });
   renderVoice();
 }
 
 function toggleVoice(target) {
-  if (voicePhase === "idle") startVoice(target, "tap");
+  if (voicePhase === "idle" || voicePhase === "finishing") startVoice(target, "tap");
   else if (voiceTarget === target && voiceMode === "tap") {
-    if (voicePhase === "requesting") voiceDictation.dispose();
+    if (voicePhase === "requesting") voiceDictation.dispose(target);
     else if (voicePhase === "listening") voiceDictation.stop();
   }
 }
@@ -2442,9 +2477,9 @@ function handlePageDictation(action, voiceId) {
   if (!pageCardOpen || voiceId !== pageVoiceId || !pageVoiceId) return;
   if (action === "start" && pageCardOpen && navigator.userActivation?.isActive) startVoice(VOICE_TO_PAGE);
   if (action === "toggle" && navigator.userActivation?.isActive) toggleVoice(VOICE_TO_PAGE);
+  if (action === "cancel") voiceDictation.dispose(VOICE_TO_PAGE);
   if (voiceTarget !== VOICE_TO_PAGE) return;
   if (action === "stop" && voiceMode === "hold") voiceDictation.stop();
-  if (action === "cancel") voiceDictation.dispose();
 }
 
 // Copy in the page's list goes through the chrome, which has the clipboard, and only for one of
@@ -2464,7 +2499,7 @@ function copyPageDictation(text) {
 // the whole page. Nothing is sent: every note waits for Send to Agent or Send & End. Returns false
 // when a pending or failed image chip holds the words back, so they stay in the box with it.
 function addComposerNote() {
-  if (voiceTarget === VOICE_TO_CHAT) voiceDictation.dispose();
+  voiceDictation.dispose(VOICE_TO_CHAT);
   if (chatAttachmentController.hasPending() || chatAttachmentController.hasErrors()) {
     chatAttachmentController.noteSendBlocked();
     return false;
@@ -5153,14 +5188,16 @@ document.addEventListener("keydown", handleVoiceKey, true);
 document.addEventListener("keyup", handleVoiceKey, true);
 // The page may never see a held shortcut's release once it loses focus, so that stops listening.
 window.addEventListener("blur", () => {
-  if (voicePhase !== "requesting") voiceDictation.dispose();
+  if (voicePhase === "requesting") return;
+  if (document.hasFocus()) voiceDictation.stop();
+  else voiceDictation.dispose();
 });
 window.addEventListener("pagehide", () => {
   voiceDictation.dispose();
   chatVoice.dispose();
 });
 chatInput.addEventListener("input", () => {
-  if (voiceTarget === VOICE_TO_CHAT) voiceDictation.dispose();
+  voiceDictation.dispose(VOICE_TO_CHAT);
 });
 document.addEventListener("visibilitychange", () => {
   if (document.hidden) voiceDictation.dispose();

@@ -995,10 +995,15 @@ body.lavish {
   margin: 0;
   font-size: 0.9375rem;
 }
-.handoff-banner {
+.handoff-banner.notice {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+}
+.handoff-banner .notice-actions {
+  grid-column: 2;
   flex-wrap: wrap;
 }
-.handoff-takeover {
+.handoff-banner .handoff-takeover {
   min-height: 36px;
   padding: 6px 16px;
   white-space: nowrap;

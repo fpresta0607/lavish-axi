@@ -600,7 +600,7 @@ export function createArtifactSdk(
   };
   // The open card's voice bubble and the text it dictates into.
   let voiceBoxSequence = 0;
-  /** @type {{ id: string, selection: { start: number, end: number } | null, bubble: ReturnType<typeof createVoiceBubble>, textarea: HTMLTextAreaElement, notify: (message: string, isProblem?: boolean) => void } | null} */
+  /** @type {{ id: string, selection: { start: number, end: number } | null, lastCaptureId: number, bubble: ReturnType<typeof createVoiceBubble>, textarea: HTMLTextAreaElement, notify: (message: string, isProblem?: boolean) => void } | null} */
   let activeVoice = null;
   // A Copy in the card's list waits for the chrome, which has the clipboard, to say how it went.
   /** @type {{ resolve: (value?: unknown) => void, reject: (reason?: unknown) => void } | null} */
@@ -2695,7 +2695,14 @@ export function createArtifactSdk(
       },
     );
     bubble.render(pageVoice);
-    activeVoice = { id: ATTACHMENT_NONCE + ":" + ++voiceBoxSequence, selection: null, bubble, textarea, notify };
+    activeVoice = {
+      id: ATTACHMENT_NONCE + ":" + ++voiceBoxSequence,
+      selection: null,
+      lastCaptureId: 0,
+      bubble,
+      textarea,
+      notify,
+    };
     textarea.addEventListener("input", () => requestDictation("cancel"));
 
     attachButton.onclick = () => attachInput.click();
@@ -2811,7 +2818,7 @@ export function createArtifactSdk(
   }
 
   // Dictated words land at the caret, as in the Conversation box, and are review context like typing.
-  function insertDictatedText(textarea, text, selection = null) {
+  function insertDictatedText(textarea, text, selection = null, shouldFocus = true) {
     const next = insertDictation(
       textarea.value,
       selection?.start ?? textarea.selectionStart,
@@ -2819,8 +2826,9 @@ export function createArtifactSdk(
       text,
     );
     textarea.value = next.value;
-    textarea.focus();
+    if (shouldFocus) textarea.focus();
     textarea.setSelectionRange(next.caret, next.caret);
+    if (selection) selection.start = selection.end = next.caret;
     scheduleReviewStateReport();
   }
 
@@ -2914,10 +2922,16 @@ export function createArtifactSdk(
     if (msg.type === "lavish:noteStatus") updateNoteStatus(msg.noteId, msg.status);
     if (msg.type === "lavish:voiceState") setPageVoice(msg);
     if (msg.type === "lavish:voiceLevels" && Array.isArray(msg.levels)) activeVoice?.bubble.showLevels(msg.levels);
-    if (msg.type === "lavish:dictated" && activeVoice?.selection && msg.voice_id === activeVoice.id) {
+    if (
+      msg.type === "lavish:dictated" &&
+      activeVoice?.selection &&
+      msg.voice_id === activeVoice.id &&
+      Number.isSafeInteger(msg.capture_id) &&
+      msg.capture_id > activeVoice.lastCaptureId
+    ) {
+      activeVoice.lastCaptureId = msg.capture_id;
       const selection = activeVoice.selection;
-      activeVoice.selection = null;
-      insertDictatedText(activeVoice.textarea, String(msg.text || ""), selection);
+      insertDictatedText(activeVoice.textarea, String(msg.text || ""), selection, msg.focus !== false);
     }
     if (msg.type === "lavish:dictationCopied" && pendingCopy) {
       if (msg.ok === true) pendingCopy.resolve();

@@ -1,5 +1,5 @@
 /* Rules copied word for word from the Code Goblins board's stylesheet (code-goblins
-   frontend/src/styles.css), so each part of Scrawl that has a counterpart on the board is drawn
+   frontend/src/styles.css and notice.css), so each part of Scrawl with a board counterpart is drawn
    by the board's own rule. Never edit a rule here: copy the board's current one.
    test/board-tokens.test.js fails when a line here is no longer in the board's stylesheet. */
 
@@ -48,8 +48,7 @@ button:focus:not(:focus-visible), summary:focus:not(:focus-visible), [tabindex]:
 .brand h1 { font-size: 1.75rem; white-space: nowrap; background: var(--brand-gradient); -webkit-background-clip: text; background-clip: text; color: transparent; }
 @media (forced-colors: active) { .brand h1 { background: none; color: CanvasText; } }
 .topbar-controls { display: flex; justify-content: flex-end; align-items: center; gap: 18px; min-width: 0; }
-.live-dot, .status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--accent-green); flex: none; }
-.live-dot.offline { background: var(--amber); }
+.status-dot { display: inline-block; width: 9px; height: 9px; border-radius: 50%; background: var(--accent-green); flex: none; }
 
 /* Status lines and their dots. */
 .plain-status { display: flex; align-items: center; gap: 8px; font-size: 1rem; font-weight: 700; line-height: 1.4; background: none; color: #c4d4df; }
@@ -78,14 +77,19 @@ button:focus:not(:focus-visible), summary:focus:not(:focus-visible), [tabindex]:
 @media (forced-colors: active) { .command-center-heading h2 { background: none; color: CanvasText; } }
 .command-center-heading h2 span { display: block; color: #b9c5cd; margin-top: 5px; }
 .context-pane { display: flex; flex-direction: column; min-width: 0; min-height: 0; overflow: hidden; border: 1px solid var(--glass-border); border-radius: var(--radius); background: var(--glass-bg), var(--hero-surface); box-shadow: var(--glass-shadow); }
-.update-banner { display: flex; flex: none; align-items: center; justify-content: space-between; gap: 12px; padding: 6px 8px 6px 16px; border: 1px solid var(--glass-border-hover); border-radius: var(--radius); background: var(--glass-bg-hover); color: #c9f2e2; font-weight: 700; }
-.update-banner .primary { min-height: 36px; padding: 6px 16px; }
-.panel-header { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px 20px; padding: 18px 28px 20px; border-bottom: 1px solid var(--border); flex: none; }
+.notice { display: inline-flex; align-items: flex-start; gap: 8px; box-sizing: border-box; max-width: 100%; min-width: 0; padding: 4px 12px; border: 1px solid var(--glass-border); border-radius: 14px; background: var(--hero-surface); color: #e3ecef; font-size: .9375rem; font-weight: 500; line-height: 1.45; text-align: left; overflow-wrap: anywhere; }
+.notice.box { display: flex; gap: 10px; padding: 10px 14px; border-radius: var(--radius); }
+.notice-dot { flex: none; width: 8px; height: 8px; margin-top: calc(.725em - 4px); border-radius: 50%; background: var(--muted); }
+.notice-words { flex: 1; min-width: 0; }
+.notice.box > .notice-words { display: grid; gap: 4px; }
+.notice-actions { display: flex; flex: none; align-items: center; gap: 8px; align-self: center; margin: -2px -4px -2px 0; }
+.notice-actions button { min-height: 32px; padding: 4px 14px; }
+.panel-header { display: grid; grid-template-columns: auto minmax(0, 1fr); align-items: center; gap: 14px 20px; padding: 18px 28px 20px; flex: none; }
 .panel-header .goblin-avatar { width: 88px; height: 88px; }
 .panel-identity { display: grid; gap: 4px; min-width: 0; }
-.panel-header h2 { font-size: clamp(1.625rem, 2.4vw, 2rem); line-height: 1.2; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
-.panel-header .project-label { font-size: 1.0625rem; }
-.panel-header .muted { color: var(--muted); }
+.panel-header h2 { font-size: clamp(1.625rem, 2.4vw, 2rem); line-height: 1.2; overflow-wrap: anywhere; }
+:is(.panel-header, .panel-header-details) .project-label { font-size: 1.0625rem; }
+:is(.panel-header, .panel-header-details) .muted { color: var(--muted); }
 .panel-status { font-size: 1.0625rem; }
 .panel-actions { grid-column: 1 / -1; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; }
 .panel-header.compact { gap: 10px 14px; padding: 10px 18px 12px; }
