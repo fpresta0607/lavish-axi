@@ -1419,7 +1419,7 @@ test("the held keys in an open annotation card ask the chrome to listen, and wha
   const down = sdk.documentKey("keydown", dictationKeyEvent);
   const up = sdk.documentKey("keyup", dictationKeyEvent);
   const voiceId = sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id;
-  sdk.sendChromeMessage({ type: "lavish:dictated", text: "the pricing", voice_id: voiceId });
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "the pricing", voice_id: voiceId, capture_id: 1 });
 
   assert.deepEqual(dictateMessages(sdk), ["start", "stop"]);
   assert.equal(down.defaultPrevented, true, "the held space never types into the card");
