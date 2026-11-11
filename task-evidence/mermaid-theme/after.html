@@ -69,9 +69,11 @@
       function diagramLook() {
         const [r, g, b, a] = pageBackground();
         const style = getComputedStyle(document.documentElement);
-        const accent = style.getPropertyValue("--accent-green").trim() || style.getPropertyValue("--color-accent").trim();
+        const accent =
+          style.getPropertyValue("--accent-green").trim() || style.getPropertyValue("--color-accent").trim();
         return {
-          themeVariables: a > 0 ? { edgeLabelBackground: `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})` } : {},
+          themeVariables:
+            a > 0 ? { edgeLabelBackground: `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})` } : {},
           themeCSS: accent
             ? `.node.new rect, .node.new polygon, .node.new circle, .node.new ellipse, .node.new path { stroke: ${accent}; stroke-width: 2px; }
               .flowchart-link.edge-pattern-dashed, .flowchart-link.edge-pattern-dotted { stroke: ${accent}; }`
