@@ -1,8 +1,8 @@
 /* A page in the Code Goblins board's look. A page links /design/board-tokens.css (the board's
    own token block, by value) and then this file, which lays plain HTML and a small set of page
-   patterns out in those tokens: a report, a comparison, a before and after, a table of
-   evidence, a decision. A colour written out here is one the board's stylesheet writes out for
-   the same kind of element, never a new one. */
+   patterns out in those tokens: a report, a comparison, an explore page the reader operates, a
+   before and after, a table of evidence, a decision. A colour written out here is one the board's
+   stylesheet writes out for the same kind of element, never a new one. */
 *,
 *::before,
 *::after {

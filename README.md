@@ -304,7 +304,7 @@ pnpm link
   Themes are kept in the state directory, never in the project, and every value is checked: colours are six-digit hex, text must read at 4.5:1 on each surface it sits on, and no surface may be pure white.
   The page's colour is in the review page's head before its stylesheet, so nothing paints white while it loads, and a page that sets no colours of its own is shown on the frame's page colours rather than the browser's white sheet. A page with colours of its own keeps them.
 - **Pages in the board's look** - A page with no design direction of its own starts in the board's look by linking two stylesheets the review server serves, `/design/board-tokens.css` and `/design/board-page.css`.
-  `lavish-axi design` lists them with five page patterns (a report, a comparison, a before and after, a table of evidence, a decision); a page about another product still wears that product's design.
+  `lavish-axi design` lists them with six page patterns (a report, a comparison, an explore page the reader operates, a before and after, a table of evidence, a decision); a page about another product still wears that product's design.
   Export and share carry both stylesheets inline, fonts included; opened as a bare file with no server, the links resolve to nothing.
 - **Choices on a page** - A page that asks for a pick declares it as data in a `<script type="application/json" data-lavish-choices>`: an `id`, the `question`, two or more `options`, and optionally `recommended`, `asker` and `detail`, for one question or a list.
   Scrawl draws each question where the declaration sits as the board draws one: who asks, a plain radio list with the recommended option first and marked, **Other** for a written answer, and **Send** and **End** buttons.

@@ -378,7 +378,7 @@ export function createDesignOutput() {
     },
     board_look: {
       use_when:
-        "The default for a page with no design direction of its own, step (3) of the priority order: a report, a comparison, a before and after, a table of evidence, a decision. A page that shows another product's UI wears that product's design instead, and a page may take any layout its content calls for.",
+        "The default for a page with no design direction of its own, step (3) of the priority order: a report, a comparison, an explore page the reader operates, a before and after, a table of evidence, a decision. A page that shows another product's UI wears that product's design instead, and a page may take any layout its content calls for.",
       stylesheet_snippet: BOARD_LOOK_SNIPPET,
       how: "Paste the two links into your `<head>`. The review server serves both, so the page stays small and always wears the board's current colours, its three fonts, edges and radii; `lavish-axi export` and `lavish-axi share` carry them inline, fonts included. Opened as a bare file the links resolve to nothing, so open the page through lavish-axi. Write plain semantic HTML and add only the classes the patterns below use. Add CSS of your own only for what they do not cover, and take every colour from the tokens (`var(--accent-green)`, `var(--mint)`, `var(--muted)`, `var(--glass-border)`, `var(--amber)`, `var(--red)`), never a new one.",
       patterns: BOARD_PAGE_PATTERNS,
