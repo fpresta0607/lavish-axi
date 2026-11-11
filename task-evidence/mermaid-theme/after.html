@@ -42,13 +42,18 @@
         ];
       }
 
+      // The colour the page is actually painted, body over html, as [r, g, b, a].
+      function pageBackground() {
+        const rootBackground = toRgba(getComputedStyle(document.documentElement).backgroundColor);
+        const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
+        return compositeRgba(bodyBackground, rootBackground);
+      }
+
       function pageIsDark() {
         // Trust the actually-rendered page background so this works with any theming
         // mechanism: prefers-color-scheme, a data-theme attribute, or plain CSS.
         const root = document.documentElement;
-        const rootBackground = toRgba(getComputedStyle(root).backgroundColor);
-        const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
-        const [r, g, b, a] = compositeRgba(bodyBackground, rootBackground);
+        const [r, g, b, a] = pageBackground();
         if (a > 0) {
           return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
         }
@@ -58,7 +63,26 @@
         return darkQuery.matches;
       }
 
-      const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.innerHTML }));
+      // The page's own colours on a diagram: an edge label sits on the page's background instead of
+      // Mermaid's grey box, and a node marked new (`class queue,worker new`) and a dashed edge take
+      // the page's accent, the board look's --accent-green or DaisyUI's --color-accent.
+      function diagramLook() {
+        const [r, g, b, a] = pageBackground();
+        const style = getComputedStyle(document.documentElement);
+        const accent = style.getPropertyValue("--accent-green").trim() || style.getPropertyValue("--color-accent").trim();
+        return {
+          themeVariables: a > 0 ? { edgeLabelBackground: `rgb(${Math.round(r)}, ${Math.round(g)}, ${Math.round(b)})` } : {},
+          themeCSS: accent
+            ? `.node.new rect, .node.new polygon, .node.new circle, .node.new ellipse, .node.new path { stroke: ${accent}; stroke-width: 2px; }
+              .flowchart-link.edge-pattern-dashed, .flowchart-link.edge-pattern-dotted { stroke: ${accent}; }`
+            : "",
+        };
+      }
+
+      const diagrams = [...document.querySelectorAll(".mermaid, [data-lavish-mermaid]")].map((el) => ({
+        el,
+        src: el.innerHTML,
+      }));
       let applied;
       let rendering = false;
       let queued = false;
@@ -73,8 +97,10 @@
           while (queued) {
             queued = false;
             const theme = pageIsDark() ? "dark" : "default";
-            if (theme === applied) continue;
-            mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict" });
+            const look = diagramLook();
+            const key = JSON.stringify([theme, look]);
+            if (key === applied) continue;
+            mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict", ...look });
             for (const { el, src } of diagrams) {
               el.removeAttribute("data-processed");
               el.innerHTML = src;
@@ -85,7 +111,7 @@
               console.error("Mermaid diagram render failed:", error);
               return;
             }
-            applied = theme;
+            applied = key;
           }
         } finally {
           rendering = false;
