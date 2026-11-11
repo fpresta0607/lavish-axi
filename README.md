@@ -218,7 +218,7 @@ pnpm link
   It opens the note in the composer's message box with its words and its images, so a note is reworded as it was written: typed, dictated, with images added or taken off (the Overlord, 2026-11-11).
   The line above the box reads **Editing** and names what the note is on; Enter saves the note in its place, Shift+Enter inserts a newline, and Escape or the line's X keeps the note as it was.
   What the box already held joins the queued notes first, and opening another note saves the one that was open.
-  A send saves the open note with the words it has now; a note whose new image is still uploading or failed holds the send back and says so.
+  A send saves the open note with the words it has now; an image in it that is still uploading or failed holds Enter's save and a send back, and the box says why.
   A choice, a layout-issue batch, and a whiteboard note can only be removed.
   A send also takes an open annotation card's unfinished words along as a note, so they are never lost to Send & End; a card whose image is still uploading or failed, or a page that does not answer within 2 seconds, holds the whole send back and says so, and sending again goes without that card.
   **End session** with notes waiting sends them with the end, as **Send & End** does, so ending never drops a note; with none waiting it only ends the review.
@@ -238,7 +238,7 @@ pnpm link
   On a touch screen, tap the microphone to start and tap again to finish, in either box; the first tap may ask for microphone permission, and another tap while permission is pending cancels.
   After stopping, another tap can start a fresh capture while earlier words finish; results arrive in capture order in the box that requested them.
   Touch dictation uses the browser recognizer's own microphone, so its recording indicator does not measure audio levels.
-  Waiting for permission, listening, finishing and errors are shown on the owning box; closing that box, editing its draft, leaving the page or ending the review cancels unfinished dictation.
+  Waiting for permission, listening, finishing and errors are shown on the owning box; closing that box, picking an option that hides a written answer, editing its draft, leaving the page or ending the review cancels unfinished dictation.
   The microphone at the bottom right of each message box is the Code Goblins board's square voice bubble: a mouse click, a touch hold or its context menu opens the review's recent dictations, the newest five of the ten this browser keeps for each of the twenty reviews used most recently, each with Copy and Paste into the box, and Escape or its close button closes them.
 - **Agent presence** - The browser shows when an agent is listening or working, and never warns that none is: what you send waits for the next poll.
   A poll that ends keeps the page listening for 10 seconds, so a supervisor that polls in rounds never looks like it left between them.
@@ -311,7 +311,7 @@ pnpm link
   **Send to Agent** and **Send & End** in the composer carry the answer the same way.
   Both buttons stay disabled until an option is selected or a nonempty Other answer is written.
   The written answer is the composer's message box: it is typed or dictated, takes pasted, dropped, or picked images that go with the answer as its `attachments`, and Enter finishes writing without adding a line.
-  An option carries no image, and an image that is still uploading or failed holds a send back as it does on an annotation card.
+  An option carries no image, and an image that is still uploading or failed holds a send back as it does on an annotation card while **Other** is picked; a box hidden behind a picked option holds nothing back.
   The answer is a prompt with tag `choice` whose prompt text is the option exactly as declared (or what was written for Other) and whose text is the question, so that exact text is what the polling agent receives.
   The card then closes on what was chosen and follows its delivery with the same check marks; removing the answer from the queued notes opens the question again.
   A pick, and an answer already sent, survive a reload of the page and are never sent twice.
