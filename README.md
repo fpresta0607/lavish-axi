@@ -311,7 +311,7 @@ pnpm link
   **Send to Agent** and **Send & End** in the composer carry the answer the same way.
   Both buttons stay disabled until an option is selected or a nonempty Other answer is written.
   The written answer is the composer's message box: it is typed or dictated, takes pasted, dropped, or picked images that go with the answer as its `attachments`, and Enter finishes writing without adding a line.
-  An option carries no image, and an image that is still uploading or failed holds a send back as it does on an annotation card while **Other** is picked; a box hidden behind a picked option holds nothing back.
+  An option carries no image, and an image that is still uploading or failed holds a send back as it does on an annotation card while **Other** is picked. A box hidden behind a picked option holds nothing back.
   The answer is a prompt with tag `choice` whose prompt text is the option exactly as declared (or what was written for Other) and whose text is the question, so that exact text is what the polling agent receives.
   The card then closes on what was chosen and follows its delivery with the same check marks; removing the answer from the queued notes opens the question again.
   A pick, and an answer already sent, survive a reload of the page and are never sent twice.
