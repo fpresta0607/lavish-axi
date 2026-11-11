@@ -3337,7 +3337,9 @@ export function createArtifactSdk(
       // The images an answer carried before a reload, put back on the box the next time it is drawn.
       /** @type {Array<{ id: string, name: string }>} */
       restoredImages: [],
-      holdsUnreadyImage: () => Boolean(card.box?.holdsUnreadyImage()),
+      // Only a written answer takes its box's images, so a box hidden behind a picked option holds
+      // nothing back.
+      holdsUnreadyImage: () => card.selection === "other" && Boolean(card.box?.holdsUnreadyImage()),
       render() {
         if (card.box) {
           card.box.destroy();
@@ -3468,6 +3470,8 @@ export function createArtifactSdk(
       card.selection = String(control.value);
       noteAnswer();
       syncControls();
+      // Whether the written answer's images hold a send back turns on what is picked.
+      reportSelection();
       scheduleReviewStateReport();
       // Other puts him in its box, ready to write or dictate.
       if (card.selection === "other") card.box?.textarea.focus();

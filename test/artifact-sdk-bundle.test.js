@@ -1437,6 +1437,81 @@ test("an option he picks carries no image, even with one in the written answer's
   assert.equal(note.prompt.attachments, undefined);
 });
 
+for (const { kind, size } of [
+  { kind: "an image still uploading", size: 10 },
+  { kind: "an image too big to attach", size: 10 ** 12 },
+]) {
+  test(`${kind} in a written answer he left for an option holds back no send`, () => {
+    const sdk = bootSdk({ choices: PLAN_QUESTION });
+    const [form] = sdk.choiceForms();
+    pick(form, "other");
+    write(form, "Park it");
+    const attachInput = answerPart(form, "AttachInput");
+    attachInput.files = [{ name: "plan.png", type: "image/png", size, arrayBuffer: () => new Promise(() => {}) }];
+    fire(attachInput, "change");
+    assert.equal(sdk.selection().card, true, "while Other is picked, its box holds a send back");
+
+    pick(form, "option:Keep 300 s");
+
+    assert.equal(sdk.selection().card, false, "the chrome is told the hidden box holds nothing back");
+    sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-hidden" });
+    const reply = sdk.posted.findLast((message) => message.type === "lavish:draftCommitted");
+    assert.equal(reply.committed, true, "a send from the panel goes");
+    fire(form, "submit");
+    assert.equal(promptMessages(sdk).at(-1).type, "lavish:sendQueuedPrompts", "and so does the card's Send");
+  });
+}
+
+test("a card and a written answer uploading at once each get their own image back", async () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "other");
+  write(form, "Park it");
+  attachTo(sdk, answerPart(form, "AttachInput"), "answer.png");
+  sdk.click(appendTo(sdk.body, cell("p", "Just prose")));
+  attachTo(sdk, boxPart(sdk.card(), "AttachInput"), "card.png");
+  await new Promise((resolve) => setImmediate(resolve));
+  const [answerUpload, cardUpload] = sdk.posted.filter((message) => message.type === "lavish:uploadAttachment");
+  const CARD_IMAGE_ID = "b".repeat(64) + ".png";
+
+  // The results come back in the other order, and every box hears both.
+  for (const [upload, id] of [
+    [cardUpload, CARD_IMAGE_ID],
+    [answerUpload, IMAGE_ID],
+  ]) {
+    sdk.sendChromeMessage({
+      type: "lavish:attachmentResult",
+      nonce: upload.nonce,
+      localId: upload.localId,
+      ok: true,
+      id,
+    });
+  }
+
+  const answer = promptMessages(sdk).findLast((message) => message.prompt?.tag === "choice");
+  assert.equal(JSON.stringify(answer.prompt.attachments), JSON.stringify([{ id: IMAGE_ID, name: "answer.png" }]));
+  const note = sdk.queue("Look here");
+  assert.equal(JSON.stringify(note.prompt.attachments), JSON.stringify([{ id: CARD_IMAGE_ID, name: "card.png" }]));
+});
+
+test("a file dropped on a written answer stays on the page, and one it cannot take holds a send", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "other");
+  write(form, "Park it");
+  let isPrevented = false;
+
+  fire(form.querySelector(".written-answer"), "drop", {
+    preventDefault() {
+      isPrevented = true;
+    },
+    dataTransfer: { types: ["Files"], files: [{ name: "plan.pdf", type: "application/pdf" }] },
+  });
+
+  assert.equal(isPrevented, true, "the browser never opens the dropped file in the frame");
+  assert.equal(sdk.selection().card, true, "the refused file shows on the box and holds a send back");
+});
+
 test("Enter in a written answer keeps the answer and adds no line", () => {
   const sdk = bootSdk({ choices: PLAN_QUESTION });
   const [form] = sdk.choiceForms();
