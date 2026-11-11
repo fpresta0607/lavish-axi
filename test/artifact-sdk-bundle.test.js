@@ -1765,3 +1765,27 @@ test("only the box he is in shows the chrome listening", () => {
   assert.equal(boxPart(sdk.card(), "Voice").getAttribute("aria-label"), "Listening");
   assert.notEqual(answerPart(form, "Voice").getAttribute("aria-label"), "Listening", "the other box's bubble rests");
 });
+
+// Hiding a written answer behind a picked option leaves its microphone with nowhere to listen: the
+// chrome is told to stop, and no dictated word lands in a box the reader cannot see.
+test("picking a declared option stops the written answer's dictation", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "other");
+  const answer = answerPart(form, "Input");
+  fire(answer, "focus");
+  const answerVoice = sdk.selection().voice_id;
+  assert.match(answerVoice, /\S/);
+  sdk.documentKey("keydown", dictationKeyEvent);
+  sdk.documentKey("keyup", dictationKeyEvent);
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "park it", voice_id: answerVoice, capture_id: 1 });
+  assert.equal(answer.value, "park it");
+
+  pick(form, "option:Keep 300 s");
+
+  assert.equal(form.querySelector(".written-answer").hidden, true);
+  assert.deepEqual(dictateMessages(sdk), ["start", "stop", "cancel"], "the chrome is told to stop listening");
+  assert.equal(sdk.selection().voice_id, "", "and that he is in no box");
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "invisible", voice_id: answerVoice, capture_id: 2 });
+  assert.equal(answer.value, "park it", "nothing lands in the box he cannot see");
+});

@@ -1027,10 +1027,7 @@ export function createArtifactSdk(
       // An image still uploading, or one that failed: adding the note now would drop it.
       holdsUnreadyImage: () => attachments.hasPending() || attachments.hasErrors(),
       destroy() {
-        if (activeVoice === voice) {
-          requestDictation("cancel");
-          activeVoice = null;
-        }
+        releaseVoice(voice);
         voice.bubble.dispose();
         voiceBoxes.delete(voice);
         attachmentControllers.delete(attachments);
@@ -1056,6 +1053,15 @@ export function createArtifactSdk(
     if (activeVoice === voice) return;
     if (activeVoice) activeVoice.selection = null;
     activeVoice = voice;
+    renderVoiceBubbles();
+  }
+
+  // A box that stops being reachable gives up the microphone, so the chrome stops listening for
+  // it and no dictated words land where he cannot see them.
+  function releaseVoice(voice) {
+    if (activeVoice !== voice) return;
+    requestDictation("cancel");
+    activeVoice = null;
     renderVoiceBubbles();
   }
 
@@ -3421,7 +3427,11 @@ export function createArtifactSdk(
     // whether that answer is in the notes.
     function syncControls() {
       const written = /** @type {HTMLElement | null} */ (form.querySelector(".written-answer"));
-      if (written) written.hidden = card.selection !== "other";
+      if (written) {
+        written.hidden = card.selection !== "other";
+        // A box hidden behind a picked option is not the box he is in any more.
+        if (written.hidden && card.box) releaseVoice(card.box.voice);
+      }
       const hasAnswer = Boolean(choiceAnswer(question, card.selection, card.written));
       for (const selector of [".send-decision", ".end-decision"]) {
         const button = /** @type {HTMLButtonElement | null} */ (form.querySelector(selector));
