@@ -4,3 +4,7 @@
 commands:
   prepare: "pnpm install --frozen-lockfile"
   test: "pnpm check"
+# This fork's work merges into code-goblins, not its default branch main, so
+# the gate rebases onto, reviews against and opens pull requests to code-goblins.
+pr:
+  base_branch: code-goblins
