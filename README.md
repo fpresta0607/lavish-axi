@@ -214,7 +214,12 @@ pnpm link
   **Send to Agent** delivers every queued note in one request and keeps the review open; **Send & End** delivers every queued note in one request and ends the review; both deliver the notes in the order they were written.
   A note written in the composer while an element, a text selection, a table cell, or a diagram node is selected in the page goes on that selection, as a note from its annotation card would: the line above the message box names it, and its button puts the note on the whole page instead.
   A note written with nothing selected is about the whole page: its anchor line says **whole page**, and the agent receives it with tag `message` and text `Whole page`.
-  Each queued note you wrote has an edit control beside its remove control: Enter saves the new words, Shift+Enter inserts a newline, and Escape keeps the note as it was; a choice, a layout-issue batch, and a whiteboard note can only be removed.
+  Each queued note you wrote has an edit control beside its remove control.
+  It opens the note in the composer's message box with its words and its images, so a note is reworded as it was written: typed, dictated, with images added or taken off (the Overlord, 2026-11-11).
+  The line above the box reads **Editing** and names what the note is on; Enter saves the note in its place, Shift+Enter inserts a newline, and Escape or the line's X keeps the note as it was.
+  What the box already held joins the queued notes first, and opening another note saves the one that was open.
+  A send saves the open note with the words it has now; a note whose new image is still uploading or failed holds the send back and says so.
+  A choice, a layout-issue batch, and a whiteboard note can only be removed.
   A send also takes an open annotation card's unfinished words along as a note, so they are never lost to Send & End; a card whose image is still uploading or failed, or a page that does not answer within 2 seconds, holds the whole send back and says so, and sending again goes without that card.
   **End session** with notes waiting sends them with the end, as **Send & End** does, so ending never drops a note; with none waiting it only ends the review.
   The agent receives the notes as one ordinary `lavish-axi poll` feedback set whose `prompts` keep their shape: `uid`, `prompt`, `selector`, `tag`, and `text` for each, with `target` and `attachments` when the note carries them.
@@ -223,14 +228,12 @@ pnpm link
   In this fork the annotation card behaves like the Code Goblins board's diff comment, except that nothing is sent from it: Enter adds the annotation to the queued notes, Shift+Enter inserts a newline, and Escape cancels.
   Ctrl+Enter (Cmd+Enter on macOS) does the same as Enter.
   Cancelling, by Escape or the Cancel button, keeps what you typed for that element's next card, so a stray Escape loses nothing; a card holding an image stays open on Escape, because an image has nowhere to be kept.
-  Once added, the card shrinks in place to a chip that names what the note is about, shows what it says, and carries a clock while the note waits for a send, then a check mark while it is on its way.
-  The chip closes by itself, and only itself, once the conversation carries the note.
-  A note that falls back to the queue after a failed send keeps its chip and its words and says so on the chip, and the chip closes once a retry gets the note through.
-  The chip offers a new comment on the same thing and a close button.
+  Once added, the card is gone and leaves nothing on the page: no chip, no outline, no pin, and nothing selected (the Overlord, 2026-11-11).
+  The note shows in the queued notes of the Conversation panel, where it is reworded or removed and where its delivery is followed.
   Cmd+I or Ctrl+I toggles between annotate and explore mode from either the browser chrome or the artifact iframe, including while focus is in a textarea or control; the **Annotate** and **Explore** halves of the mode pill in the top bar choose a mode directly.
-  The annotation card's text box is the composer's message box, drawn by the same component (`src/message-box.js`), with the same paperclip, voice bubble, pasted images and dictation.
+  Every box you write to the agent in is the composer's message box, drawn by the same component (`src/message-box.js`), with the same paperclip, voice bubble, pasted images and dictation: the composer itself, where a queued note is also reworded, the annotation card, and the written answer of a page's question.
   Holding Ctrl+Shift+Space while focus is in the browser chrome dictates into the composer through the browser's own speech recognition, with a live level meter where supported; releasing any of those keys stops.
-  Holding it while an annotation card is open in the page dictates into that card instead: the chrome listens for the sandboxed page, and only on a key press the reader just made.
+  Holding it while you are in a message box in the page, an annotation card or a question's written answer, dictates into that box instead: the chrome listens for the sandboxed page, and only on a key press the reader just made.
   What you said lands in the message box at the caret and becomes a note only when you add it; a browser without speech recognition shows the microphone disabled, and a blocked microphone is explained under the composer or on the card.
   On a touch screen, tap the microphone to start and tap again to finish, in either box; the first tap may ask for microphone permission, and another tap while permission is pending cancels.
   After stopping, another tap can start a fresh capture while earlier words finish; results arrive in capture order in the box that requested them.
@@ -263,7 +266,7 @@ pnpm link
   Clicking an element inside a table also carries the cell's visible row and column names alongside the exact CSS locator, so filtered or sorted rows do not make feedback look misdirected.
   When merged cells make either name ambiguous, Lavish leaves that name out rather than guessing; an explicit `<th scope="row">` remains authoritative even when a `rowspan` makes the row's position ambiguous.
   The CSS locator still points at the exact element you clicked, so an annotation with an omitted name is only less descriptive, never mislabelled.
-- **Image attachments** - Attach reference images (PNG, JPEG, WebP) in either the Conversation composer or an annotation card by pasting, drag-dropping, or using the paperclip icon at the bottom left of its text box; each image shows a thumbnail chip with upload, remove, retry, and error states. If a sent image is later evicted under the attachment storage limits, its transcript-history thumbnail becomes an **Image expired** placeholder.
+- **Image attachments** - Attach reference images (PNG, JPEG, WebP) in the Conversation composer, an annotation card, or the written answer of a page's question by pasting, drag-dropping, or using the paperclip icon at the bottom left of its text box; each image shows a thumbnail chip with upload, remove, retry, and error states. If a sent image is later evicted under the attachment storage limits, its transcript-history thumbnail becomes an **Image expired** placeholder.
   A paste containing both text and images preserves the text while attaching the images (a copied file's own name or path is treated as placeholder and not pasted). Conversation messages may contain text and images together or images only.
   Images are stored under the state dir and the queued prompt carries a server-generated absolute `path` and content-hash `id` (plus mime and dimensions) - never the raw bytes - so `lavish-axi poll` hands the agent a local file path to open.
   Limits are `LAVISH_AXI_MAX_ATTACHMENT_BYTES` (default 10 MiB per image), `LAVISH_AXI_MAX_ATTACHMENTS_PER_PROMPT` (default 4), and `LAVISH_AXI_MAX_PROMPT_ATTACHMENT_BYTES` (default 25 MiB per prompt); if any image is missing or any prompt breaches a count or byte cap, the entire send batch is rejected, the queue is preserved, and the reason is surfaced in the composer rather than silently dropping images.
@@ -307,6 +310,8 @@ pnpm link
   **End** sends every queued note, this answer with them, and ends the review in the same request.
   **Send to Agent** and **Send & End** in the composer carry the answer the same way.
   Both buttons stay disabled until an option is selected or a nonempty Other answer is written.
+  The written answer is the composer's message box: it is typed or dictated, takes pasted, dropped, or picked images that go with the answer as its `attachments`, and Enter finishes writing without adding a line.
+  An option carries no image, and an image that is still uploading or failed holds a send back as it does on an annotation card.
   The answer is a prompt with tag `choice` whose prompt text is the option exactly as declared (or what was written for Other) and whose text is the question, so that exact text is what the polling agent receives.
   The card then closes on what was chosen and follows its delivery with the same check marks; removing the answer from the queued notes opens the question again.
   A pick, and an answer already sent, survive a reload of the page and are never sent twice.

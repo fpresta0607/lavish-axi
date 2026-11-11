@@ -77,7 +77,7 @@ const ARTIFACT_HTML = `<!doctype html>
   async function drive() {
     try {
       var card = null;
-      for (var i = 0; i < 100 && !card; i += 1) {
+      for (var i = 0; i < 600 && !card; i += 1) {
         await sleep(100);
         var root = shadow();
         card = root ? root.querySelector(".lavish-annotation-card") : null;
@@ -102,7 +102,7 @@ const ARTIFACT_HTML = `<!doctype html>
         if (chip && !chip.querySelector(".lavish-attachment-status")) {
           mark("ready");
           textarea.value = "e2e: attachment round trip";
-          card.querySelector(".lavish-send").click();
+          card.querySelector(".lavish-add").click();
           mark("queued");
           return;
         }

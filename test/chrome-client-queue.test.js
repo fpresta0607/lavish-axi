@@ -6078,23 +6078,24 @@ test("a note written while an element is selected goes on that element, cell and
 
   writeNote(chrome, "Check this number");
 
-  assert.deepEqual(
-    publicQueued(chrome).map(({ _lavishNoteId, ...prompt }) => prompt),
-    [
-      {
-        uid: "u-9",
-        prompt: "Check this number",
-        selector: "tbody td:nth-child(2)",
-        tag: "td",
-        text: "$40",
-        target: cellTarget,
-      },
-    ],
-  );
+  // The note is only in his notes: the page follows no note of the Conversation box, so it carries
+  // no note id for the page to draw anything by.
+  assert.deepEqual(publicQueued(chrome), [
+    {
+      uid: "u-9",
+      prompt: "Check this number",
+      selector: "tbody td:nth-child(2)",
+      tag: "td",
+      text: "$40",
+      target: cellTarget,
+    },
+  ]);
   const noted = chrome.postedToFrame.findLast((message) => message.type === "lavish:selectionNoted");
-  assert.ok(noted, "the page is told, so the card shows the note's chip");
-  assert.equal(noted.text, "Check this number");
-  assert.equal(noted.noteId, chrome.queued()[0]._lavishNoteId);
+  assert.ok(noted, "the page is told, so its empty card closes");
+  assert.deepEqual(
+    Object.keys(noted).sort(),
+    ["artifact_load_token", "type"].filter((name) => name in noted),
+  );
 });
 
 test("a note written with nothing selected is about the whole page and says so", async () => {
@@ -6354,9 +6355,7 @@ test("an edit started while a send waits for the card goes with its new words", 
 
   chrome.element("send").click();
   queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
-  const editor = queuedControl(chrome, "queued-edit-input");
-  editor.value = "New words";
-  editor.dispatch("input", {});
+  chrome.element("chatInput").value = "New words";
   answerCommit(chrome, null);
   await flushPromises();
   chrome.sendSnapshot("uid=1 body");
@@ -6366,18 +6365,19 @@ test("an edit started while a send waits for the card goes with its new words", 
     posts[0].body.prompts.map((prompt) => prompt.prompt),
     ["New words"],
   );
+  assert.equal(chrome.element("chatInput").value, "", "the box is his again");
 });
 
-test("opening a second edit keeps the words of the first", async () => {
+test("opening a second note saves the first with the words it has now", async () => {
   const chrome = await createChromeHarness();
+  const input = chrome.element("chatInput");
   writeNote(chrome, "First");
   writeNote(chrome, "Second");
 
   queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
-  const editor = queuedControl(chrome, "queued-edit-input");
-  editor.value = "First, reworded";
-  editor.dispatch("input", {});
-  const secondEdit = chrome.element("queuedLog").querySelectorAll(".queued-edit")[0];
+  input.value = "First, reworded";
+  // The note open in the box shows no pencil of its own, so the first pencil is the second note's.
+  const secondEdit = queuedControl(chrome, "queued-edit");
   assert.equal(secondEdit.dataset.index, "1", "the second note's edit control");
   secondEdit.click({ stopPropagation() {} });
 
@@ -6385,7 +6385,7 @@ test("opening a second edit keeps the words of the first", async () => {
     chrome.queued().map((prompt) => prompt.prompt),
     ["First, reworded", "Second"],
   );
-  assert.match(chrome.element("queuedLog").innerHTML, /<textarea class="queued-edit-input"[^>]*>Second<\/textarea>/);
+  assert.equal(input.value, "Second");
 });
 
 test("a card still uploading its image keeps Send & End from ending the review", async () => {
@@ -6450,7 +6450,10 @@ test("a page's choice can take its answer back out of the notes by its key, and 
   );
 });
 
-// ---- A pending note can be edited before it is sent ----
+// ---- A pending note is reworded in the Conversation box, the one message box ----
+// The pencil on a note used to open a plain field of its own, with no microphone and no images
+// (the Overlord, 2026-11-11). It opens the note in the Conversation box now, so a note is reworded
+// exactly as it was written.
 
 function queuedControl(chrome, className) {
   const control = chrome.element("queuedLog").querySelectorAll("." + className)[0];
@@ -6458,61 +6461,267 @@ function queuedControl(chrome, className) {
   return control;
 }
 
-test("an edited note is delivered with its new words", async () => {
+const pressInBox = (chrome, key) => {
+  const event = {
+    key,
+    defaultPrevented: false,
+    stopped: false,
+    preventDefault() {
+      event.defaultPrevented = true;
+    },
+    stopPropagation() {
+      event.stopped = true;
+    },
+  };
+  chrome.element("chatInput").dispatch("keydown", event);
+  return event;
+};
+
+// A chrome whose uploads answer with these ids, in order.
+async function uploadingHarness(ids, extra = {}) {
+  const recorder = postRecorder();
+  let uploads = 0;
+  const chrome = await createChromeHarness({
+    sessionData: { ...defaultSessionData, attachmentMaxBytes: 1024, attachmentMaxCount: 4 },
+    fetchImpl: async (url, init) => {
+      if (String(url).endsWith("/attachments")) {
+        const id = ids[uploads++];
+        return id ? { ok: true, json: async () => ({ attachment: { id } }) } : new Promise(() => {});
+      }
+      return recorder.fetchImpl(url, init);
+    },
+    ...extra,
+  });
+  return { chrome, posts: recorder.posts };
+}
+
+async function pasteImage(chrome, name) {
+  chrome.element("chatInput").dispatch("paste", clipboardEvent(pastedImage(name)));
+  await flushPromises();
+  await flushPromises();
+}
+
+test("the pencil opens a note in the Conversation box, and Enter saves it in its place", async () => {
   const { posts, fetchImpl } = postRecorder();
   const chrome = await createChromeHarness({ fetchImpl });
+  const input = chrome.element("chatInput");
   writeNote(chrome, "Make it red");
+  writeNote(chrome, "Second");
 
   queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
-  assert.match(
-    chrome.element("queuedLog").innerHTML,
-    /<textarea class="queued-edit-input"[^>]*>Make it red<\/textarea>/,
-  );
-  const editor = queuedControl(chrome, "queued-edit-input");
-  editor.value = "Make it blue";
-  editor.dispatch("input", {});
-  editor.dispatch("keydown", { key: "Enter", preventDefault() {}, stopPropagation() {} });
 
-  assert.equal(chrome.queued()[0].prompt, "Make it blue");
-  assert.doesNotMatch(chrome.element("queuedLog").innerHTML, /queued-edit-input/);
-  assert.match(chrome.element("queuedLog").innerHTML, /<div class="bubble-text">Make it blue<\/div>/);
+  assert.equal(input.value, "Make it red");
+  assert.equal(chrome.context.document.activeElement, input, "the cursor is in the box");
+  assert.deepEqual([input.selectionStart, input.selectionEnd], [11, 11], "at the end of the note's words");
+  assert.equal(chrome.element("chatAnchor").hidden, false);
+  assert.equal(chrome.element("chatAnchorOn").textContent, "Editing");
+  assert.match(chrome.element("chatAnchorTarget").innerHTML, /whole page/);
+  assert.equal(chrome.element("chatAnchorClear")["aria-label"], "Keep the note as it was");
+  assert.match(input.placeholder, /Reword this note/);
+  const notes = chrome.element("queuedLog").innerHTML;
+  assert.doesNotMatch(notes, /<textarea/, "the note has no field of its own");
+  assert.match(notes, /^<div class="bubble user queued editing"><small>Editing <button class="queued-remove"/);
+
+  input.value = "  Make it blue  ";
+  pressInBox(chrome, "Enter");
+
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["Make it blue", "Second"],
+  );
+  assert.equal(input.value, "");
+  assert.equal(chrome.element("chatAnchor").hidden, true);
+  assert.equal(chrome.element("chatAnchorOn").textContent, "On");
+  assert.match(input.placeholder, /whole page/);
+  assert.match(chrome.element("queuedLog").innerHTML, /^<div class="bubble user queued"><small>Queued /);
 
   chrome.element("send").click();
   chrome.sendSnapshot("uid=1 body");
   await flushPromises();
   assert.deepEqual(
     posts[0].body.prompts.map((prompt) => prompt.prompt),
-    ["Make it blue"],
+    ["Make it blue", "Second"],
   );
 });
 
-test("Escape leaves a note being edited as it was", async () => {
-  const chrome = await createChromeHarness();
-  writeNote(chrome, "Keep these words");
+test("a note's images come into the box with it, and one pasted there is saved on the note", async () => {
+  const first = "a".repeat(64) + ".png";
+  const second = "b".repeat(64) + ".png";
+  const { chrome, posts } = await uploadingHarness([first, second]);
+  await pasteImage(chrome, "first.png");
+  writeNote(chrome, "See the picture");
 
   queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
-  const editor = queuedControl(chrome, "queued-edit-input");
-  editor.value = "Throw these away";
-  editor.dispatch("input", {});
-  editor.dispatch("keydown", { key: "Escape", preventDefault() {}, stopPropagation() {} });
+  const chips = chrome.element("chatAttachments").innerHTML;
+  assert.match(chips, /first\.png/, "the note's image is a chip in the box");
+  assert.match(chips, new RegExp(`src="/api/abc/attachments/${first}"`), "drawn from the server, not uploaded again");
+  await pasteImage(chrome, "second.png");
+  pressInBox(chrome, "Enter");
 
-  assert.equal(chrome.queued()[0].prompt, "Keep these words");
-  assert.doesNotMatch(chrome.element("queuedLog").innerHTML, /queued-edit-input/);
+  assert.deepEqual(chrome.queued()[0].attachments, [
+    { id: first, name: "first.png" },
+    { id: second, name: "second.png" },
+  ]);
+  assert.equal(chrome.queued()[0].prompt, "See the picture");
+  assert.equal(chrome.element("chatAttachments").innerHTML, "");
+
+  chrome.element("send").click();
+  chrome.sendSnapshot("uid=1 body");
+  await flushPromises();
+  assert.deepEqual(
+    posts[0].body.prompts[0].attachments.map((attachment) => attachment.id),
+    [first, second],
+  );
+});
+
+test("an image taken off in the box comes off the note", async () => {
+  const first = "a".repeat(64) + ".png";
+  const { chrome } = await uploadingHarness([first]);
+  await pasteImage(chrome, "first.png");
+  writeNote(chrome, "See the picture");
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  const remove = chrome
+    .element("chatAttachments")
+    .querySelectorAll("[data-focus-key]")
+    .find((control) => control.dataset.focusKey.startsWith("remove:"));
+  const chip = { dataset: { chatAttachmentRemove: remove.dataset.focusKey.slice("remove:".length) } };
+  chrome.element("chatAttachments").dispatch("click", {
+    target: { closest: (selector) => (selector === "[data-chat-attachment-remove]" ? chip : null) },
+  });
+  assert.equal(chrome.element("chatAttachments").innerHTML, "");
+  pressInBox(chrome, "Enter");
+
+  assert.equal(chrome.queued()[0].prompt, "See the picture");
+  assert.equal("attachments" in chrome.queued()[0], false);
+});
+
+test("an image still uploading holds the save and a send, and says why", async () => {
+  // No id to answer with: the upload never finishes.
+  const { chrome, posts } = await uploadingHarness([]);
+  const input = chrome.element("chatInput");
+  writeNote(chrome, "Old words");
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  input.value = "New words";
+  await pasteImage(chrome, "slow.png");
+
+  pressInBox(chrome, "Enter");
+  assert.equal(chrome.queued()[0].prompt, "Old words", "the note is not saved without its image");
+  assert.equal(input.value, "New words", "his words stay in the box");
+  assert.equal(chrome.element("chatAnchorOn").textContent, "Editing");
+
+  chrome.element("send").click();
+  await flushPromises();
+  assert.equal(posts.length, 0, "the note does not go as it was while the box holds its new words");
+  assert.equal(chrome.element("sendHint").hidden, false);
+  assert.match(chrome.element("sendHint").textContent, /Finish the note you are editing first/);
+});
+
+test("Escape, or the X on the line, keeps a note being reworded as it was", async () => {
+  for (const cancel of ["Escape", "the X"]) {
+    const chrome = await createChromeHarness();
+    const input = chrome.element("chatInput");
+    writeNote(chrome, "Keep these words");
+    queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+    input.value = "Throw these away";
+
+    if (cancel === "Escape") {
+      const event = pressInBox(chrome, "Escape");
+      assert.equal(event.defaultPrevented, true);
+      assert.equal(event.stopped, true, "Escape belongs to the edit, not to the menus and the sheet");
+    } else {
+      chrome.element("chatAnchorClear").click();
+      assert.equal(
+        chrome.postedToFrame.some((message) => message.type === "lavish:clearSelection"),
+        false,
+        "the X ends the edit and leaves what is selected on the page alone",
+      );
+    }
+
+    assert.equal(chrome.queued()[0].prompt, "Keep these words", cancel);
+    assert.equal(input.value, "", "the box is empty again");
+    assert.equal(chrome.element("chatAnchor").hidden, true);
+    assert.match(chrome.element("queuedLog").innerHTML, /<small>Queued /);
+  }
+});
+
+test("Escape in the box with no note open is left to the page", async () => {
+  const chrome = await createChromeHarness();
+  chrome.element("chatInput").value = "Just writing";
+
+  const event = pressInBox(chrome, "Escape");
+
+  assert.equal(event.defaultPrevented, false);
+  assert.equal(event.stopped, false);
+  assert.equal(chrome.element("chatInput").value, "Just writing");
+});
+
+test("what the box already held goes into his notes before a note opens in it", async () => {
+  const chrome = await createChromeHarness();
+  const input = chrome.element("chatInput");
+  writeNote(chrome, "First");
+  input.value = "Half written";
+
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["First", "Half written"],
+  );
+  assert.equal(input.value, "First");
+});
+
+test("a note emptied in the box keeps what it had", async () => {
+  const chrome = await createChromeHarness();
+  writeNote(chrome, "Do not lose me");
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  chrome.element("chatInput").value = "   ";
+
+  pressInBox(chrome, "Enter");
+
+  assert.equal(chrome.queued()[0].prompt, "Do not lose me");
+  assert.equal(chrome.element("chatAnchor").hidden, true, "the edit is over");
 });
 
 test("an edit survives a redraw of the notes while it is open", async () => {
   const chrome = await createChromeHarness();
+  const input = chrome.element("chatInput");
   writeNote(chrome, "Original");
   queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
-  const editor = queuedControl(chrome, "queued-edit-input");
-  editor.value = "Half edited";
-  editor.dispatch("input", {});
+  input.value = "Half edited";
 
-  writeNote(chrome, "Another note arrives");
+  chrome.sendFrameMessage({
+    type: "lavish:queuePrompt",
+    artifact_load_token: chrome.artifactLoadToken(),
+    prompt: { prompt: "Another note arrives", selector: "h2", tag: "h2", text: "Pricing" },
+  });
 
-  assert.match(
-    chrome.element("queuedLog").innerHTML,
-    /<textarea class="queued-edit-input"[^>]*>Half edited<\/textarea>/,
+  assert.equal(input.value, "Half edited");
+  assert.equal(chrome.element("chatAnchorOn").textContent, "Editing");
+  assert.match(chrome.element("queuedLog").innerHTML, /^<div class="bubble user queued editing">/);
+  pressInBox(chrome, "Enter");
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["Half edited", "Another note arrives"],
+  );
+});
+
+test("removing the note open in the box ends its edit", async () => {
+  const chrome = await createChromeHarness();
+  const input = chrome.element("chatInput");
+  writeNote(chrome, "Going away");
+  queuedControl(chrome, "queued-edit").click({ stopPropagation() {} });
+  input.value = "Going away, reworded";
+
+  queuedControl(chrome, "queued-remove").click({ stopPropagation() {} });
+
+  assert.deepEqual(chrome.queued(), []);
+  assert.equal(input.value, "", "the box does not keep the words of a note that is gone");
+  assert.equal(chrome.element("chatAnchor").hidden, true);
+  writeNote(chrome, "A new note");
+  assert.deepEqual(
+    chrome.queued().map((prompt) => prompt.prompt),
+    ["A new note"],
   );
 });
 

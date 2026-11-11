@@ -125,6 +125,7 @@ const messageBox = /** @type {any} */ (window).lavishMessageBox;
 const chatInput = /** @type {HTMLTextAreaElement} */ (document.getElementById("chatInput"));
 const chatField = /** @type {HTMLDivElement} */ (document.getElementById("chatField"));
 const chatAnchor = /** @type {HTMLDivElement} */ (document.getElementById("chatAnchor"));
+const chatAnchorOn = /** @type {HTMLSpanElement} */ (document.getElementById("chatAnchorOn"));
 const chatAnchorTarget = /** @type {HTMLSpanElement} */ (document.getElementById("chatAnchorTarget"));
 const chatAnchorClear = /** @type {HTMLButtonElement} */ (document.getElementById("chatAnchorClear"));
 const chatAttachments = /** @type {HTMLDivElement} */ (document.getElementById("chatAttachments"));
@@ -218,15 +219,18 @@ const whiteboardError = /** @type {HTMLDivElement} */ (document.getElementById("
 const artifactSrc = frame.dataset.artifactSrc || frame.getAttribute?.("data-artifact-src") || frame.src || "";
 
 const queued = loadQueuedPrompts();
-// The queued note being reworded in place, by its identity, with the words typed so far.
-/** @type {{ id: string, text: string } | null} */
+// The queued note open in the Conversation box to be reworded, by its identity. Its words and
+// images are in the box itself until Enter saves them or Escape keeps the note as it was.
+/** @type {{ id: string } | null} */
 let editingNote = null;
 // What is selected in the page, as the SDK last reported it: the context a note from the
-// Conversation box goes on, or null for the whole page. `pageCardOpen` says an annotation card
-// is open there, whose unfinished words a send takes along.
+// Conversation box goes on, or null for the whole page. `pageHoldsDraft` says the page holds
+// words or images a send takes along or waits for: an open annotation card, or a written answer
+// whose image is not ready. `pageVoiceId` names the page's message box he is in, the one the
+// chrome listens for, or "" when he is in none.
 /** @type {{ uid: string, selector: string, tag: string, text: string, target?: object } | null} */
 let pageSelection = null;
-let pageCardOpen = false;
+let pageHoldsDraft = false;
 let pageVoiceId = "";
 let annotation = true;
 let ended = false;
@@ -661,8 +665,9 @@ function isEditableNote(prompt) {
 }
 
 // A queued note is the user bubble in its not-yet-sent state: dashed, labelled Queued (Sending
-// while its batch is in flight), and editable and removable until then. It settles in place as a
-// sent bubble once the server's transcript carries it, so nothing moves between regions.
+// while its batch is in flight, Editing while it is open in the Conversation box), and editable
+// and removable until then. It settles in place as a sent bubble once the server's transcript
+// carries it, so nothing moves between regions.
 function queuedBubbleHtml(prompt, index) {
   const sending = isPromptSending(prompt);
   const id = escapeHtml(promptIdentity(prompt));
@@ -685,24 +690,13 @@ function queuedBubbleHtml(prompt, index) {
     '<div class="bubble user queued' +
     (editing ? " editing" : "") +
     '"><small>' +
-    (sending ? SENDING_MARK_HTML + "Sending\u2026" : "Queued") +
+    (sending ? SENDING_MARK_HTML + "Sending\u2026" : editing ? "Editing" : "Queued") +
     (isEditableNote(prompt) && !editing ? " " + control("queued-edit", "Edit note", "edit", EDIT_ICON_SVG) : "") +
     " " +
     control("queued-remove", "Remove queued prompt", "remove", REMOVE_ICON_SVG) +
     "</small>" +
     anchorHtml(promptAnchor(prompt)) +
-    (editing
-      ? '<textarea class="queued-edit-input" rows="3" aria-label="Edit note" data-index="' +
-        index +
-        '" data-focus-key="editing:' +
-        id +
-        '">' +
-        escapeHtml(editingNote?.text || "") +
-        '</textarea><div class="queued-edit-actions">' +
-        control("queued-edit-cancel", "Keep the note as it was", "cancel", "Cancel") +
-        control("queued-edit-save primary", "Save the note", "save", "Save") +
-        "</div>"
-      : userBubbleTextHtml(prompt, prompt.prompt)) +
+    userBubbleTextHtml(prompt, prompt.prompt) +
     bubbleAttachmentsHtml(prompt) +
     "</div>"
   );
@@ -730,8 +724,8 @@ function promptNoteId(prompt) {
   return typeof noteId === "string" && noteId.length <= NOTE_ID_MAX ? noteId : "";
 }
 
-// Tells the page what became of a note it put a chip up for: queued, sending, delivered or
-// removed. The last two are the last word on a note.
+// Tells the page what became of a note it follows, which is a question's answer: queued, sending,
+// delivered or removed. The last two are the last word on a note.
 function reportNoteStatus(prompt, status) {
   const noteId = promptNoteId(prompt);
   if (!noteId || reportedNoteStatuses.get(noteId) === status) return;
@@ -743,14 +737,9 @@ function reportNoteStatus(prompt, status) {
 function render() {
   // An edit whose note was sent or removed has nothing left to save.
   if (editingNote && !queued.some((prompt) => promptIdentity(prompt) === editingNote?.id && !isPromptSending(prompt))) {
-    editingNote = null;
+    stopEditingNote();
+    return;
   }
-  // The list is rebuilt from markup, so an open editor's caret is put back where it was.
-  const openEditor = /** @type {HTMLTextAreaElement | undefined} */ (
-    queuedLog.querySelectorAll(".queued-edit-input")[0]
-  );
-  const caret =
-    openEditor && document.activeElement === openEditor ? [openEditor.selectionStart, openEditor.selectionEnd] : null;
   rebuildKeepingFocus(queuedLog, () => {
     queuedLog.innerHTML = queued.map((prompt, index) => queuedBubbleHtml(prompt, index)).join("");
   });
@@ -768,33 +757,6 @@ function render() {
     editButton.disabled = terminalSubmission !== null || isPromptSending(prompt);
     editButton.addEventListener("click", (event) => startEditingNote(Number(editButton.dataset.index), event));
   }
-  const editor = /** @type {HTMLTextAreaElement | undefined} */ (queuedLog.querySelectorAll(".queued-edit-input")[0]);
-  if (editor && editingNote) {
-    editor.value = editingNote.text;
-    if (caret) editor.setSelectionRange(caret[0], caret[1]);
-    editor.addEventListener("input", () => {
-      if (editingNote) editingNote.text = editor.value;
-      syncEditSave();
-    });
-    editor.addEventListener("keydown", (event) => {
-      if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
-        event.preventDefault();
-        saveEditedNote();
-      } else if (event.key === "Escape" && !event.isComposing) {
-        // Escape belongs to the edit here, not to the menus and sheet the page-wide handler closes.
-        event.preventDefault();
-        event.stopPropagation();
-        stopEditingNote();
-      }
-    });
-    for (const button of queuedLog.querySelectorAll(".queued-edit-cancel")) {
-      /** @type {HTMLButtonElement} */ (button).onclick = stopEditingNote;
-    }
-    for (const button of queuedLog.querySelectorAll(".queued-edit-save")) {
-      /** @type {HTMLButtonElement} */ (button).onclick = saveEditedNote;
-    }
-    syncEditSave();
-  }
   updateSendState();
   scrollPanelToBottom();
   renderSheetSummary();
@@ -804,45 +766,56 @@ function editedPrompt() {
   return editingNote ? queued.find((prompt) => promptIdentity(prompt) === editingNote?.id) : undefined;
 }
 
-// A note with neither words nor images is not saved: it is removed with its own control.
-function syncEditSave() {
-  const prompt = editedPrompt();
-  const canSave = Boolean(editingNote?.text.trim() || (prompt && attachmentCount(prompt)));
-  for (const button of queuedLog.querySelectorAll(".queued-edit-save")) {
-    /** @type {HTMLButtonElement} */ (button).disabled = !canSave;
-  }
-}
-
+// The pencil opens a note in the Conversation box, the one message box, with its words and its
+// images, so it is reworded as it was written: typed, dictated, with images added or taken off.
+// What the box held goes into his notes first, so nothing he was writing is lost. Returns false
+// when a pending or failed image holds that back, and the note stays as it was.
 function startEditingNote(index, event) {
   if (event) event.stopPropagation();
   const prompt = queued[index];
-  if (!prompt || terminalSubmission || isPromptSending(prompt) || !isEditableNote(prompt)) return;
-  // One note is edited at a time; the one already open keeps its words.
-  settleOpenEdit();
-  editingNote = { id: promptIdentity(prompt), text: String(prompt.prompt || "") };
+  if (!prompt || terminalSubmission || isPromptSending(prompt) || !isEditableNote(prompt)) return false;
+  // One note is edited at a time; the one already open is saved with the words it has now.
+  if (!settleOpenEdit() || !addComposerNote()) return false;
+  editingNote = { id: promptIdentity(prompt) };
+  chatInput.value = String(prompt.prompt || "");
+  chatAttachmentController.seed(Array.isArray(prompt.attachments) ? prompt.attachments : []);
+  renderComposerAnchor();
   render();
-  const editor = /** @type {HTMLTextAreaElement | undefined} */ (queuedLog.querySelectorAll(".queued-edit-input")[0]);
-  if (!editor) return;
-  editor.focus();
-  editor.setSelectionRange(editor.value.length, editor.value.length);
+  chatInput.focus();
+  chatInput.setSelectionRange(chatInput.value.length, chatInput.value.length);
+  return true;
 }
 
+// Ends the edit and empties the box. The note keeps what it last held.
 function stopEditingNote() {
   editingNote = null;
+  voiceDictation.dispose(VOICE_TO_CHAT);
+  chatInput.value = "";
+  chatAttachmentController.reset();
+  renderComposerAnchor();
   render();
 }
 
+// Puts what the box holds on the note, in its place among his notes. A note left with neither
+// words nor images keeps what it had: a note is removed with its own control. Returns false when
+// a pending or failed image holds the save back, so the edit stays open with its words.
 function saveEditedNote() {
   const prompt = editedPrompt();
-  const text = editingNote ? editingNote.text.trim() : "";
-  if (!prompt || (!text && !attachmentCount(prompt))) return;
-  prompt.prompt = text;
-  editingNote = null;
-  persistQueuedPrompts();
-  // The note's chip in the page says what the note says now.
-  const noteId = promptNoteId(prompt);
-  if (noteId) postToFrame({ type: "lavish:noteText", noteId, text });
-  render();
+  if (!prompt) return true;
+  if (chatAttachmentController.hasPending() || chatAttachmentController.hasErrors()) {
+    chatAttachmentController.noteSendBlocked();
+    return false;
+  }
+  const text = chatInput.value.trim();
+  const attachments = chatAttachmentController.collectReady();
+  if (text || attachments.length) {
+    prompt.prompt = text;
+    if (attachments.length) prompt.attachments = attachments;
+    else delete prompt.attachments;
+    persistQueuedPrompts();
+  }
+  stopEditingNote();
+  return true;
 }
 
 function updateSendState() {
@@ -1625,7 +1598,7 @@ function dropQueuedPrompt(queueKey) {
 // sandboxed artifact, and the server checks them again like any note's.
 function setPageSelection(selection, cardOpen, voiceId = "") {
   const nextVoiceId = typeof voiceId === "string" && voiceId.length <= 128 ? voiceId : "";
-  if (!cardOpen || nextVoiceId !== pageVoiceId) voiceDictation.dispose(VOICE_TO_PAGE);
+  if (nextVoiceId !== pageVoiceId) voiceDictation.dispose(VOICE_TO_PAGE);
   pageVoiceId = nextVoiceId;
   pageSelection =
     selection && typeof selection === "object"
@@ -1637,19 +1610,29 @@ function setPageSelection(selection, cardOpen, voiceId = "") {
           ...(selection.target && typeof selection.target === "object" ? { target: selection.target } : {}),
         }
       : null;
-  pageCardOpen = Boolean(pageSelection) && cardOpen;
+  pageHoldsDraft = cardOpen === true;
   renderComposerAnchor();
-  // An open box draws its voice bubble from the chrome's state; once it closes, it stops listening.
-  if (pageCardOpen) postPageVoice(true);
-  else voiceDictation.dispose(VOICE_TO_PAGE);
+  // A box he is in draws its voice bubble from the chrome's state.
+  postPageVoice(true);
 }
 
 // The line above the message box names what a note written there goes on; with nothing selected
-// there is no line, and the box itself says the note is about the whole page.
+// there is no line, and the box itself says the note is about the whole page. While a note is
+// open in the box to be reworded, the line names that note instead, and its X keeps the note as
+// it was.
 function renderComposerAnchor() {
-  chatAnchor.hidden = !pageSelection;
-  chatAnchorTarget.innerHTML = pageSelection ? anchorHtml(promptAnchor({ ...pageSelection, prompt: "" })) : "";
-  chatInput.placeholder = pageSelection ? "Write a note on what is selected..." : "Write a note on the whole page...";
+  const edited = editedPrompt();
+  const anchored = edited || (pageSelection ? { ...pageSelection, prompt: "" } : null);
+  chatAnchor.hidden = !anchored;
+  chatAnchorOn.textContent = edited ? "Editing" : "On";
+  chatAnchorTarget.innerHTML = anchored ? anchorHtml(promptAnchor(anchored)) : "";
+  chatAnchorClear.setAttribute("aria-label", edited ? "Keep the note as it was" : "Write about the whole page instead");
+  chatAnchorClear.dataset.tip = edited ? "Keep as it was" : "Whole page instead";
+  chatInput.placeholder = edited
+    ? "Reword this note..."
+    : pageSelection
+      ? "Write a note on what is selected..."
+      : "Write a note on the whole page...";
 }
 
 function beginFeedbackPreparation() {
@@ -1760,8 +1743,9 @@ function createChatAttachmentsController() {
   let capRejected = false;
   let sendBlocked = false;
 
+  // A chip counts when it holds an image: one read from a file, or one a note already carried.
   function currentImageCount() {
-    return items.filter((item) => item.file && CHAT_ATTACHMENT_MIME.has(item.file.type)).length;
+    return items.filter((item) => item.id || (item.file && CHAT_ATTACHMENT_MIME.has(item.file.type))).length;
   }
 
   function renderAttachments() {
@@ -1923,18 +1907,38 @@ function createChatAttachmentsController() {
     if (index < 0) return;
     const [item] = items.splice(index, 1);
     item.abortController?.abort();
-    if (item.preview) URL.revokeObjectURL(item.preview);
+    if (item.file && item.preview) URL.revokeObjectURL(item.preview);
     renderAttachments();
   }
 
   function reset() {
     for (const item of items) {
       item.abortController?.abort();
-      if (item.preview) URL.revokeObjectURL(item.preview);
+      if (item.file && item.preview) URL.revokeObjectURL(item.preview);
     }
     items.length = 0;
     capRejected = false;
     sendBlocked = false;
+    renderAttachments();
+  }
+
+  // The images of a note opened in the box, as ready chips: the server holds each under its id,
+  // so there is no file to upload again.
+  function seed(refs) {
+    reset();
+    for (const ref of refs) {
+      items.push({
+        localId: String(nextId++),
+        file: null,
+        name: String(ref.name || "image"),
+        preview: "/api/" + encodeURIComponent(key) + "/attachments/" + encodeURIComponent(ref.id),
+        status: "ready",
+        error: "",
+        errorCode: "",
+        id: String(ref.id),
+        abortController: /** @type {AbortController | null} */ (null),
+      });
+    }
     renderAttachments();
   }
 
@@ -1955,6 +1959,7 @@ function createChatAttachmentsController() {
     collectReady: () =>
       items.filter((item) => item.status === "ready").map((item) => ({ id: item.id, name: item.name })),
     reset,
+    seed,
   };
 }
 
@@ -2325,7 +2330,7 @@ const chatVoice = messageBox.createVoiceBubble(
 const voiceDictation = createDictation(
   {
     heard(text, context, shouldFocus) {
-      if (context.target === VOICE_TO_PAGE && (!pageCardOpen || context.ownerId !== pageVoiceId)) return;
+      if (context.target === VOICE_TO_PAGE && (!pageVoiceId || context.ownerId !== pageVoiceId)) return;
       voiceDictations = rememberDictation(text, Date.now());
       if (context.target === VOICE_TO_PAGE)
         postToFrame({
@@ -2413,10 +2418,10 @@ function renderVoice() {
   postPageVoice();
 }
 
-// The page's annotation box draws the same bubble from what the chrome tells it, while one is open:
-// whether it listens, the problem it hit, and this review's recent dictations.
+// A message box on the page draws the same bubble from what the chrome tells it, while he is in
+// one: whether it listens, the problem it hit, and this review's recent dictations.
 function postPageVoice(force = false) {
-  if (!pageCardOpen) return;
+  if (!pageVoiceId) return;
   const toPage = voiceTarget === VOICE_TO_PAGE;
   const state = {
     supported: Boolean(speechRecognitionClass()),
@@ -2470,12 +2475,12 @@ function handleVoiceKey(event) {
   if (meaning.action === "stop" && voiceMode === "hold" && voiceTarget === VOICE_TO_CHAT) voiceDictation.stop();
 }
 
-// The page's annotation box asks to listen while its keys are held. The page is untrusted, so the
-// chrome listens only for an open box and only on a press the reader just made, and stops once the
-// box closes.
+// A message box on the page asks to listen while its keys are held. The page is untrusted, so the
+// chrome listens only for the box the page says he is in and only on a press the reader just made,
+// and stops once he leaves that box.
 function handlePageDictation(action, voiceId) {
-  if (!pageCardOpen || voiceId !== pageVoiceId || !pageVoiceId) return;
-  if (action === "start" && pageCardOpen && navigator.userActivation?.isActive) startVoice(VOICE_TO_PAGE);
+  if (voiceId !== pageVoiceId || !pageVoiceId) return;
+  if (action === "start" && navigator.userActivation?.isActive) startVoice(VOICE_TO_PAGE);
   if (action === "toggle" && navigator.userActivation?.isActive) toggleVoice(VOICE_TO_PAGE);
   if (action === "cancel") voiceDictation.dispose(VOICE_TO_PAGE);
   if (voiceTarget !== VOICE_TO_PAGE) return;
@@ -2498,7 +2503,9 @@ function copyPageDictation(text) {
 // Puts what the Conversation box holds into his notes, on what is selected in the page or else on
 // the whole page. Nothing is sent: every note waits for Send to Agent or Send & End. Returns false
 // when a pending or failed image chip holds the words back, so they stay in the box with it.
+// While a note is open in the box, what the box holds is that note, and this saves it.
 function addComposerNote() {
+  if (editingNote) return saveEditedNote();
   voiceDictation.dispose(VOICE_TO_CHAT);
   if (chatAttachmentController.hasPending() || chatAttachmentController.hasErrors()) {
     chatAttachmentController.noteSendBlocked();
@@ -2513,8 +2520,6 @@ function addComposerNote() {
     : { uid: "", prompt: text, selector: "", tag: "message", text: WHOLE_PAGE };
   if (attachments.length) prompt.attachments = attachments;
   assignPromptIdentity(prompt, false);
-  // A note on what is selected gets the chip a card's note gets, so the page shows it too.
-  if (pageSelection) prompt[internalNoteIdField] = "chrome-" + createPromptIdentity();
   queued.push(prompt);
   persistQueuedPrompts();
   // Render the durable queued bubble before clearing the editor. If anything after this point
@@ -2523,7 +2528,8 @@ function addComposerNote() {
   render();
   chatInput.value = "";
   chatAttachmentController.reset();
-  if (pageSelection) postToFrame({ type: "lavish:selectionNoted", noteId: promptNoteId(prompt), text });
+  // The note is on what the page has selected: its empty card closes, as if written there.
+  if (pageSelection) postToFrame({ type: "lavish:selectionNoted" });
   return true;
 }
 
@@ -2580,11 +2586,13 @@ function settleDraftCommit(commitId, committed, heldCopy = DRAFT_HELD_COPY) {
   commit.preparation.finish(committed);
 }
 
-// Puts an open edit's words on its note before a send takes the notes, or drops an emptied edit.
+// Saves the note open in the Conversation box before a send takes the notes. Returns false when
+// one of its images is not ready, which holds the send back: the note would go as it was while
+// the box still held its new words.
+const EDIT_HELD_COPY =
+  "Finish the note you are editing first: its image is still uploading or could not be attached. Nothing was sent.";
 function settleOpenEdit() {
-  if (!editingNote) return;
-  if (editingNote.text.trim()) saveEditedNote();
-  else stopEditingNote();
+  return !editingNote || saveEditedNote();
 }
 
 function sendQueued(endAfter) {
@@ -2595,7 +2603,10 @@ function sendQueued(endAfter) {
   }
   closeMenus();
   // A note being reworded goes with the words it has now.
-  settleOpenEdit();
+  if (!settleOpenEdit()) {
+    showSendHint(EDIT_HELD_COPY, 6000, false);
+    return;
+  }
 
   // A pending or failed chip holds back only the COMPOSER message (and an
   // explicit end, which would strand the chips) - queued annotation prompts
@@ -2603,7 +2614,7 @@ function sendQueued(endAfter) {
   // open. Gating the whole pipeline here made Send and Send & End silently
   // deliver nothing while the only signal sat in the composer toolbar.
   const chipsBlocked = !addComposerNote();
-  const draftCommit = pageCardOpen ? commitPageDraft() : null;
+  const draftCommit = pageHoldsDraft ? commitPageDraft() : null;
   const shouldEnd = Boolean(endAfter && !chipsBlocked);
   if (shouldEnd) {
     if (!sendFailureOwner) hideSendHint(true);
@@ -2628,7 +2639,10 @@ function sendQueued(endAfter) {
 
 function submitNotes(chipsBlocked) {
   // An edit opened while the send waited for the card goes with its new words too.
-  settleOpenEdit();
+  if (!settleOpenEdit()) {
+    showSendHint(EDIT_HELD_COPY, 6000, false);
+    return;
+  }
   if (!queued.length) {
     if (!chipsBlocked && !sendFailureOwner) showSendHint();
     return;
@@ -5168,16 +5182,25 @@ chatAttachments.addEventListener("click", (event) => {
   const retry = /** @type {HTMLElement | null} */ (target?.closest?.("[data-chat-attachment-retry]") || null);
   if (retry) chatAttachmentController.retry(String(retry.dataset.chatAttachmentRetry || ""));
 });
-// Enter adds what he wrote to his notes; Send to Agent or Send & End sends them all together.
+// Enter adds what he wrote to his notes, or saves the note he is rewording; Send to Agent or
+// Send & End sends them all together. Escape keeps a note being reworded as it was.
 chatInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
     event.preventDefault();
     if (!ended && !terminalSubmission) addComposerNote();
+  } else if (event.key === "Escape" && !event.isComposing && editingNote) {
+    // Escape belongs to the edit here, not to the menus and sheet the page-wide handler closes.
+    event.preventDefault();
+    event.stopPropagation();
+    stopEditingNote();
   }
 });
 chatAnchorClear.onclick = () => {
-  postToFrame({ type: "lavish:clearSelection" });
-  setPageSelection(null, false);
+  if (editingNote) stopEditingNote();
+  else {
+    postToFrame({ type: "lavish:clearSelection" });
+    setPageSelection(null, false);
+  }
   chatInput.focus();
 };
 chatInput.addEventListener("input", () => hideSendHint());

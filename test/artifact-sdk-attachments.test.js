@@ -43,17 +43,21 @@ test("the SDK bundle scopes every upload and result to this document (E1)", () =
 
 test("the SDK bundle applies upload results and offers a retry", () => {
   assert.match(sdk, /lavish:attachmentResult/);
-  assert.match(sdk, /activeAttachments\?\.handleResult\(msg\.localId, msg\.ok, msg\.id, msg\.error\)/);
+  // Every box on the page hears the result, and the one that asked finds its own chip by id.
+  assert.match(
+    sdk,
+    /for \(const attachments of attachmentControllers\) \{\s*attachments\.handleResult\(msg\.localId, msg\.ok, msg\.id, msg\.error\)/,
+  );
   assert.match(sdk, /data-attachment-retry/);
 });
 
 test("the SDK bundle carries ready attachment refs on the queued prompt", () => {
   assert.match(sdk, /options\.attachments/);
   assert.match(sdk, /item\.attachments = attachments/);
-  assert.match(
-    sdk,
-    /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, noteId, commitId \}\)/,
-  );
+  assert.match(sdk, /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, commitId \}\)/);
+  // A question's written answer carries the images in its box the same way.
+  assert.match(sdk, /card\.box \? card\.box\.attachments\.collectReady\(\) : \[\]/);
+  assert.match(sdk, /noteId: card\.noteId,\s*attachments: images,/);
 });
 
 // A list in a shadow root, as the annotation card's chips are: its root says what has focus.
@@ -149,7 +153,7 @@ test("the SDK bundle intercepts every drop so a non-image can't navigate the fra
   // The drop handler calls preventDefault() unconditionally, then classifies.
   assert.match(
     sdk,
-    /"drop",\s*\(event\)\s*=>\s*\{\s*[\s\S]*?event\.preventDefault\(\);\s*card\.classList\.remove\("is-dropping"\)/,
+    /"drop",\s*\(event\)\s*=>\s*\{\s*[\s\S]*?event\.preventDefault\(\);\s*dropZone\.classList\.remove\("is-dropping"\)/,
   );
   assert.match(sdk, /dataTransferHasFiles/);
   assert.match(sdk, /attachments\.rejectUnsupportedBatch\(unsupported\)/);

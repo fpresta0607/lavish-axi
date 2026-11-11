@@ -7,11 +7,11 @@ import path from "node:path";
 import test from "node:test";
 import { fileURLToPath } from "node:url";
 
-// A sent annotation closes its own box, measured in a real browser through the real chrome and
-// server. He highlights a heading, writes a note in its box and adds it to his notes, once with
-// Enter and once with the box's button, then sends them with Send to Agent: the box goes, and the
-// page and the Conversation box stay as they were. A send that does not get through keeps the box,
-// with his words in it, until the note is delivered.
+// An added annotation closes its own box and leaves nothing of it on the page, measured in a real
+// browser through the real chrome and server. He highlights a heading, writes a note in its box
+// and adds it to his notes, once with Enter and once with the box's button: the box goes at once,
+// no chip takes its place, and the note waits in the Conversation panel, where Send to Agent sends
+// it. A send that does not get through keeps the note there, with his words, until it is delivered.
 // The box and the page are found the way a reader finds them, in the browser's accessibility tree.
 const runBrowserE2e = process.env.LAVISH_AXI_BROWSER_E2E === "1";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -52,12 +52,18 @@ const ARTIFACT = `<!doctype html>
 
 const CARD_TEXTBOX = /textbox "Tell the agent what to change about this element\.\.\."/;
 const CARD_ADD = /button "Add to your notes"/;
+// The chip a card used to shrink to (the Overlord, 2026-11-11): nothing may draw it again.
 const CHIP = /"Comment on <h2>/;
 const MAIN_BOX = /textbox "Write a note on /;
+// With nothing selected in the page, a note from the Conversation box is about the whole page.
+const NOTHING_SELECTED = /textbox "Write a note on the whole page\.\.\."/;
+// A note waiting in his notes offers its pencil; a delivered one does not.
+const NOTE_PENCIL = /button "Edit note"/;
+const SEND_FAILED = /Could not send\. Your feedback is still queued/;
 const SEND = /button "Send to Agent"/;
 
 test(
-  "a sent annotation closes its own box and nothing else, and a send that fails keeps the box",
+  "an added annotation closes its box and leaves nothing of it, and a send that fails keeps the note",
   { skip: !runBrowserE2e, timeout: 300_000 },
   async (t) => {
     const temp = await mkdtemp(path.join(tmpdir(), "lavish-annotation-send-"));
@@ -117,7 +123,18 @@ test(
     function assertBoxGone(where, shot) {
       assert.equal(has(shot, CARD_TEXTBOX), false, `${where}: the annotation box is still open:\n${shot}`);
       assert.equal(has(shot, CARD_ADD), false, `${where}: the box's button is still there:\n${shot}`);
-      assert.equal(has(shot, CHIP), false, `${where}: the sent note's box is still open:\n${shot}`);
+      assert.equal(has(shot, CHIP), false, `${where}: a chip stayed where the box was:\n${shot}`);
+      assert.ok(has(shot, NOTHING_SELECTED), `${where}: its heading is still selected:\n${shot}`);
+    }
+
+    // The note is in his notes the moment it is added, and its box is gone with nothing left.
+    async function assertAdded(where, words) {
+      const shot = await waitForSnapshot(
+        `${where}: the box never closed`,
+        (current) => !has(current, CARD_TEXTBOX) && has(current, words) && has(current, NOTE_PENCIL),
+      );
+      assertBoxGone(where, shot);
+      assertPageAndMainBoxStay(where, shot);
     }
 
     try {
@@ -131,39 +148,34 @@ test(
       run("chrome-devtools-axi", ["open", url], chromeEnv);
       await waitForSnapshot("the page never loaded", (shot) => has(shot, /heading "Step 2\. Payment"/));
 
-      await t.test("Enter adds the note, and Send to Agent sends it and closes its box", async () => {
+      await t.test("Enter adds the note and closes its box, and Send to Agent sends it", async () => {
         writeNote(await openBox(/heading "Step 2\. Payment"/), "Make the payment step stand out");
         run("chrome-devtools-axi", ["press", "Enter"], chromeEnv);
-        const shot = await waitForSnapshot(
-          "the box never shrank to its chip after Enter",
-          (current) => !has(current, CARD_TEXTBOX) && has(current, CHIP),
-        );
-        assert.ok(has(shot, /In your notes/), `the chip says the note waits for a send:\n${shot}`);
+        await assertAdded("after Enter", /Make the payment step stand out/);
         run("chrome-devtools-axi", ["click", uidOf(snapshot(), SEND)], chromeEnv);
         const settled = await waitForSnapshot(
           "the note never reached the conversation",
-          (current) => has(current, /Make the payment step stand out/) && !has(current, CHIP),
+          (current) => has(current, /Make the payment step stand out/) && !has(current, NOTE_PENCIL),
         );
-        assertBoxGone("after Enter", settled);
-        assertPageAndMainBoxStay("after Enter", shot);
+        assertBoxGone("after Send to Agent", settled);
+        assertPageAndMainBoxStay("after Send to Agent", settled);
       });
 
-      await t.test("the box's button adds the note, and Send to Agent sends it and closes its box", async () => {
+      await t.test("the box's button adds the note and closes its box, and Send to Agent sends it", async () => {
         const opened = await openBox(/heading "Step 1\. Address"/);
         writeNote(opened, "Say which address is billed");
         run("chrome-devtools-axi", ["click", uidOf(snapshot(), CARD_ADD)], chromeEnv);
-        await waitForSnapshot("the box never shrank to its chip", (current) => has(current, CHIP));
+        await assertAdded("after the box's button", /Say which address is billed/);
         run("chrome-devtools-axi", ["click", uidOf(snapshot(), SEND)], chromeEnv);
         const shot = await waitForSnapshot(
-          "the box never closed after Send to Agent",
-          (current) =>
-            has(current, /Say which address is billed/) && !has(current, CARD_TEXTBOX) && !has(current, CHIP),
+          "the note never reached the conversation",
+          (current) => has(current, /Say which address is billed/) && !has(current, NOTE_PENCIL),
         );
-        assertBoxGone("after the box's button", shot);
-        assertPageAndMainBoxStay("after the box's button", shot);
+        assertBoxGone("after Send to Agent", shot);
+        assertPageAndMainBoxStay("after Send to Agent", shot);
       });
 
-      await t.test("a send that fails keeps the box and its words until the note is delivered", async () => {
+      await t.test("a send that fails keeps the note and its words in his notes until it is delivered", async () => {
         // The browser cannot reach the server for this one send, as on a dropped connection.
         const failSends = (failing) =>
           run(
@@ -184,21 +196,21 @@ test(
         failSends(true);
         writeNote(await openBox(/heading "Step 3\. Review"/), "Keep this note if it fails");
         run("chrome-devtools-axi", ["press", "Enter"], chromeEnv);
-        await waitForSnapshot("the box never shrank to its chip", (current) => has(current, CHIP));
+        await assertAdded("before the failed send", /Keep this note if it fails/);
         run("chrome-devtools-axi", ["click", uidOf(snapshot(), SEND)], chromeEnv);
-        const kept = await waitForSnapshot("the failed note never said it was not sent", (current) =>
-          has(current, /Not sent\./),
-        );
-        assert.ok(has(kept, CHIP), `the box stays open after a failed send:\n${kept}`);
-        assert.ok(has(kept, /Keep this note if it fails/), `the box keeps his words:\n${kept}`);
+        const kept = await waitForSnapshot("the failed send never said so", (current) => has(current, SEND_FAILED));
+        assert.ok(has(kept, /Keep this note if it fails/), `his notes keep his words:\n${kept}`);
+        assert.ok(has(kept, NOTE_PENCIL), `the note still waits in his notes:\n${kept}`);
+        assertBoxGone("after a failed send", kept);
         assertPageAndMainBoxStay("after a failed send", kept);
 
-        // The note was still in the queue: sending it again gets it through, and its box closes.
+        // The note was still in his notes: sending it again gets it through.
         failSends(false);
-        run("chrome-devtools-axi", ["click", uidOf(snapshot(), /button "Send to Agent"/)], chromeEnv);
+        run("chrome-devtools-axi", ["click", uidOf(snapshot(), SEND)], chromeEnv);
         const delivered = await waitForSnapshot(
-          "the retried note never closed its box",
-          (current) => !has(current, CHIP) && !has(current, /Not sent\./),
+          "the retried note never got through",
+          (current) =>
+            has(current, /Keep this note if it fails/) && !has(current, NOTE_PENCIL) && !has(current, SEND_FAILED),
         );
         assertBoxGone("after the retry", delivered);
         assertPageAndMainBoxStay("after the retry", delivered);

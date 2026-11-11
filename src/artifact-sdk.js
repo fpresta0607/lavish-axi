@@ -526,17 +526,10 @@ export function createArtifactSdk(
   let ignoreNextClick = false;
   let shadow = null;
   // The pin: the board's comment mark, on the corner of whatever a click would annotate. While
-  // a card or a chip is up it comes back to what that one is about: an element or a text range.
+  // a card is up it comes back to what that card is about: an element or a text range.
   let pin = null;
   /** @type {{ getBoundingClientRect: () => DOMRect } | null} */
   let annotated = null;
-  // The chip an added note shrinks to, and what the chrome last said of that note's delivery.
-  /** @type {{ el: HTMLElement, noteId: string, label: string, text: string, status: string, sawSending: boolean, render: () => void } | null} */
-  let activeChip = null;
-  // What a note written now is about: the element or text range of the open card or of the chip.
-  // The chrome is told, so a note from the Conversation box goes on it too.
-  /** @type {{ target: any, options: any, context: any, label: string } | null} */
-  let selectedNote = null;
   // The open card's own actions, for the chrome's requests to commit or clear it.
   /** @type {{ commit: (commitId: string) => boolean, cancel: () => void, isEmpty: () => boolean, holdsImage: () => boolean } | null} */
   let activeCard = null;
@@ -545,14 +538,14 @@ export function createArtifactSdk(
   // keeps a cancelled diff comment.
   const cancelledDrafts = new Map();
   // The question cards drawn for the choices this page declares, and what was picked on each.
-  /** @type {Array<{ question: { id: string, question: string, detail: string, asker: string, options: string[], recommended: string }, form: HTMLElement, selection: string, written: string, answered: string, pending: string, noteId: string, status: string, sawSending: boolean, render: () => void, follow: (status: string) => void }>} */
+  /** @type {Array<{ question: { id: string, question: string, detail: string, asker: string, options: string[], recommended: string }, form: HTMLElement, selection: string, written: string, answered: string, pending: string, pendingImages: string, noteId: string, status: string, sawSending: boolean, box: ReturnType<typeof mountMessageBox> | null, restoredImages: Array<{ id: string, name: string }>, holdsUnreadyImage: () => boolean, render: () => void, follow: (status: string) => void }>} */
   const choiceCards = [];
   const NOTE_ID_PREFIX = Date.now().toString(36) + "-";
   let noteCounter = 0;
   let counter = 0;
   const ids = new WeakMap();
 
-  // Image attachments for the open annotation card. These are UX guides only - the
+  // Image attachments for a message box on the page. These are UX guides only - the
   // server re-validates size and enforces the per-prompt count/byte caps at queue
   // time (see attachment-store.js), rejecting the entire send batch on a mismatch
   // so the chrome can preserve the queue and surface the correction to the user.
@@ -582,11 +575,12 @@ export function createArtifactSdk(
       ? crypto.randomUUID()
       : "n" + Math.random().toString(36).slice(2) + Date.now().toString(36);
   let attachmentLocalCounter = 0;
-  // The controller for the currently open card, so upload results routed from the
-  // chrome reach the right chips. Only one card is ever open at a time.
-  let activeAttachments = null;
-  // What the chrome last said of dictation, which the open card's voice bubble is drawn from. The
-  // page has no microphone of its own, so the chrome listens for it and keeps the recent dictations.
+  // The controllers of the message boxes on the page, so upload results routed from the chrome
+  // reach the right chips. Chip ids are minted from one counter, so only the box that asked knows
+  // a result's id.
+  const attachmentControllers = new Set();
+  // What the chrome last said of dictation, which a box's voice bubble is drawn from. The page has
+  // no microphone of its own, so the chrome listens for it and keeps the recent dictations.
   let pageVoice = {
     supported: false,
     secure: true,
@@ -598,11 +592,24 @@ export function createArtifactSdk(
     canCopy: false,
     dictations: [],
   };
-  // The open card's voice bubble and the text it dictates into.
+  // Each message box on the page has a voice bubble and the text it dictates into. The chrome
+  // listens for one box at a time: the one he is in, which is the open card or the box he last put
+  // the cursor in.
   let voiceBoxSequence = 0;
-  /** @type {{ id: string, selection: { start: number, end: number } | null, lastCaptureId: number, bubble: ReturnType<typeof createVoiceBubble>, textarea: HTMLTextAreaElement, notify: (message: string, isProblem?: boolean) => void } | null} */
+  /** @typedef {{ id: string, selection: { start: number, end: number } | null, lastCaptureId: number, bubble: ReturnType<typeof createVoiceBubble>, textarea: HTMLTextAreaElement, notify: (message: string, isProblem?: boolean) => void, onChange: () => void }} VoiceBox */
+  /** @type {Set<VoiceBox>} */
+  const voiceBoxes = new Set();
+  /** @type {VoiceBox | null} */
   let activeVoice = null;
-  // A Copy in the card's list waits for the chrome, which has the clipboard, to say how it went.
+  // The open annotation card's message box.
+  /** @type {ReturnType<typeof mountMessageBox> | null} */
+  let cardBox = null;
+  // What a message box on the page needs beyond the board's own styles: its image chips, its
+  // drop outline and its notice line. Every shadow root a box is drawn in takes these.
+  const PAGE_BOX_CSS =
+    ".lavish-box{display:contents}.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint{flex:1;font-size:.9375rem}.lavish-hint-alert{color:var(--amber);font-weight:700}" +
+    ".lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}";
+  // A Copy in a box's list waits for the chrome, which has the clipboard, to say how it went.
   /** @type {{ resolve: (value?: unknown) => void, reject: (reason?: unknown) => void } | null} */
   let pendingCopy = null;
 
@@ -655,7 +662,7 @@ export function createArtifactSdk(
     );
   }
 
-  // Per-card image attachment state. Captures files, renders chips, drives uploads
+  // Per-box image attachment state. Captures files, renders chips, drives uploads
   // through the chrome (which owns the same-origin server round trip), and reports
   // which uploads are ready to ride along with the queued prompt.
   /**
@@ -855,6 +862,25 @@ export function createArtifactSdk(
       render();
     }
 
+    // Images a note already carries, back as ready chips: there is no file to show or to upload
+    // again, only the attachment the server holds under each id.
+    function seed(refs) {
+      for (const ref of refs) {
+        if (items.length >= ATTACHMENT_MAX_COUNT) break;
+        items.push({
+          localId: "att-" + ++attachmentLocalCounter,
+          file: null,
+          name: ref.name || "image",
+          mime: "",
+          status: "ready",
+          id: ref.id,
+          error: "",
+          url: "",
+        });
+      }
+      render();
+    }
+
     function destroy() {
       for (const item of items) if (item.url) URL.revokeObjectURL(item.url);
       items.length = 0;
@@ -871,8 +897,166 @@ export function createArtifactSdk(
       hasPending,
       hasErrors,
       setQueueBlocked,
+      seed,
       destroy,
     };
+  }
+
+  // The one message box, drawn on the page: the field, the paperclip, pasted and dropped images
+  // with their chips, and the voice bubble. The annotation card and a question's written answer
+  // both mount this one, so neither has a part of its own. `notify` says an image or voice problem
+  // on the caller's own notice line, and `onChange` runs after anything changes what the box
+  // holds: typing, dictation, a recent dictation pasted back, or an image.
+  /**
+   * @param {HTMLElement} host
+   * @param {{ id: string, placeholder: string, dropZone: HTMLElement, notify: (message: string, isProblem?: boolean) => void, onLayout?: () => void, onChange?: () => void }} config
+   */
+  function mountMessageBox(host, { id, placeholder, dropZone, notify, onLayout = () => {}, onChange = () => {} }) {
+    host.innerHTML =
+      messageBoxHtml({ id, placeholder, accept: ATTACHMENT_IMAGE_TYPES.accept }) +
+      '<div class="lavish-attachments" data-attachments hidden></div>';
+    const part = (name) => /** @type {HTMLElement} */ (host.querySelector("#" + id + name));
+    const textarea = /** @type {HTMLTextAreaElement} */ (part("Input"));
+    const attachInput = /** @type {HTMLInputElement} */ (part("AttachInput"));
+    // The chips draw once while the controller is made, before there is a box to speak of.
+    let isMounted = false;
+    const attachments = makeAttachmentsController(
+      /** @type {HTMLElement} */ (host.querySelector("[data-attachments]")),
+      {
+        notify,
+        onLayout: () => {
+          onLayout();
+          if (isMounted) onChange();
+        },
+      },
+    );
+    attachmentControllers.add(attachments);
+    /** @type {VoiceBox} */
+    const voice = {
+      id: ATTACHMENT_NONCE + ":" + ++voiceBoxSequence,
+      selection: null,
+      lastCaptureId: 0,
+      bubble: createVoiceBubble(
+        {
+          field: part("Field"),
+          dock: part("VoiceDock"),
+          button: /** @type {HTMLButtonElement} */ (part("Voice")),
+          bars: part("VoiceBars"),
+          card: part("VoiceRecent"),
+          list: part("VoiceRecentList"),
+          empty: part("VoiceRecentEmpty"),
+          close: /** @type {HTMLButtonElement} */ (part("VoiceRecentClose")),
+        },
+        {
+          dictations: () => pageVoice.dictations,
+          paste: (text) => {
+            insertDictatedText(textarea, text);
+            onChange();
+          },
+          toggle: () => {
+            takeVoice(voice);
+            reportSelection();
+            requestDictation("toggle");
+          },
+          cancel: () => {
+            if (activeVoice === voice) requestDictation("cancel");
+          },
+          get copy() {
+            return pageVoice.canCopy ? copyThroughChrome : null;
+          },
+          fit: (voiceCard) => fitVoiceCard(voiceCard, part("Field")),
+          rebuildKeepingFocus,
+        },
+      ),
+      textarea,
+      notify,
+      onChange,
+    };
+    voiceBoxes.add(voice);
+    voice.bubble.render(voiceStateFor(voice));
+    textarea.addEventListener("focus", () => {
+      takeVoice(voice);
+      reportSelection();
+    });
+    textarea.addEventListener("input", () => {
+      if (activeVoice === voice) requestDictation("cancel");
+      onChange();
+    });
+
+    part("Attach").onclick = () => attachInput.click();
+    attachInput.addEventListener("change", () => {
+      attachments.addFiles(attachInput.files);
+      attachInput.value = "";
+    });
+    textarea.addEventListener("paste", (event) => {
+      const { images, keepTextPaste } = planClipboardPaste(event.clipboardData, ATTACHMENT_ACCEPTED_MIME);
+      if (images.length && attachments.addFiles(images) && !keepTextPaste) event.preventDefault();
+    });
+    dropZone.addEventListener("dragover", (event) => {
+      // Accept ANY file drag so the drop lands on the box (and is preventable)
+      // instead of the browser navigating to a dropped non-image.
+      if (dataTransferHasFiles(event.dataTransfer)) {
+        event.preventDefault();
+        dropZone.classList.add("is-dropping");
+      }
+    });
+    dropZone.addEventListener("dragleave", (event) => {
+      if (event.target === dropZone) dropZone.classList.remove("is-dropping");
+    });
+    dropZone.addEventListener("drop", (event) => {
+      // Intercept every drop over the box so a dropped PDF/other file can never
+      // navigate the frame away, then partial-accept: attach the images and raise
+      // one UNSUPPORTED_TYPE chip per file that cannot be attached.
+      event.preventDefault();
+      dropZone.classList.remove("is-dropping");
+      const { images, unsupported } = partitionDroppedFiles(event.dataTransfer, ATTACHMENT_ACCEPTED_MIME);
+      if (images.length) attachments.addFiles(images);
+      if (unsupported.length) attachments.rejectUnsupportedBatch(unsupported);
+      // Some drags expose no enumerable files or items (only a "Files" type hint),
+      // so nothing can be partitioned; still tell the user the drop was refused.
+      if (!images.length && !unsupported.length && dataTransferHasFiles(event.dataTransfer)) {
+        attachments.rejectUnsupported("file");
+      }
+    });
+    isMounted = true;
+
+    return {
+      textarea,
+      attachments,
+      voice,
+      // An image still uploading, or one that failed: adding the note now would drop it.
+      holdsUnreadyImage: () => attachments.hasPending() || attachments.hasErrors(),
+      destroy() {
+        if (activeVoice === voice) {
+          requestDictation("cancel");
+          activeVoice = null;
+        }
+        voice.bubble.dispose();
+        voiceBoxes.delete(voice);
+        attachmentControllers.delete(attachments);
+        attachments.destroy();
+      },
+    };
+  }
+
+  // The chrome listens for the box he is in. Another box's bubble rests meanwhile.
+  function voiceStateFor(voice) {
+    return voice === activeVoice ? pageVoice : { ...pageVoice, listening: false, phase: "idle", problem: "" };
+  }
+
+  function renderVoiceBubbles() {
+    for (const voice of voiceBoxes) {
+      voice.bubble.render(voiceStateFor(voice));
+      voice.bubble.refresh();
+    }
+  }
+
+  // The caller tells the chrome, which stops listening for the box he left.
+  function takeVoice(voice) {
+    if (activeVoice === voice) return;
+    if (activeVoice) activeVoice.selection = null;
+    activeVoice = voice;
+    renderVoiceBubbles();
   }
 
   function uid(el) {
@@ -1330,8 +1514,11 @@ export function createArtifactSdk(
 
   // What is selected, as the chrome may put it on a note: plain fields only, since a text range's
   // context also holds the live element and Range, which a message cannot carry.
+  // What a note written now is about, which is what the open card is on, so a note from the
+  // Conversation box goes on it too. `card` says the page holds words or images a send must take
+  // with it or wait for: the open card, or a written answer whose image is not ready.
   function reportSelection() {
-    const c = selectedNote ? selectedNote.context : null;
+    const c = activeCardContext;
     const report = {
       selection: c
         ? {
@@ -1342,7 +1529,7 @@ export function createArtifactSdk(
             ...(c.target ? { target: c.target } : {}),
           }
         : null,
-      card: Boolean(activeCard),
+      card: Boolean(activeCard) || choiceCards.some((card) => card.holdsUnreadyImage()),
       voice_id: activeVoice?.id || "",
     };
     const key = JSON.stringify(report);
@@ -2311,6 +2498,8 @@ export function createArtifactSdk(
         id: card.question.id,
         selection: card.selection,
         written: card.written.slice(0, 4000),
+        // The images a written answer carries have no file to keep, only what the server holds.
+        images: card.box ? card.box.attachments.collectReady() : [],
         answered: card.answered,
         noteId: card.noteId,
       })),
@@ -2343,7 +2532,13 @@ export function createArtifactSdk(
       // The chrome's notes outlive this document, so an answer given before the reload is still
       // there under its note's id: the card follows that note again and adds nothing to the notes.
       if (typeof saved.noteId === "string" && saved.noteId.length <= 64) card.noteId = saved.noteId;
-      if (card.noteId) card.pending = choiceAnswer(card.question, card.selection, card.written);
+      card.restoredImages = (Array.isArray(saved.images) ? saved.images : [])
+        .filter((image) => image && typeof image.id === "string" && image.id.length <= 128)
+        .map((image) => ({ id: image.id, name: String(image.name || "image").slice(0, 200) }));
+      if (card.noteId) {
+        card.pending = choiceAnswer(card.question, card.selection, card.written);
+        card.pendingImages = card.pending ? card.restoredImages.map((image) => image.id).join("\n") : "";
+      }
       // An answer already sent stays sent: restoring never sends it again.
       if (typeof saved.answered === "string" && saved.answered) {
         card.answered = saved.answered.slice(0, 4000);
@@ -2427,29 +2622,25 @@ export function createArtifactSdk(
     style.textContent =
       ":host{all:initial;position:fixed;z-index:2147483647;left:0;top:0}" +
       board.shadowCss +
-      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating,.lavish-annotation-chip.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.comment-mark.lavish-pin{position:fixed;opacity:1;pointer-events:none}.lavish-annotation-card.is-dropping{outline:2px dashed var(--accent-green);outline-offset:3px}.lavish-hint{flex:1;font-size:.9375rem}.lavish-hint-alert{color:var(--amber);font-weight:700}.lavish-attachments{display:grid;gap:8px;max-height:176px;overflow-y:auto}.lavish-attachment-chip{display:flex;align-items:center;gap:10px;padding:6px 8px;border:1px solid var(--glass-border);border-radius:var(--radius);background:var(--field-bg);font-size:.9375rem}.lavish-attachment-chip.is-error{border-color:var(--red)}.lavish-attachment-thumb{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:0 0 auto}.lavish-attachment-thumb-empty{display:inline-block}.lavish-attachment-body{display:grid;min-width:0;flex:1 1 auto}.lavish-attachment-name{font-weight:700;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}.lavish-attachment-status{color:var(--muted)}.lavish-attachment-status-error{color:var(--red)}.lavish-attachment-retry{flex:0 0 auto;min-height:32px;padding:2px 10px}.lavish-attachment-remove{flex:0 0 auto;display:grid;place-items:center;width:30px;height:30px;min-height:30px;padding:0;border-radius:50%;border-color:transparent;background:transparent}.lavish-attachment-remove:hover{background:#ffffff0f}.lavish-attachment-remove .icon{width:16px;height:16px}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
+      PAGE_BOX_CSS +
+      `.lavish-text-highlight{position:fixed;pointer-events:none;border-radius:2px;background:rgba(16, 185, 129, 0.30);box-shadow:0 0 0 1px var(--accent-green)}.lavish-annotation-card.comment-overlay.floating{position:fixed;width:min(460px,calc(100vw - 24px))}.comment-mark.lavish-pin{position:fixed;opacity:1;pointer-events:none}.lavish-reveal-marker{position:fixed;pointer-events:none;border-radius:4px;box-shadow:var(--selected-glow);animation:lavish-reveal-pulse 2.4s ease-out forwards}@keyframes lavish-reveal-pulse{0%{opacity:0}12%{opacity:1}70%{opacity:1}100%{opacity:0}}`;
     shadow.appendChild(style);
     window.addEventListener("pagehide", watchBoardTips(shadow), { once: true });
     return shadow;
   }
 
+  // Closing leaves nothing of the card on the page: not its box, its outline, its pin or what it
+  // had selected.
   function closeCard() {
-    if (activeVoice) {
-      postArtifactMessage("lavish:dictate", { action: "cancel", voice_id: activeVoice.id });
-      activeVoice.bubble.dispose();
+    if (cardBox) {
+      cardBox.destroy();
+      cardBox = null;
     }
     activeCardContext = null;
     activeCard = null;
-    activeVoice = null;
-    selectedNote = null;
-    if (activeAttachments) {
-      activeAttachments.destroy();
-      activeAttachments = null;
-    }
     if (shadow) {
-      for (const el of [...shadow.querySelectorAll(".lavish-annotation-card,.lavish-annotation-chip")]) el.remove();
+      for (const el of [...shadow.querySelectorAll(".lavish-annotation-card")]) el.remove();
     }
-    activeChip = null;
     annotated = null;
     hidePin();
     clearHighlight(hovered);
@@ -2461,14 +2652,13 @@ export function createArtifactSdk(
     reportSelection();
   }
 
-  // What a note's delivery reads as on its chip: the board's marks, a clock while it waits in the
-  // notes, one check while it is on its way and two once delivered. A note that drops back to the
-  // notes after it was being sent did not get through, and says so. A choice that was sent with
-  // its card's own Send reads as on its way at once.
-  function noteMark(chip) {
-    if (chip.status === "delivered") return { tone: " succeeded", icon: CHECK_DOUBLE_ICON, label: "Delivered" };
-    if (chip.status === "restored") return { tone: "", icon: CHECK_ICON, label: "Sent" };
-    if (chip.status === "queued" && chip.sawSending) {
+  // What an answer's delivery reads as on its closed question: the board's marks, one check while
+  // it is on its way and two once delivered. An answer that drops back to the notes after it was
+  // being sent did not get through, and says so.
+  function noteMark(answer) {
+    if (answer.status === "delivered") return { tone: " succeeded", icon: CHECK_DOUBLE_ICON, label: "Delivered" };
+    if (answer.status === "restored") return { tone: "", icon: CHECK_ICON, label: "Sent" };
+    if (answer.status === "queued" && answer.sawSending) {
       return {
         tone: " uncertain",
         icon: WARNING_ICON,
@@ -2476,86 +2666,13 @@ export function createArtifactSdk(
         trouble: "Not sent. It is still in your notes: Send to Agent tries again.",
       };
     }
-    if (chip.status === "queued" && !chip.sendRequested) {
-      return { tone: "", icon: CLOCK_ICON, label: "In your notes: Send to Agent or Send & End sends them all" };
-    }
     return { tone: "", icon: CHECK_ICON, label: "Sending" };
   }
 
-  // Once added, the card shrinks to the board's chip in the same place: what the note is about,
-  // what it says, its delivery, a new comment on the same thing, and close.
-  function showSentChip(target, options, c, label, noteText, noteId) {
-    const root = ensureShadow();
-    closeCard();
-    if (options.range) {
-      highlightTextRange(options.range);
-      annotated = options.range;
-    } else {
-      selected = annotationTargetEl(target);
-      highlightElement(selected);
-      annotated = selected;
-    }
-    const rect = annotated.getBoundingClientRect();
-    const el = document.createElement("div");
-    el.className = "lavish-annotation-chip comment-overlay floating sent";
-    el.setAttribute("role", "status");
-    root.appendChild(el);
-    const chip = {
-      el,
-      noteId,
-      label,
-      text: noteText,
-      status: "queued",
-      sawSending: false,
-      render() {
-        const mark = noteMark(chip);
-        el.setAttribute("aria-label", "Comment on " + label + ". " + mark.label);
-        el.innerHTML =
-          '<span class="delivery' +
-          mark.tone +
-          '" aria-hidden="true">' +
-          mark.icon +
-          '</span><p class="comment-sent-text"><strong>' +
-          escapeAnnotationText(label) +
-          "</strong> " +
-          escapeAnnotationText(chip.text || "Image annotation") +
-          '</p><button class="icon-button lavish-chip-new" type="button" aria-label="New comment on this" data-tip="New comment" data-tip-align="end">' +
-          COMMENT_ICON +
-          '</button><button class="icon-button lavish-chip-close" type="button" aria-label="Close" data-tip="Close" data-tip-align="end">' +
-          CLOSE_ICON +
-          "</button>" +
-          (mark.trouble ? '<p class="comment-trouble lavish-hint-alert">' + mark.trouble + "</p>" : "");
-        const again = /** @type {HTMLButtonElement | null} */ (el.querySelector(".lavish-chip-new"));
-        const close = /** @type {HTMLButtonElement | null} */ (el.querySelector(".lavish-chip-close"));
-        if (again) again.onclick = () => showAnnotationCard(target, { ...options, context: c, restoreText: undefined });
-        if (close) close.onclick = closeCard;
-        el.style.left = Math.min(Math.max(12, rect.left), window.innerWidth - el.offsetWidth - 12) + "px";
-        el.style.top = Math.min(Math.max(12, rect.bottom + 8), window.innerHeight - el.offsetHeight - 12) + "px";
-      },
-    };
-    activeChip = chip;
-    selectedNote = { target, options, context: c, label };
-    chip.render();
-    reportSelection();
-  }
-
+  // What the chrome says of a question's answer, which is the one note the page follows.
   function updateNoteStatus(noteId, status) {
     const answered = choiceCards.find((card) => card.noteId && card.noteId === String(noteId || ""));
-    if (answered) {
-      answered.follow(status);
-      return;
-    }
-    if (!activeChip || activeChip.noteId !== String(noteId || "")) return;
-    // The note was taken out of the queue in the conversation panel, or it got through: either
-    // way its chip is done. A note that did not get through keeps its chip and its words.
-    if (status === "removed" || status === "delivered") {
-      closeCard();
-      return;
-    }
-    if (status !== "queued" && status !== "sending" && status !== "delivered") return;
-    if (status === "sending") activeChip.sawSending = true;
-    activeChip.status = status;
-    activeChip.render();
+    if (answered) answered.follow(status);
   }
 
   function showAnnotationCard(target, options = {}) {
@@ -2597,17 +2714,6 @@ export function createArtifactSdk(
           : c.tag === "mermaid-node"
             ? "Annotate node" + (nodeLabel ? ": " + escapeAnnotationText(nodeLabel) : "")
             : "Annotate &lt;" + c.tag + "&gt;";
-    // What the note is about, in the words its chip and the conversation use.
-    const label =
-      c.tag === "text"
-        ? "text"
-        : tableLabel
-          ? isCellItself
-            ? "cell: " + tableLabel
-            : "<" + c.tag + "> in " + tableLabel
-          : c.tag === "mermaid-node"
-            ? "node" + (nodeLabel ? ": " + nodeLabel : "")
-            : "<" + c.tag + ">";
     const draftKey = [c.selector, c.tag, c.target && c.target.text ? c.target.text : ""].join("\n");
     const placeholder =
       c.tag === "text"
@@ -2620,9 +2726,7 @@ export function createArtifactSdk(
     card.innerHTML =
       '<header><strong class="lavish-heading">' +
       heading +
-      "</strong></header>" +
-      messageBoxHtml({ id: "lavishCard", placeholder, accept: ATTACHMENT_IMAGE_TYPES.accept }) +
-      '<div class="lavish-attachments" data-attachments hidden></div>' +
+      '</strong></header><div class="lavish-box"></div>' +
       '<footer><span class="muted lavish-hint" role="status">Enter adds it to your notes &middot; Shift+Enter new line &middot; Esc cancels' +
       '</span><button class="icon-button send lavish-add" type="button" aria-label="Add to your notes" data-tip="Add to your notes. Send to Agent sends them all" data-tip-align="end">' +
       PLUS_ICON +
@@ -2643,23 +2747,17 @@ export function createArtifactSdk(
     }
     positionCard();
 
-    const textarea = /** @type {HTMLTextAreaElement | null} */ (card.querySelector("textarea"));
-    const cancelButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-cancel"));
-    const addButton = /** @type {HTMLButtonElement | null} */ (card.querySelector(".lavish-add"));
-    const attachmentsList = /** @type {HTMLDivElement | null} */ (card.querySelector("[data-attachments]"));
-    const attachButton = /** @type {HTMLButtonElement | null} */ (card.querySelector("#lavishCardAttach"));
-    const attachInput = /** @type {HTMLInputElement | null} */ (card.querySelector("#lavishCardAttachInput"));
-    const attachNotice = /** @type {HTMLDivElement | null} */ (card.querySelector(".lavish-hint"));
-    if (!textarea || !cancelButton || !addButton || !attachmentsList || !attachButton || !attachInput) return;
+    const cancelButton = /** @type {HTMLButtonElement} */ (card.querySelector(".lavish-cancel"));
+    const addButton = /** @type {HTMLButtonElement} */ (card.querySelector(".lavish-add"));
+    const attachNotice = /** @type {HTMLElement} */ (card.querySelector(".lavish-hint"));
 
     // The card has one notice line, shared by the neutral keyboard hint and by
     // attachment problems (the count cap, a stalled upload, a failed one). A rejected
     // drop is an error, so it must not inherit the hint's passive gray - it renders in
     // the error color until cleared, and clearing restores the hint rather than
     // leaving stale red text behind.
-    const defaultHintHtml = attachNotice ? attachNotice.innerHTML : "";
+    const defaultHintHtml = attachNotice.innerHTML;
     const notify = (message, isProblem = true) => {
-      if (!attachNotice) return;
       if (message) {
         attachNotice.textContent = message;
         attachNotice.classList.toggle("lavish-hint-alert", isProblem);
@@ -2668,78 +2766,19 @@ export function createArtifactSdk(
         attachNotice.classList.remove("lavish-hint-alert");
       }
     };
-    const attachments = makeAttachmentsController(attachmentsList, { notify, onLayout: positionCard });
-    activeAttachments = attachments;
-    const voicePart = (part) => /** @type {HTMLElement} */ (card.querySelector("#lavishCard" + part));
-    const bubble = createVoiceBubble(
-      {
-        field: voicePart("Field"),
-        dock: voicePart("VoiceDock"),
-        button: /** @type {HTMLButtonElement} */ (voicePart("Voice")),
-        bars: voicePart("VoiceBars"),
-        card: voicePart("VoiceRecent"),
-        list: voicePart("VoiceRecentList"),
-        empty: voicePart("VoiceRecentEmpty"),
-        close: /** @type {HTMLButtonElement} */ (voicePart("VoiceRecentClose")),
-      },
-      {
-        dictations: () => pageVoice.dictations,
-        paste: (text) => insertDictatedText(textarea, text),
-        toggle: () => requestDictation("toggle"),
-        cancel: () => requestDictation("cancel"),
-        get copy() {
-          return pageVoice.canCopy ? copyThroughChrome : null;
-        },
-        fit: (voiceCard) => fitVoiceCard(voiceCard, voicePart("Field")),
-        rebuildKeepingFocus,
-      },
-    );
-    bubble.render(pageVoice);
-    activeVoice = {
-      id: ATTACHMENT_NONCE + ":" + ++voiceBoxSequence,
-      selection: null,
-      lastCaptureId: 0,
-      bubble,
-      textarea,
+    // Unsent annotation text is review context Lavish owns, so it is reported to the chrome and
+    // replayed after a live reload.
+    cardBox = mountMessageBox(/** @type {HTMLElement} */ (card.querySelector(".lavish-box")), {
+      id: "lavishCard",
+      placeholder,
+      dropZone: card,
       notify,
-    };
-    textarea.addEventListener("input", () => requestDictation("cancel"));
-
-    attachButton.onclick = () => attachInput.click();
-    attachInput.addEventListener("change", () => {
-      attachments.addFiles(attachInput.files);
-      attachInput.value = "";
+      onLayout: positionCard,
+      onChange: scheduleReviewStateReport,
     });
-    textarea.addEventListener("paste", (event) => {
-      const { images, keepTextPaste } = planClipboardPaste(event.clipboardData, ATTACHMENT_ACCEPTED_MIME);
-      if (images.length && attachments.addFiles(images) && !keepTextPaste) event.preventDefault();
-    });
-    card.addEventListener("dragover", (event) => {
-      // Accept ANY file drag so the drop lands on the card (and is preventable)
-      // instead of the browser navigating to a dropped non-image.
-      if (dataTransferHasFiles(event.dataTransfer)) {
-        event.preventDefault();
-        card.classList.add("is-dropping");
-      }
-    });
-    card.addEventListener("dragleave", (event) => {
-      if (event.target === card) card.classList.remove("is-dropping");
-    });
-    card.addEventListener("drop", (event) => {
-      // Intercept every drop over the card so a dropped PDF/other file can never
-      // navigate the frame away, then partial-accept: attach the images and raise
-      // one UNSUPPORTED_TYPE chip per file that cannot be attached.
-      event.preventDefault();
-      card.classList.remove("is-dropping");
-      const { images, unsupported } = partitionDroppedFiles(event.dataTransfer, ATTACHMENT_ACCEPTED_MIME);
-      if (images.length) attachments.addFiles(images);
-      if (unsupported.length) attachments.rejectUnsupportedBatch(unsupported);
-      // Some drags expose no enumerable files or items (only a "Files" type hint),
-      // so nothing can be partitioned; still tell the user the drop was refused.
-      if (!images.length && !unsupported.length && dataTransferHasFiles(event.dataTransfer)) {
-        attachments.rejectUnsupported("file");
-      }
-    });
+    const { textarea, attachments } = cardBox;
+    // The open card is the box he is in.
+    takeVoice(cardBox.voice);
 
     // Try to add the card to the notes. Returns false only when it is held back. Gates on any
     // still-uploading attachment (R2.4): adding it then would silently drop it, so we
@@ -2761,11 +2800,11 @@ export function createArtifactSdk(
         closeCard();
         return true;
       }
-      noteCounter += 1;
-      const noteId = NOTE_ID_PREFIX + noteCounter;
-      queuePrompt(prompt, { ...c, queueKey: "", attachments: readyAttachments, noteId, commitId });
+      queuePrompt(prompt, { ...c, queueKey: "", attachments: readyAttachments, commitId });
       cancelledDrafts.delete(draftKey);
-      showSentChip(target, options, c, label, prompt, noteId);
+      // The note is in his notes, where the Conversation panel shows it, so the card goes and
+      // leaves nothing on the page (the Overlord, 2026-11-11).
+      closeCard();
       return true;
     }
     const isEmpty = () =>
@@ -2795,9 +2834,6 @@ export function createArtifactSdk(
         cancelCard();
       }
     });
-    // Unsent annotation text is review context Lavish owns, so it is reported to the chrome and
-    // replayed after a live reload.
-    textarea.addEventListener("input", scheduleReviewStateReport);
     const restoreText = typeof options.restoreText === "string" ? options.restoreText : cancelledDrafts.get(draftKey);
     if (typeof restoreText === "string") {
       textarea.value = restoreText;
@@ -2812,7 +2848,6 @@ export function createArtifactSdk(
       isEmpty,
       holdsImage: () => attachments.hasPending() || attachments.hasErrors() || attachments.hasReady(),
     };
-    selectedNote = { target, options, context: c, label };
     reportSelection();
     setTimeout(() => textarea.focus(), 0);
   }
@@ -2850,7 +2885,8 @@ export function createArtifactSdk(
     voiceCard.style.maxHeight = Math.max(above, below) + "px";
   }
 
-  // The chrome's word on dictation, drawn on the open card's bubble. A problem says so on the card.
+  // The chrome's word on dictation, drawn on the bubble of the box he is in. A problem says so
+  // on that box.
   function setPageVoice(msg) {
     const problem = String(msg.problem || "");
     const previousPhase = pageVoice.phase;
@@ -2869,13 +2905,11 @@ export function createArtifactSdk(
         at: Number(dictation?.at) || 0,
       })),
     };
-    if (!activeVoice) return;
-    if (previousPhase !== pageVoice.phase || previousProblem !== problem) {
+    if (activeVoice && (previousPhase !== pageVoice.phase || previousProblem !== problem)) {
       const hint = voiceStatus(pageVoice);
       activeVoice.notify(problem || hint, Boolean(problem));
     }
-    activeVoice.bubble.render(pageVoice);
-    activeVoice.bubble.refresh();
+    renderVoiceBubbles();
   }
 
   function dataTransferHasFiles(dataTransfer) {
@@ -2907,7 +2941,9 @@ export function createArtifactSdk(
     if (msg.type === "lavish:setAnnotationMode") setAnnotationMode(msg.enabled);
     if (msg.type === "lavish:attachmentResult") {
       if (!isTrustedAttachmentResult(event, { parentWindow: parent, nonce: ATTACHMENT_NONCE })) return;
-      activeAttachments?.handleResult(msg.localId, msg.ok, msg.id, msg.error);
+      for (const attachments of attachmentControllers) {
+        attachments.handleResult(msg.localId, msg.ok, msg.id, msg.error);
+      }
     }
     if (msg.type === "lavish:requestSnapshot") {
       postArtifactMessage("lavish:snapshot", {
@@ -2932,6 +2968,7 @@ export function createArtifactSdk(
       activeVoice.lastCaptureId = msg.capture_id;
       const selection = activeVoice.selection;
       insertDictatedText(activeVoice.textarea, String(msg.text || ""), selection, msg.focus !== false);
+      activeVoice.onChange();
     }
     if (msg.type === "lavish:dictationCopied" && pendingCopy) {
       if (msg.ok === true) pendingCopy.resolve();
@@ -2939,16 +2976,14 @@ export function createArtifactSdk(
       pendingCopy = null;
     }
     if (msg.type === "lavish:revealElement") revealElement(msg.selector);
-    // A note reworded in the Conversation panel says its new words on its chip.
-    if (msg.type === "lavish:noteText" && activeChip && activeChip.noteId === String(msg.noteId || "")) {
-      activeChip.text = String(msg.text || "");
-      activeChip.render();
-    }
     // A send takes the open card's unfinished words with it. postMessage is ordered, so the note
-    // reaches the chrome before the answer that it is done.
+    // reaches the chrome before the answer that it is done. A written answer whose image is not
+    // ready holds the send back as a card would, and says so on itself.
     if (msg.type === "lavish:commitDraft") {
       const commitId = String(msg.commit_id || "");
-      const committed = activeCard ? activeCard.commit(commitId) : true;
+      const held = choiceCards.filter((card) => card.holdsUnreadyImage());
+      for (const card of held) card.box?.attachments.setQueueBlocked(true);
+      const committed = !held.length && (activeCard ? activeCard.commit(commitId) : true);
       postArtifactMessage("lavish:draftCommitted", { commit_id: commitId, committed });
     }
     if (msg.type === "lavish:clearSelection") {
@@ -2961,11 +2996,8 @@ export function createArtifactSdk(
       else closeCard();
     }
     // The chrome put a note from the Conversation box on what is selected here: an empty card
-    // gives way to that note's chip, as if it had been written in the card.
-    if (msg.type === "lavish:selectionNoted" && selectedNote && (!activeCard || activeCard.isEmpty())) {
-      const { target, options: noteOptions, context: c, label } = selectedNote;
-      showSentChip(target, noteOptions, c, label, String(msg.text || ""), String(msg.noteId || ""));
-    }
+    // closes, as if the note had been written in it.
+    if (msg.type === "lavish:selectionNoted" && activeCard?.isEmpty()) closeCard();
   });
 
   // Bring a warning's element into view and flash it. The marker is Lavish UI, so it is excluded
@@ -3183,10 +3215,11 @@ export function createArtifactSdk(
   // Each declared question is drawn as the board's question card, where the declaration sits: a
   // plain radio list with the recommended option first and marked, Other for a written answer,
   // and two buttons: Send, which keeps the review open, and End, which sends and ends it, both
-  // sending every note on the page. A pick joins those notes and sends nothing. A card keeps its
+  // sending every note on the page. A pick joins those notes and sends nothing. The written answer
+  // is the one message box, so it is dictated and takes images as any note does. A card keeps its
   // state here rather than in its controls, so a reload can restore it and a redraw never loses a
   // half-made pick.
-  function createChoiceCard(question, host) {
+  function createChoiceCard(question, host, index) {
     const form = document.createElement("form");
     form.className = "question-card";
     const choices = orderedChoices(question);
@@ -3228,13 +3261,10 @@ export function createArtifactSdk(
         '<label class="question-choice">' +
         radio("other", card.selection === "other") +
         '<span class="question-option"><span>Other</span><small>Write your own answer.</small></span></label>' +
-        '<label class="written-answer"' +
+        '<div class="written-answer"' +
         (card.selection === "other" ? "" : " hidden") +
-        '><span class="sr-only">Your written answer</span><textarea name="written" rows="3" maxlength="4000" placeholder="Tell ' +
-        asker +
-        ' what you prefer...">' +
-        escapeAnnotationText(card.written) +
-        '</textarea></label></fieldset><div class="card-actions"><button class="primary send-decision" type="submit"' +
+        '><div class="lavish-box"></div><p class="muted lavish-hint" role="status" hidden></p></div>' +
+        '</fieldset><div class="card-actions"><button class="primary send-decision" type="submit"' +
         disabled +
         ">" +
         SEND_ICON +
@@ -3253,7 +3283,7 @@ export function createArtifactSdk(
     // A closed question shows what was chosen, not radios to choose again, and how its answer
     // travelled.
     function closedHtml() {
-      const mark = noteMark({ status: card.status, sawSending: card.sawSending, sendRequested: true });
+      const mark = noteMark(card);
       const written = !question.options.includes(card.answered);
       return (
         head +
@@ -3294,13 +3324,27 @@ export function createArtifactSdk(
       selection: "",
       written: "",
       answered: "",
-      // The answer waiting in the notes for a send, or "" when there is none.
+      // The answer waiting in the notes for a send, or "" when there is none, and the images
+      // that note carries.
       pending: "",
+      pendingImages: "",
       noteId: "",
       status: "queued",
       sawSending: false,
+      // The written answer's message box, while the question is open.
+      /** @type {ReturnType<typeof mountMessageBox> | null} */
+      box: null,
+      // The images an answer carried before a reload, put back on the box the next time it is drawn.
+      /** @type {Array<{ id: string, name: string }>} */
+      restoredImages: [],
+      holdsUnreadyImage: () => Boolean(card.box?.holdsUnreadyImage()),
       render() {
+        if (card.box) {
+          card.box.destroy();
+          card.box = null;
+        }
         form.innerHTML = card.answered ? closedHtml() : openHtml();
+        if (!card.answered) mountWrittenAnswer();
       },
       // What the chrome says of the answer's note. Taken out of the notes before it went, the
       // question is open again; on its way, the card closes on what was chosen.
@@ -3308,6 +3352,7 @@ export function createArtifactSdk(
         if (status === "removed") {
           card.answered = "";
           card.pending = "";
+          card.pendingImages = "";
           card.selection = "";
           card.status = "queued";
           card.sawSending = false;
@@ -3326,6 +3371,48 @@ export function createArtifactSdk(
         if (card.answered) card.render();
       },
     };
+
+    // The written answer is drawn as the one message box. What it holds is his answer as he
+    // gives it: his words and his images are in his notes from then on, and Enter adds no line.
+    function mountWrittenAnswer() {
+      const written = /** @type {HTMLElement} */ (form.querySelector(".written-answer"));
+      const notice = /** @type {HTMLElement} */ (written.querySelector(".lavish-hint"));
+      const box = mountMessageBox(/** @type {HTMLElement} */ (written.querySelector(".lavish-box")), {
+        id: "lavishChoice" + index,
+        placeholder: "Tell " + (question.asker || "This page") + " what you prefer...",
+        dropZone: written,
+        notify: (message, isProblem = true) => {
+          notice.textContent = message;
+          notice.hidden = !message;
+          notice.classList.toggle("lavish-hint-alert", Boolean(message) && isProblem);
+        },
+        onChange: () => {
+          if (card.answered) return;
+          card.written = box.textarea.value;
+          noteAnswer();
+          syncControls();
+          // The chrome is told when an image here is not ready, so a send waits for it.
+          reportSelection();
+          scheduleReviewStateReport();
+        },
+      });
+      card.box = box;
+      box.textarea.maxLength = 4000;
+      box.textarea.value = card.written;
+      if (card.restoredImages.length) box.attachments.seed(card.restoredImages);
+      card.restoredImages = [];
+      // A written answer on show is a box he is in, unless a card is: its microphone is live.
+      if (card.selection === "other" && !activeVoice) {
+        takeVoice(box.voice);
+        reportSelection();
+      }
+      box.textarea.addEventListener("keydown", (event) => {
+        if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+        // The answer is already in his notes: Enter finishes writing it and adds no line.
+        event.preventDefault();
+        box.textarea.blur();
+      });
+    }
 
     // A pick or a keystroke changes three things only, so the card is not redrawn under the
     // reader's cursor: whether the written answer shows, whether there is an answer to send, and
@@ -3346,9 +3433,13 @@ export function createArtifactSdk(
     // rest, and a new answer to the same question takes its place in the notes. The prompt is the
     // answer exactly, the option as the page declared it or the words he wrote, with nothing
     // appended: that text is what reaches whoever asked.
+    // A written answer takes the images in its box with it. An option he picked is the page's own
+    // words and carries none.
     function noteAnswer() {
       const answer = choiceAnswer(question, card.selection, card.written);
-      if (answer === card.pending) return;
+      const images = answer && card.selection === "other" && card.box ? card.box.attachments.collectReady() : [];
+      const imagesKey = images.map((image) => image.id).join("\n");
+      if (answer === card.pending && imagesKey === card.pendingImages) return;
       const queueKey = "choice:" + question.id;
       if (answer) {
         if (!card.noteId) {
@@ -3362,11 +3453,13 @@ export function createArtifactSdk(
           selector: "script[data-lavish-choices]",
           queueKey,
           noteId: card.noteId,
+          attachments: images,
         });
       } else {
         postArtifactMessage("lavish:dropQueuedPrompt", { queueKey });
       }
       card.pending = answer;
+      card.pendingImages = imagesKey;
     }
 
     form.addEventListener("change", (event) => {
@@ -3376,20 +3469,18 @@ export function createArtifactSdk(
       noteAnswer();
       syncControls();
       scheduleReviewStateReport();
-    });
-    form.addEventListener("input", (event) => {
-      const control = /** @type {HTMLTextAreaElement | null} */ (event.target);
-      if (card.answered || !control || control.name !== "written") return;
-      card.written = String(control.value);
-      noteAnswer();
-      syncControls();
-      scheduleReviewStateReport();
+      // Other puts him in its box, ready to write or dictate.
+      if (card.selection === "other") card.box?.textarea.focus();
     });
     // Send and End send every note, this answer with them; End ends the review in the same
-    // request.
+    // request. An image that is not ready holds them back, as it holds a card.
     form.addEventListener("submit", (event) => {
       event.preventDefault();
       if (!card.pending || card.answered) return;
+      if (card.holdsUnreadyImage()) {
+        card.box?.attachments.setQueueBlocked(true);
+        return;
+      }
       const isEnd = Boolean(event.submitter) && event.submitter === form.querySelector(".end-decision");
       card.answered = card.pending;
       card.status = "queued";
@@ -3417,14 +3508,15 @@ export function createArtifactSdk(
     style.textContent =
       ":host{all:initial}" +
       board.shadowCss +
+      PAGE_BOX_CSS +
       ':host{display:block;background:none}.lavish-choices{display:grid;gap:16px;max-width:820px;margin:32px auto;padding:0 16px 32px}.lavish-choices .question-card{background:var(--glass-bg),var(--hero-surface)}.lavish-choices fieldset{display:grid;gap:12px;min-width:0;margin:0;padding:0;border:0}.lavish-choices .goblin-avatar{display:block;flex:none;width:48px;height:48px;background:url("/assets/goblin-app.png") center / contain no-repeat}.lavish-choices .question-detail{max-width:72ch;color:var(--muted);white-space:pre-line;overflow-wrap:anywhere}.lavish-choices .end-decision{display:inline-flex;align-items:center;gap:8px;padding-inline:22px;white-space:nowrap;color:var(--red)}.lavish-choices .end-decision:not(:disabled){border-color:var(--red)}.lavish-choices .end-decision .icon{width:20px;height:20px}';
     root.appendChild(style);
     window.addEventListener("pagehide", watchBoardTips(root), { once: true });
     const list = document.createElement("div");
     list.className = "lavish-choices";
     root.appendChild(list);
-    for (const question of questions) {
-      const card = createChoiceCard(question, host);
+    for (const [index, question] of questions.entries()) {
+      const card = createChoiceCard(question, host, index);
       choiceCards.push(card);
       list.appendChild(card.form);
     }

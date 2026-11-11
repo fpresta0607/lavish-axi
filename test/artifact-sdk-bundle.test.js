@@ -12,6 +12,7 @@ import { createSdkJs } from "../src/server.js";
 function createElement(tag) {
   const attributes = new Map();
   const queried = new Map();
+  let html = "";
   const element = {
     tagName: String(tag).toUpperCase(),
     nodeName: String(tag).toUpperCase(),
@@ -23,7 +24,14 @@ function createElement(tag) {
     value: "",
     selectionStart: 0,
     selectionEnd: 0,
-    innerHTML: "",
+    // New markup means new elements: what was looked up in the old markup is gone with it.
+    get innerHTML() {
+      return html;
+    },
+    set innerHTML(value) {
+      html = String(value);
+      queried.clear();
+    },
     textContent: "",
     offsetWidth: 100,
     offsetHeight: 100,
@@ -148,6 +156,13 @@ function cell(tag, text) {
   element.textContent = text;
   return element;
 }
+
+// The annotation card draws the one message box inside its `.lavish-box`, and the box's parts
+// carry the ids `src/message-box.js` gives them.
+function boxPart(card, name) {
+  return card.querySelector(".lavish-box").querySelector("#lavishCard" + name);
+}
+const textareaOf = (card) => boxPart(card, "Input");
 
 function bootSdk({
   runAnimationFrames = false,
@@ -327,7 +342,7 @@ function bootSdk({
     // queuePrompt message.
     queue(text) {
       const card = this.card();
-      card.querySelector("textarea").value = text;
+      textareaOf(card).value = text;
       card.querySelector(".lavish-add").onclick();
       return posted.findLast((message) => message.type === "lavish:queuePrompt");
     },
@@ -336,6 +351,14 @@ function bootSdk({
       const report = posted.findLast((message) => message.type === "lavish:selection");
       assert.ok(report, "the SDK reports what is selected");
       return report;
+    },
+    // What the annotation layer shows on the page: the class of everything drawn there that is
+    // not hidden.
+    drawn() {
+      return documentElement.children
+        .flatMap((child) => child.shadowRoot?.children || [])
+        .filter((child) => child.tagName !== "STYLE" && !child.hidden)
+        .map((child) => String(child.className));
     },
     shadowChildren(className) {
       return documentElement.children
@@ -513,7 +536,7 @@ test("the annotation card names the cell it annotates when the cell itself is cl
   sdk.click(evidence);
 
   assert.match(sdk.card().innerHTML, /Annotate cell: Media &amp; Apple Music → Database evidence/);
-  assert.match(sdk.card().innerHTML, /about this table cell/);
+  assert.match(sdk.card().querySelector(".lavish-box").innerHTML, /about this table cell/);
 });
 
 test("the annotation card names the clicked element, not the cell, for a nested click", () => {
@@ -523,7 +546,7 @@ test("the annotation card names the clicked element, not the cell, for a nested 
   sdk.click(badge);
 
   assert.match(sdk.card().innerHTML, /Annotate &lt;code&gt; in Media &amp; Apple Music → Database evidence/);
-  assert.doesNotMatch(sdk.card().innerHTML, /about this table cell/);
+  assert.match(sdk.card().querySelector(".lavish-box").innerHTML, /about this element/);
 });
 
 test("the served SDK bundle resolves table coordinates only for annotation clicks", () => {
@@ -558,7 +581,7 @@ test("Escape closes an annotation card with no text and no attachment", () => {
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  const textarea = sdk.card().querySelector("textarea");
+  const textarea = textareaOf(sdk.card());
   textarea.value = "   "; // whitespace-only counts as empty
   pressEscape(textarea);
 
@@ -570,7 +593,7 @@ test("Escape during IME composition leaves an empty annotation card open", () =>
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  const textarea = sdk.card().querySelector("textarea");
+  const textarea = textareaOf(sdk.card());
   const listener = textarea.listeners.find((entry) => entry.type === "keydown");
   listener.handler({ key: "Escape", isComposing: true, preventDefault() {} });
 
@@ -585,8 +608,8 @@ test("Escape cancels a card with typed text and keeps the text for that element"
   const other = appendTo(sdk.body, cell("h2", "A heading"));
 
   sdk.click(paragraph);
-  sdk.card().querySelector("textarea").value = "keep this note";
-  pressEscape(sdk.card().querySelector("textarea"));
+  textareaOf(sdk.card()).value = "keep this note";
+  pressEscape(textareaOf(sdk.card()));
   assert.equal(paragraph.style.outline, "", "the highlight is cleared, proving the card closed");
   assert.equal(
     sdk.posted.some((message) => message.type === "lavish:queuePrompt"),
@@ -595,10 +618,10 @@ test("Escape cancels a card with typed text and keeps the text for that element"
   );
 
   sdk.click(other);
-  assert.equal(sdk.card().querySelector("textarea").value, "", "another element starts empty");
+  assert.equal(textareaOf(sdk.card()).value, "", "another element starts empty");
 
   sdk.click(paragraph);
-  assert.equal(sdk.card().querySelector("textarea").value, "keep this note");
+  assert.equal(textareaOf(sdk.card()).value, "keep this note");
 });
 
 test("the Cancel button keeps the typed text for that element too", () => {
@@ -606,11 +629,11 @@ test("the Cancel button keeps the typed text for that element too", () => {
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  sdk.card().querySelector("textarea").value = "half a thought";
+  textareaOf(sdk.card()).value = "half a thought";
   sdk.card().querySelector(".lavish-cancel").onclick();
   sdk.click(paragraph);
 
-  assert.equal(sdk.card().querySelector("textarea").value, "half a thought");
+  assert.equal(textareaOf(sdk.card()).value, "half a thought");
 });
 
 test("a sent note leaves nothing behind for its element's next card", () => {
@@ -621,7 +644,7 @@ test("a sent note leaves nothing behind for its element's next card", () => {
   sdk.queue("Reword this");
   sdk.click(paragraph);
 
-  assert.equal(sdk.card().querySelector("textarea").value, "");
+  assert.equal(textareaOf(sdk.card()).value, "");
 });
 
 function pressEnter(textarea, modifiers = {}) {
@@ -640,8 +663,8 @@ test("Enter, Ctrl+Enter and Cmd+Enter each add the note to the notes and send no
     const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
     sdk.click(paragraph);
-    sdk.card().querySelector("textarea").value = "Reword this";
-    pressEnter(sdk.card().querySelector("textarea"), modifier);
+    textareaOf(sdk.card()).value = "Reword this";
+    pressEnter(textareaOf(sdk.card()), modifier);
 
     assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt"]);
     assert.equal(sdk.posted.find((message) => message.type === "lavish:queuePrompt").prompt.prompt, "Reword this");
@@ -656,7 +679,7 @@ test("the card's button adds the note to the notes and sends nothing", () => {
   sdk.queue("Reword this");
 
   assert.deepEqual(postedTypes(sdk), ["lavish:queuePrompt"]);
-  assert.equal(sdk.cards().length, 0, "the card has shrunk to its chip");
+  assert.equal(sdk.cards().length, 0, "the card is gone");
 });
 
 test("Shift+Enter is a new line and sends nothing", () => {
@@ -664,8 +687,8 @@ test("Shift+Enter is a new line and sends nothing", () => {
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  sdk.card().querySelector("textarea").value = "First line";
-  pressEnter(sdk.card().querySelector("textarea"), { shiftKey: true });
+  textareaOf(sdk.card()).value = "First line";
+  pressEnter(textareaOf(sdk.card()), { shiftKey: true });
 
   assert.deepEqual(postedTypes(sdk), []);
 });
@@ -675,132 +698,69 @@ test("Enter on an empty card closes it and sends nothing", () => {
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  pressEnter(sdk.card().querySelector("textarea"));
+  pressEnter(textareaOf(sdk.card()));
 
   assert.deepEqual(postedTypes(sdk), []);
   assert.equal(paragraph.style.outline, "");
 });
 
-// Once sent, the card shrinks to the board's chip: what it was about, what was said, and check
-// marks that follow the note's delivery as the chrome reports it.
-test("a sent note shrinks to a chip whose check marks follow its delivery", () => {
-  const sdk = bootSdk();
-  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+// Once the note is in his notes the card is gone and nothing of it stays on the page: no chip, no
+// outline, no pin and nothing selected (the Overlord, 2026-11-11). The Conversation panel is where
+// the note shows from then on, so the page follows no note of a card.
+test("a note added from the card leaves nothing of the card on the page", () => {
+  const ways = {
+    Enter: (sdk) => pressEnter(textareaOf(sdk.card())),
+    "the card's button": (sdk) => sdk.card().querySelector(".lavish-add").onclick(),
+  };
+  for (const [way, add] of Object.entries(ways)) {
+    const sdk = bootSdk();
+    const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
-  sdk.click(paragraph);
-  const note = sdk.queue("Reword <this>");
-  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
-  assert.ok(chip, "the card became a chip");
-  assert.match(chip.className, /comment-overlay floating sent/);
-  assert.match(chip.innerHTML, /<p class="comment-sent-text"><strong>&lt;p&gt;<\/strong> Reword &lt;this&gt;<\/p>/);
-  assert.match(chip.innerHTML, /<span class="delivery" aria-hidden="true">/);
-  assert.notEqual(paragraph.style.outline, "", "the element stays marked while its chip is up");
+    sdk.hover(paragraph);
+    sdk.click(paragraph);
+    assert.deepEqual(
+      sdk.drawn(),
+      ["comment-mark lavish-pin", "lavish-annotation-card comment-overlay floating"],
+      "the open card and its pin",
+    );
+    textareaOf(sdk.card()).value = "Reword <this>";
+    add(sdk);
 
-  const noteId = note.prompt._lavishNoteId;
-  assert.match(noteId, /\S/);
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
-  assert.match(chip.innerHTML, /<span class="delivery" aria-hidden="true">/);
-  assert.equal(chip.getAttribute("aria-label"), "Comment on <p>. Sending");
+    const note = sdk.posted.findLast((message) => message.type === "lavish:queuePrompt");
+    assert.equal(note.prompt.prompt, "Reword <this>", way);
+    assert.equal(note.prompt._lavishNoteId, undefined, "the page follows no note of a card");
+    assert.deepEqual(sdk.drawn(), [], `${way} leaves no card, no chip and no pin`);
+    assert.equal(paragraph.style.outline, "", "the element is released");
+    assert.equal(sdk.selection().selection, null, "nothing stays selected");
+    assert.equal(sdk.selection().card, false);
 
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
-  assert.equal(sdk.shadowChildren("lavish-annotation-chip").length, 0, "a delivered note's chip closes");
-  assert.equal(paragraph.style.outline, "", "the element is released with it");
+    // What the chrome later says of that note changes nothing on the page.
+    for (const status of ["queued", "sending", "delivered", "removed"]) {
+      sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId: "note-1", status });
+    }
+    assert.deepEqual(sdk.drawn(), []);
+  }
 });
 
-test("a delivered note closes only its own chip, not the card the reader moved on to", () => {
+test("a note added from one card leaves the card he moved on to alone", () => {
   const sdk = bootSdk();
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
   const heading = appendTo(sdk.body, cell("h2", "A heading"));
 
   sdk.click(paragraph);
-  const noteId = sdk.queue("Reword this").prompt._lavishNoteId;
-  sdk.click(heading);
-  sdk.card().querySelector("textarea").value = "still typing";
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
-
-  assert.equal(sdk.card().querySelector("textarea").value, "still typing");
-  assert.notEqual(heading.style.outline, "");
-});
-
-test("a note added to the queue keeps its chip until it is delivered, then closes it", () => {
-  const sdk = bootSdk();
-  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
-
-  sdk.click(paragraph);
-  sdk.card().querySelector("textarea").value = "One of several";
-  pressEnter(sdk.card().querySelector("textarea"), { ctrlKey: true });
-  const noteId = sdk.posted.findLast((message) => message.type === "lavish:queuePrompt").prompt._lavishNoteId;
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "queued" });
-  assert.equal(sdk.shadowChildren("lavish-annotation-chip").length, 1);
-
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
-  assert.equal(sdk.shadowChildren("lavish-annotation-chip").length, 0);
-});
-
-test("a note that falls back to the queue after a failed send says so on its chip", () => {
-  const sdk = bootSdk();
-  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
-
-  sdk.click(paragraph);
-  const noteId = sdk.queue("Reword this").prompt._lavishNoteId;
-  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "sending" });
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "queued" });
-
-  assert.equal(sdk.shadowChildren("lavish-annotation-chip").at(-1), chip, "the chip stays up with the note's words");
-  assert.match(chip.innerHTML, /Reword this/);
-  assert.match(chip.innerHTML, /<span class="delivery uncertain" aria-hidden="true">/);
-  assert.match(
-    chip.innerHTML,
-    /<p class="comment-trouble lavish-hint-alert">Not sent\. It is still in your notes: Send to Agent tries again\.<\/p>/,
-  );
-});
-
-test("a note reworded in the Conversation panel says its new words on its chip", () => {
-  const sdk = bootSdk();
-  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
-
-  sdk.click(paragraph);
-  const noteId = sdk.queue("Reword this").prompt._lavishNoteId;
-  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
-  sdk.sendChromeMessage({ type: "lavish:noteText", noteId: "someone-else", text: "Not mine" });
-  sdk.sendChromeMessage({ type: "lavish:noteText", noteId, text: "Say <it> better" });
-
-  assert.match(chip.innerHTML, /<strong>&lt;p&gt;<\/strong> Say &lt;it&gt; better<\/p>/);
-  assert.doesNotMatch(chip.innerHTML, /Not mine/);
-});
-
-test("a chip ignores the status of a note that is not its own", () => {
-  const sdk = bootSdk();
-  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
-
-  sdk.click(paragraph);
   sdk.queue("Reword this");
-  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId: "someone-else", status: "delivered" });
+  sdk.click(heading);
+  textareaOf(sdk.card()).value = "still typing";
 
-  assert.doesNotMatch(chip.innerHTML, /delivery succeeded/);
-});
-
-test("an added note says on its chip that it waits in the notes for a send", () => {
-  const sdk = bootSdk();
-  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
-
-  sdk.click(paragraph);
-  sdk.card().querySelector("textarea").value = "One of several";
-  pressEnter(sdk.card().querySelector("textarea"));
-  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
-
-  assert.equal(
-    chip.getAttribute("aria-label"),
-    "Comment on <p>. In your notes: Send to Agent or Send & End sends them all",
-  );
+  assert.equal(textareaOf(sdk.card()).value, "still typing");
+  assert.notEqual(heading.style.outline, "");
+  assert.equal(paragraph.style.outline, "");
+  assert.equal(sdk.selection().selection.tag, "h2");
 });
 
 // ---- What is selected in the page, as the chrome's composer attaches its notes ----
 // A note written in the Conversation box while an element is selected belongs to that element, so
-// the page tells the chrome what is selected: the element of an open card or of a chip.
+// the page tells the chrome what is selected: the element of the open card.
 
 test("an open card tells the chrome what is selected, and closing it clears the selection", () => {
   const sdk = bootSdk();
@@ -813,22 +773,9 @@ test("an open card tells the chrome what is selected, and closing it clears the 
   assert.match(opened.selection.selector, /\S/);
   assert.equal(opened.card, true);
 
-  pressEscape(sdk.card().querySelector("textarea"));
+  pressEscape(textareaOf(sdk.card()));
   assert.equal(sdk.selection().selection, null);
   assert.equal(sdk.selection().card, false);
-});
-
-test("an added note's chip keeps its element selected until the chip closes", () => {
-  const sdk = bootSdk();
-  const heading = appendTo(sdk.body, cell("h2", "Pricing"));
-
-  sdk.click(heading);
-  const noteId = sdk.queue("Make it bigger").prompt._lavishNoteId;
-  assert.equal(sdk.selection().selection.tag, "h2");
-  assert.equal(sdk.selection().card, false, "a chip is not a card with words to keep");
-
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId, status: "delivered" });
-  assert.equal(sdk.selection().selection, null);
 });
 
 // A document that reloads or navigates by itself is new to the chrome too, so it says at once that
@@ -845,7 +792,7 @@ test("clearing the selection leaves a card holding an image open, and says it is
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
 
   sdk.click(paragraph);
-  const attachInput = sdk.card().querySelector("#lavishCardAttachInput");
+  const attachInput = boxPart(sdk.card(), "AttachInput");
   attachInput.files = [{ name: "shot.png", type: "image/png", size: 10, arrayBuffer: () => new Promise(() => {}) }];
   attachInput.listeners.find((entry) => entry.type === "change").handler();
   const reports = sdk.posted.filter((message) => message.type === "lavish:selection").length;
@@ -861,29 +808,26 @@ test("the chrome can clear the selection, and a card's words are kept for its ne
   const heading = appendTo(sdk.body, cell("h2", "Pricing"));
 
   sdk.click(heading);
-  sdk.card().querySelector("textarea").value = "half a thought";
+  textareaOf(sdk.card()).value = "half a thought";
   sdk.sendChromeMessage({ type: "lavish:clearSelection" });
 
   assert.equal(sdk.cards().length, 0);
   assert.equal(sdk.selection().selection, null);
   sdk.click(heading);
-  assert.equal(sdk.card().querySelector("textarea").value, "half a thought");
+  assert.equal(textareaOf(sdk.card()).value, "half a thought");
 });
 
-test("a note the chrome added for the selection turns its empty card into that note's chip", () => {
+test("a note the chrome added for the selection closes its empty card and leaves nothing", () => {
   const sdk = bootSdk();
   const heading = appendTo(sdk.body, cell("h2", "Pricing"));
 
   sdk.click(heading);
-  sdk.sendChromeMessage({ type: "lavish:selectionNoted", noteId: "chrome-note-1", text: "Dictated <words>" });
+  sdk.sendChromeMessage({ type: "lavish:selectionNoted" });
 
-  assert.equal(sdk.cards().length, 0, "the empty card gave way to the chip");
-  const chip = sdk.shadowChildren("lavish-annotation-chip").at(-1);
-  assert.match(chip.innerHTML, /<strong>&lt;h2&gt;<\/strong> Dictated &lt;words&gt;/);
+  assert.deepEqual(sdk.drawn(), [], "the empty card went, and no chip took its place");
+  assert.equal(heading.style.outline, "");
+  assert.equal(sdk.selection().selection, null);
   assert.equal(postedTypes(sdk).includes("lavish:queuePrompt"), false, "the chrome already holds the note");
-
-  sdk.sendChromeMessage({ type: "lavish:noteStatus", noteId: "chrome-note-1", status: "delivered" });
-  assert.equal(sdk.shadowChildren("lavish-annotation-chip").length, 0);
 });
 
 test("a note the chrome added for the selection leaves a card with words of its own alone", () => {
@@ -891,10 +835,10 @@ test("a note the chrome added for the selection leaves a card with words of its 
   const heading = appendTo(sdk.body, cell("h2", "Pricing"));
 
   sdk.click(heading);
-  sdk.card().querySelector("textarea").value = "my own words";
-  sdk.sendChromeMessage({ type: "lavish:selectionNoted", noteId: "chrome-note-1", text: "Dictated" });
+  textareaOf(sdk.card()).value = "my own words";
+  sdk.sendChromeMessage({ type: "lavish:selectionNoted" });
 
-  assert.equal(sdk.card().querySelector("textarea").value, "my own words");
+  assert.equal(textareaOf(sdk.card()).value, "my own words");
 });
 
 // ---- Send & End takes a card's unfinished words with it ----
@@ -904,7 +848,7 @@ test("committing the open card adds its words to the notes, then says it is done
   const heading = appendTo(sdk.body, cell("h2", "Pricing"));
 
   sdk.click(heading);
-  sdk.card().querySelector("textarea").value = "  unfinished thought  ";
+  textareaOf(sdk.card()).value = "  unfinished thought  ";
   const before = sdk.posted.length;
   sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-1" });
 
@@ -941,8 +885,8 @@ test("committing a card whose image is still uploading keeps the card and says i
 
   sdk.click(paragraph);
   const card = sdk.card();
-  card.querySelector("textarea").value = "see the picture";
-  const attachInput = card.querySelector("#lavishCardAttachInput");
+  textareaOf(card).value = "see the picture";
+  const attachInput = boxPart(card, "AttachInput");
   attachInput.files = [{ name: "shot.png", type: "image/png", size: 10, arrayBuffer: () => new Promise(() => {}) }];
   attachInput.listeners.find((entry) => entry.type === "change").handler();
   sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-3" });
@@ -969,7 +913,7 @@ test("the pin marks the hovered element and stays on the one being annotated", (
   sdk.click(paragraph);
   assert.equal(pin.hidden, false, "the annotated element keeps its pin");
 
-  pressEscape(sdk.card().querySelector("textarea"));
+  pressEscape(textareaOf(sdk.card()));
   assert.equal(pin.hidden, true, "a cancelled card takes its pin with it");
 });
 
@@ -979,14 +923,14 @@ test("Escape leaves an annotation card with an in-flight attachment open, even w
 
   sdk.click(paragraph);
   const card = sdk.card();
-  const attachInput = card.querySelector("#lavishCardAttachInput");
+  const attachInput = boxPart(card, "AttachInput");
   // Never resolves - only the synchronous "uploading" status addFiles sets is needed here.
   attachInput.files = [{ name: "shot.png", type: "image/png", size: 10, arrayBuffer: () => new Promise(() => {}) }];
   const changeListener = attachInput.listeners.find((entry) => entry.type === "change");
   assert.ok(changeListener, "the attach input registers a change listener");
   changeListener.handler();
 
-  pressEscape(card.querySelector("textarea"));
+  pressEscape(textareaOf(card));
 
   assert.notEqual(
     paragraph.style.outline,
@@ -1038,7 +982,7 @@ test("the served SDK bundle restores a draft whose anchor arrives after the load
     false,
     "an anchor that arrived late is restored, not reported gone",
   );
-  assert.equal(sdk.card().querySelector("textarea").value, "needs a shorter headline");
+  assert.equal(textareaOf(sdk.card()).value, "needs a shorter headline");
 });
 
 test("the served SDK bundle reports nothing when there is no draft to restore", () => {
@@ -1067,11 +1011,11 @@ test("the served SDK bundle leaves a card the user opened alone when the anchor 
 
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
   sdk.click(paragraph);
-  sdk.card().querySelector("textarea").value = "typing something new";
+  textareaOf(sdk.card()).value = "typing something new";
   late = appendTo(sdk.body, cell("h1", "Headline"));
   sdk.runTimers();
 
-  assert.equal(sdk.card().querySelector("textarea").value, "typing something new");
+  assert.equal(textareaOf(sdk.card()).value, "typing something new");
   // The draft is still stored on the chrome side, so a later load can try again; nothing here
   // claims the anchor is gone either.
   assert.equal(
@@ -1125,11 +1069,42 @@ const PLAN_QUESTION = {
 
 function fire(form, type, event = {}) {
   const handlers = form.listeners.filter((entry) => entry.type === type);
-  assert.ok(handlers.length > 0, `the question card listens for ${type}`);
+  assert.ok(handlers.length > 0, `something listens for ${type} there`);
   for (const entry of handlers) entry.handler({ preventDefault() {}, ...event });
 }
 const pick = (form, value) => fire(form, "change", { target: { name: "answer", value, checked: true } });
-const write = (form, value) => fire(form, "input", { target: { name: "written", value } });
+// A question's written answer is the one message box too, drawn in the card's `.lavish-box`: the
+// parts of question `index` carry the ids `src/message-box.js` gives them.
+function answerPart(form, name, index = 0) {
+  return form
+    .querySelector(".written-answer")
+    .querySelector(".lavish-box")
+    .querySelector("#lavishChoice" + index + name);
+}
+function write(form, value, index = 0) {
+  const field = answerPart(form, "Input", index);
+  field.value = value;
+  fire(field, "input");
+}
+// An image picked with the box's paperclip. The chrome uploads it and answers with its id.
+function attachTo(sdk, attachInput, name) {
+  attachInput.files = [{ name, type: "image/png", size: 10, arrayBuffer: () => Promise.resolve(new ArrayBuffer(10)) }];
+  fire(attachInput, "change");
+  return {
+    async arrive(id) {
+      await new Promise((resolve) => setImmediate(resolve));
+      const upload = sdk.posted.findLast((message) => message.type === "lavish:uploadAttachment");
+      assert.ok(upload, "the page asks the chrome to upload the image");
+      sdk.sendChromeMessage({
+        type: "lavish:attachmentResult",
+        nonce: upload.nonce,
+        localId: upload.localId,
+        ok: true,
+        id,
+      });
+    },
+  };
+}
 const promptMessages = (sdk) => sdk.posted.filter((message) => /Prompt/.test(message.type));
 
 test("a page's declared choices are drawn after the declaration as the board's radio list", () => {
@@ -1364,7 +1339,7 @@ test("a pick survives a reload of the page: its state is reported and restored",
   // Compared as JSON: the report was built inside the SDK's own realm.
   assert.equal(
     JSON.stringify(report.state.choices),
-    JSON.stringify([{ id: "plan", selection: "option:Keep 300 s", written: "", answered: "", noteId }]),
+    JSON.stringify([{ id: "plan", selection: "option:Keep 300 s", written: "", images: [], answered: "", noteId }]),
   );
 
   // The pick is still in the notes after a reload, so its card says so and follows that note.
@@ -1397,6 +1372,166 @@ test("a pick survives a reload of the page: its state is reported and restored",
   assert.deepEqual(promptMessages(reloaded), []);
 });
 
+// ---- A question's written answer is the one message box ----
+// Other used to open a plain field with no microphone and no images (the Overlord, 2026-11-11).
+
+const IMAGE_ID = "a".repeat(64) + ".png";
+
+test("a written answer is drawn as the one message box, with its microphone and paperclip", () => {
+  const sdk = bootSdk({ choices: [PLAN_QUESTION, { id: "when", question: "When?", options: ["Now", "Later"] }] });
+  const [plan, when] = sdk.choiceForms();
+
+  const box = plan.querySelector(".written-answer").querySelector(".lavish-box").innerHTML;
+  for (const part of ["Field", "Input", "Attach", "AttachInput", "VoiceDock", "Voice", "VoiceRecent"]) {
+    assert.match(box, new RegExp(`id="lavishChoice0${part}"`), `the box has its ${part}`);
+  }
+  assert.match(box, /placeholder="Tell cg-scrawl-look what you prefer\.\.\."/);
+  assert.doesNotMatch(plan.innerHTML, /<textarea/, "the card draws no field of its own");
+  // Each question's box has parts of its own, so two boxes on one page never share an id.
+  assert.match(
+    when.querySelector(".written-answer").querySelector(".lavish-box").innerHTML,
+    /id="lavishChoice1Input"[^>]*placeholder="Tell This page what you prefer\.\.\."|placeholder="Tell This page what you prefer\.\.\."[^>]*id="lavishChoice1Input"/,
+  );
+});
+
+test("an image in a written answer goes with the answer, and a send waits for it", async () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "other");
+  write(form, "Park it");
+  assert.equal(promptMessages(sdk).at(-1).prompt.attachments, undefined);
+
+  const upload = attachTo(sdk, answerPart(form, "AttachInput"), "plan.png");
+  assert.equal(sdk.selection().card, true, "the chrome is told the page holds an image a send must wait for");
+  fire(form, "submit");
+  assert.equal(promptMessages(sdk).at(-1).type, "lavish:queuePrompt", "Send on the card waits for the image");
+  sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-9" });
+  const held = sdk.posted.findLast((message) => message.type === "lavish:draftCommitted");
+  assert.deepEqual([held.commit_id, held.committed], ["commit-9", false], "and so does a send from the panel");
+
+  await upload.arrive(IMAGE_ID);
+  const note = promptMessages(sdk).at(-1);
+  assert.equal(note.prompt.prompt, "Park it");
+  assert.equal(note.prompt.tag, "choice");
+  assert.equal(JSON.stringify(note.prompt.attachments), JSON.stringify([{ id: IMAGE_ID, name: "plan.png" }]));
+  assert.equal(note.prompt._lavishQueueKey, "choice:plan", "it takes the place of the answer without the image");
+  assert.equal(sdk.selection().card, false);
+
+  sdk.sendChromeMessage({ type: "lavish:commitDraft", commit_id: "commit-10" });
+  assert.equal(sdk.posted.findLast((message) => message.type === "lavish:draftCommitted").committed, true);
+  fire(form, "submit");
+  assert.equal(promptMessages(sdk).at(-1).type, "lavish:sendQueuedPrompts");
+});
+
+test("an option he picks carries no image, even with one in the written answer's box", async () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "other");
+  write(form, "Park it");
+  await attachTo(sdk, answerPart(form, "AttachInput"), "plan.png").arrive(IMAGE_ID);
+
+  pick(form, "option:Keep 300 s");
+
+  const note = promptMessages(sdk).at(-1);
+  assert.equal(note.prompt.prompt, "Keep 300 s", "the prompt is the option exactly as the page declared it");
+  assert.equal(note.prompt.attachments, undefined);
+});
+
+test("Enter in a written answer keeps the answer and adds no line", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "other");
+  write(form, "Ship it in two steps");
+  const field = answerPart(form, "Input");
+  let blurs = 0;
+  field.blur = () => {
+    blurs += 1;
+  };
+  const press = (init) => {
+    const event = {
+      key: "Enter",
+      defaultPrevented: false,
+      preventDefault() {
+        event.defaultPrevented = true;
+      },
+      ...init,
+    };
+    fire(field, "keydown", event);
+    return event.defaultPrevented;
+  };
+
+  assert.equal(press({ shiftKey: true }), false, "Shift+Enter is still a new line");
+  assert.equal(press({ isComposing: true }), false, "an Enter of the IME is its own");
+  assert.equal(blurs, 0);
+  assert.equal(press({}), true);
+  assert.equal(blurs, 1, "Enter finishes writing");
+  assert.equal(promptMessages(sdk).at(-1).prompt.prompt, "Ship it in two steps");
+  assert.equal(promptMessages(sdk).length, 1, "the answer was already in his notes, and nothing is sent");
+});
+
+test("a written answer's images survive a reload of the page", async () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  pick(form, "other");
+  write(form, "Park it");
+  await attachTo(sdk, answerPart(form, "AttachInput"), "plan.png").arrive(IMAGE_ID);
+  const noteId = promptMessages(sdk).at(-1).prompt._lavishNoteId;
+  sdk.runTimers();
+  const [saved] = JSON.parse(
+    JSON.stringify(sdk.posted.findLast((message) => message.type === "lavish:reviewState").state.choices),
+  );
+  assert.deepEqual(saved.images, [{ id: IMAGE_ID, name: "plan.png" }]);
+
+  const reloaded = bootSdk({ choices: PLAN_QUESTION });
+  const [restored] = reloaded.choiceForms();
+  reloaded.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: { card: null, fields: [], choices: [saved] },
+  });
+
+  assert.equal(answerPart(restored, "Input").value, "Park it");
+  assert.match(
+    restored.querySelector(".written-answer").querySelector(".lavish-box").querySelector("[data-attachments]")
+      .innerHTML,
+    /plan\.png/,
+    "the image is a chip in the box again",
+  );
+  assert.deepEqual(promptMessages(reloaded), [], "restoring adds nothing to the notes");
+  assert.equal(noteId.length > 0, true);
+  // A word more and the answer goes on carrying its image.
+  write(restored, "Park it for now");
+  const note = promptMessages(reloaded).at(-1);
+  assert.equal(note.prompt._lavishNoteId, noteId, "the same note as before the reload");
+  assert.equal(JSON.stringify(note.prompt.attachments), JSON.stringify([{ id: IMAGE_ID, name: "plan.png" }]));
+});
+
+test("a restored image of an unknown shape is left out", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  sdk.sendChromeMessage({
+    type: "lavish:restoreReviewState",
+    state: {
+      card: null,
+      fields: [],
+      choices: [
+        {
+          id: "plan",
+          selection: "other",
+          written: "Park it",
+          noteId: "note-7",
+          images: [null, { id: 7 }, { id: "x".repeat(129) }, { id: IMAGE_ID }],
+        },
+      ],
+    },
+  });
+
+  write(form, "Park it now");
+  assert.equal(
+    JSON.stringify(promptMessages(sdk).at(-1).prompt.attachments),
+    JSON.stringify([{ id: IMAGE_ID, name: "image" }]),
+  );
+});
+
 test("a page with no declaration, or a malformed one, gets no card", () => {
   assert.equal(bootSdk().choicesHostIndex(), -1);
   assert.equal(bootSdk({ choices: "not json" }).choicesHostIndex(), -1);
@@ -1412,7 +1547,7 @@ test("the held keys in an open annotation card ask the chrome to listen, and wha
   const sdk = bootSdk();
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
   sdk.click(paragraph);
-  const textarea = sdk.card().querySelector("textarea");
+  const textarea = textareaOf(sdk.card());
   textarea.value = "Make cards";
   textarea.setSelectionRange(5, 5);
 
@@ -1448,7 +1583,7 @@ test("dictated text belongs to the requesting annotation box and is inserted onc
   sdk.click(second);
   sdk.documentKey("keydown", dictationKeyEvent);
   const secondId = sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id;
-  const textarea = sdk.card().querySelector("textarea");
+  const textarea = textareaOf(sdk.card());
 
   sdk.sendChromeMessage({ type: "lavish:dictated", text: "wrong box", voice_id: firstId, capture_id: 1 });
   assert.equal(textarea.value, "");
@@ -1462,7 +1597,7 @@ test("the card's voice bubble draws what the chrome says, and its Copy asks the 
   const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
   sdk.click(paragraph);
   const card = sdk.card();
-  const bubble = card.querySelector("#lavishCardVoice");
+  const bubble = boxPart(card, "Voice");
   const voiceState = {
     type: "lavish:voiceState",
     supported: true,
@@ -1479,7 +1614,7 @@ test("the card's voice bubble draws what the chrome says, and its Copy asks the 
   assert.equal(bubble.getAttribute("aria-label"), "Recent dictations");
 
   bubble.onclick();
-  const entry = card.querySelector("#lavishCardVoiceRecentList").children[0];
+  const entry = boxPart(card, "VoiceRecentList").children[0];
   const actions = entry.children.find((child) => child.className === "voice-actions").children;
   assert.deepEqual(
     actions.map((button) => button.getAttribute("aria-label")),
@@ -1492,9 +1627,66 @@ test("the card's voice bubble draws what the chrome says, and its Copy asks the 
   );
   sdk.sendChromeMessage({ type: "lavish:dictationCopied", ok: true });
   await Promise.resolve();
-  const copied = card.querySelector("#lavishCardVoiceRecentList").children[0];
+  const copied = boxPart(card, "VoiceRecentList").children[0];
   assert.equal(
     copied.children.find((child) => child.className === "voice-actions").children[0].getAttribute("data-tip"),
     "Copied",
   );
+});
+
+// A page can hold more than one box now: the open card and each question's written answer. The
+// chrome listens for the one he is in, and what it hears lands there and nowhere else.
+test("the chrome listens for the box he is in, a written answer or the card", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  assert.equal(sdk.selection().voice_id, "", "he is in no box yet");
+
+  pick(form, "other");
+  const answer = answerPart(form, "Input");
+  fire(answer, "focus");
+  const answerVoice = sdk.selection().voice_id;
+  assert.match(answerVoice, /\S/);
+  assert.equal(sdk.selection().card, false, "a written answer is no card");
+
+  sdk.documentKey("keydown", dictationKeyEvent);
+  assert.equal(sdk.posted.findLast((message) => message.type === "lavish:dictate").voice_id, answerVoice);
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "park it", voice_id: answerVoice, capture_id: 1 });
+  assert.equal(answer.value, "park it");
+  assert.equal(
+    promptMessages(sdk).at(-1).prompt.prompt,
+    "park it",
+    "a dictated answer is in his notes like a typed one",
+  );
+
+  // Opening a card puts him in the card's box; what the answer's box was promised no longer lands.
+  sdk.click(paragraph);
+  const cardVoice = sdk.selection().voice_id;
+  assert.notEqual(cardVoice, answerVoice);
+  sdk.documentKey("keydown", dictationKeyEvent);
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "late words", voice_id: answerVoice, capture_id: 2 });
+  assert.equal(answer.value, "park it");
+  sdk.sendChromeMessage({ type: "lavish:dictated", text: "for the card", voice_id: cardVoice, capture_id: 3 });
+  assert.equal(textareaOf(sdk.card()).value, "for the card");
+
+  // The card closes and he is in no box until he goes back into one.
+  pressEscape(textareaOf(sdk.card()));
+  assert.equal(sdk.selection().voice_id, "");
+  fire(answer, "focus");
+  assert.equal(sdk.selection().voice_id, answerVoice);
+});
+
+test("only the box he is in shows the chrome listening", () => {
+  const sdk = bootSdk({ choices: PLAN_QUESTION });
+  const [form] = sdk.choiceForms();
+  const paragraph = appendTo(sdk.body, cell("p", "Just prose"));
+  pick(form, "other");
+  fire(answerPart(form, "Input"), "focus");
+  sdk.click(paragraph);
+  const listening = { type: "lavish:voiceState", supported: true, secure: true, listening: true, canCopy: true };
+
+  sdk.sendChromeMessage({ ...listening, dictations: [] });
+
+  assert.equal(boxPart(sdk.card(), "Voice").getAttribute("aria-label"), "Listening");
+  assert.notEqual(answerPart(form, "Voice").getAttribute("aria-label"), "Listening", "the other box's bubble rests");
 });
