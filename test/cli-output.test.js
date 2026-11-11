@@ -129,7 +129,37 @@ test("home output teaches agents when and how to use Lavish Editor", () => {
         /show, don't tell/i.test(item) && /inline SVG/.test(item) && /screenshot/i.test(item) && /prose/i.test(item),
     ),
   );
-  assert.ok(output.visual_guidance.some((item) => item.includes("sections, cards, tables")));
+  assert.ok(
+    output.visual_guidance.some(
+      (item) => /show, don't tell/i.test(item) && /systems, architectures and flows as Mermaid/.test(item),
+    ),
+    "systems and flows are drawn as Mermaid",
+  );
+  assert.ok(
+    output.visual_guidance.some(
+      (item) =>
+        /no box around it/.test(item) &&
+        /one standalone thing/.test(item) &&
+        /Never put a card inside a card/.test(item) &&
+        /never box a section, a figure or a lone paragraph/.test(item) &&
+        /A table sits in at most one wrapper that lets it scroll on a phone/.test(item) &&
+        /never inside a card/.test(item),
+    ),
+    "the guidance says what a card is for and forbids a box in a box",
+  );
+  assert.ok(
+    output.visual_guidance.some(
+      (item) =>
+        /Make the page something the reader operates/.test(item) &&
+        /radio group that lights the option/.test(item) &&
+        /range input that steps through rollout stages/.test(item) &&
+        /select that filters findings/.test(item) &&
+        /in view before any click/.test(item) &&
+        /never for what the page's point rests on/.test(item) &&
+        /both only queue/.test(item),
+    ),
+    "the guidance asks for native controls that change the view, and answers that only queue",
+  );
   assert.ok(output.visual_guidance.some((item) => item.includes("horizontal overflow")));
   assert.ok(output.visual_guidance.some((item) => item.includes("minmax(0, 1fr)")));
   assert.ok(output.visual_guidance.some((item) => /nested grid\/flex/i.test(item)));
@@ -187,7 +217,7 @@ test("the design-priority rule's last step is the board look, with the CDN kit b
   assert.match(DESIGN_SYSTEM_HINT, /the board look's stylesheets and page patterns/);
 });
 
-test("design output gives the board look: two stylesheets, five page patterns and declared choices", async () => {
+test("design output gives the board look: two stylesheets, six page patterns and declared choices", async () => {
   const { board_look: boardLook } = createDesignOutput();
 
   assert.equal(
@@ -199,8 +229,15 @@ test("design output gives the board look: two stylesheets, five page patterns an
   assert.match(boardLook.how, /never a new one/);
   assert.deepEqual(
     boardLook.patterns.map((pattern) => pattern.id),
-    ["report", "comparison", "before_after", "evidence", "decision"],
+    ["report", "comparison", "explore", "before_after", "evidence", "decision"],
   );
+  // A card sets off one standalone thing: a report's finding sits in its section, unboxed.
+  assert.doesNotMatch(boardLook.patterns.find((pattern) => pattern.id === "report")?.markup ?? "", /card/);
+  const explore = boardLook.patterns.find((pattern) => pattern.id === "explore");
+  assert.match(explore?.markup ?? "", /<input type="radio" name="priority"/);
+  assert.match(explore?.markup ?? "", /data-fits=/);
+  assert.match(explore?.use_when ?? "", /recommendation stays in view before any click/);
+  assert.match(boardLook.choices.use_when, /tracked batch, whose one button only queues/);
   // Every class a pattern's markup uses is one the page stylesheet styles.
   const pageCss = await readFile(new URL("../src/board-page.css", import.meta.url), "utf8");
   for (const pattern of boardLook.patterns) {
@@ -431,9 +468,10 @@ test("design output prints copy-pasteable CDN URLs so agents can opt in to Daisy
     /^https:\/\/cdn\.jsdelivr\.net\/npm\/@tailwindcss\/browser@\d+\.\d+\.\d+\/dist\/index\.global\.js$/,
   );
   assert.match(output.design.other_design_systems, /different design system|other design system/i);
-  assert.match(output.whiteboard_tooling.use_when, /^Opt-in only/);
-  assert.match(output.whiteboard_tooling.use_when, /asks for an editable whiteboard/);
-  assert.match(output.whiteboard_tooling.use_when, /hand-authored inline SVG per the diagram playbook/);
+  assert.match(output.whiteboard_tooling.use_when, /^Every system, architecture and flow figure/);
+  assert.match(output.whiteboard_tooling.use_when, /<div data-lavish-mermaid>/);
+  assert.match(output.whiteboard_tooling.use_when, /`\.mermaid` container is the whiteboard opt-in/);
+  assert.match(output.whiteboard_tooling.use_when, /only when the user asks for an editable whiteboard/);
   assert.match(output.whiteboard_tooling.mermaid_cdn_snippet, /cdn\.jsdelivr\.net\/npm\/mermaid@\d+\.\d+\.\d+/);
   assert.match(output.whiteboard_tooling.mermaid_cdn_snippet, /mermaid\.initialize/);
   assert.match(
@@ -506,14 +544,44 @@ test("explanation playbook routes understanding of existing things and separates
   assert.ok(output.playbook.pitfalls.some((item) => /inferred reasoning as verified fact/i.test(item)));
 });
 
-test("diagram playbook defaults to hand-authored SVG and names the anti-patterns", () => {
+test("diagram playbook draws systems and flows as Mermaid and keeps SVG for shapes that carry meaning", () => {
   const output = createPlaybookOutput(["diagram"]);
 
-  assert.ok(output.playbook.choose.some((item) => /Default to hand-authored inline SVG/.test(item)));
+  assert.ok(
+    output.playbook.choose.some(
+      (item) => /^Draw a system, an architecture/.test(item) && /<div data-lavish-mermaid>/.test(item),
+    ),
+  );
+  assert.ok(output.playbook.choose.some((item) => /^Hand-author inline SVG for a figure whose shape/.test(item)));
   assert.ok(output.playbook.choose.some((item) => /only when the user asks for an editable whiteboard/i.test(item)));
+  assert.ok(!output.playbook.choose.some((item) => /module cards/.test(item)));
+  assert.ok(output.playbook.structure.some((item) => /Label every edge/.test(item)));
   assert.ok(output.playbook.pitfalls.some((item) => /hand-build boxes-and-arrows/i.test(item)));
   assert.ok(output.playbook.pitfalls.some((item) => /div\/flexbox/i.test(item)));
-  assert.ok(output.playbook.pitfalls.some((item) => /reach for Mermaid to save authoring effort/i.test(item)));
+  assert.ok(
+    output.playbook.pitfalls.some((item) => /hand-place the boxes and arrows of a system or a flow/.test(item)),
+  );
+  assert.ok(output.playbook.pitfalls.some((item) => /Do not put a figure in a card/.test(item)));
+  assert.ok(output.playbook.design_rules.some((item) => /top-down with `flowchart TD`/.test(item)));
+  assert.ok(output.playbook.design_rules.some((item) => /hidden panel/.test(item) && /zero size/.test(item)));
+});
+
+test("no guidance surface keeps Mermaid away from systems and flows or asks for a box in a box", () => {
+  const surfaces = [
+    JSON.stringify(createHomeOutput({ bin: "lavish-axi", sessions: [] })),
+    JSON.stringify(createDesignOutput()),
+    ...createPlaybookOutput([]).playbooks.map((playbook) =>
+      JSON.stringify(createPlaybookOutput([playbook.id]).playbook),
+    ),
+  ];
+  for (const surface of surfaces) {
+    assert.doesNotMatch(surface, /Default to hand-authored inline SVG/);
+    assert.doesNotMatch(surface, /Every other figure is hand-authored inline SVG/);
+    assert.doesNotMatch(surface, /Mermaid is the whiteboard opt-in, not the diagram default/);
+    assert.doesNotMatch(surface, /sections, cards, tables/);
+    assert.doesNotMatch(surface, /module cards|option cards|Use cards when/);
+    assert.doesNotMatch(surface, /provide controls that queue the chosen option/);
+  }
 });
 
 test("diagram playbook owns assume-nothing and one-concept-per-diagram guidance", async () => {
@@ -559,14 +627,14 @@ test("diagram playbook owns assume-nothing and one-concept-per-diagram guidance"
   }
 });
 
-test("diagram playbook routes whiteboard Mermaid through the theme-aware design snippet", () => {
+test("diagram playbook routes every Mermaid figure through the theme-aware design snippet", () => {
   const output = createPlaybookOutput(["diagram"]);
 
   assert.ok(
     output.playbook.design_rules.some(
       (item) => /mermaid/i.test(item) && /theme-aware/i.test(item) && /`lavish-axi design`/.test(item),
     ),
-    "the whiteboard opt-in must still theme Mermaid through the design snippet instead of hardcoding one theme",
+    "every Mermaid figure, plain or whiteboard, must theme through the design snippet instead of hardcoding one theme",
   );
 });
 
@@ -575,6 +643,10 @@ test("design output emits a theme-aware Mermaid init that re-renders on page-the
 
   // The old bug: a single hardcoded Mermaid theme that ignores the page theme.
   assert.doesNotMatch(snippet, /theme:\s*["']base["']/);
+
+  // It renders plain diagrams as well as whiteboards: a plain container keeps node notes and
+  // Explore-mode pan and zoom, and only a `.mermaid` container becomes a whiteboard.
+  assert.match(snippet, /querySelectorAll\("\.mermaid, \[data-lavish-mermaid\]"\)/);
 
   // It must choose the Mermaid theme from the page's effective light/dark
   // appearance, covering both a data-theme toggle and the OS preference.
@@ -597,7 +669,7 @@ test("design output emits a theme-aware Mermaid init that re-renders on page-the
   assert.match(snippet, /addEventListener\(["']change["']/);
 });
 
-test("theme-aware Mermaid snippet serializes rapid theme-change renders", async () => {
+test("theme-aware Mermaid snippet serializes rapid theme-change renders in the page's colours", async () => {
   const snippet = createDesignOutput()
     .whiteboard_tooling.mermaid_cdn_snippet.replace(/^<script type="module">\n/, "")
     .replace(/\n<\/script>$/, "")
@@ -607,6 +679,8 @@ test("theme-aware Mermaid snippet serializes rapid theme-change renders", async 
   const observedThemeTargets = [];
   const documentListeners = new Map();
   const initializedThemes = [];
+  const initializedConfigs = [];
+  let accent = "";
   const mediaListeners = [];
   const pendingRenders = [];
   const loggedRenderErrors = [];
@@ -691,8 +765,9 @@ test("theme-aware Mermaid snippet serializes rapid theme-change renders", async 
     }
   }
   const mermaid = {
-    initialize({ theme }) {
-      initializedThemes.push(theme);
+    initialize(config) {
+      initializedThemes.push(config.theme);
+      initializedConfigs.push(config);
     },
     run() {
       renderedSources.push(diagram.innerHTML);
@@ -726,6 +801,7 @@ test("theme-aware Mermaid snippet serializes rapid theme-change renders", async 
     (element) => ({
       backgroundColor: element === document.body ? bodyColor : rootColor,
       colorScheme: element === document.documentElement ? rootColorScheme : "normal",
+      getPropertyValue: (name) => (element === document.documentElement && name === "--accent-green" ? accent : ""),
     }),
     { error: (...args) => loggedRenderErrors.push(args) },
   );
@@ -740,6 +816,9 @@ test("theme-aware Mermaid snippet serializes rapid theme-change renders", async 
   assert.equal(typeof transitionListener?.callback, "function");
   assert.equal(transitionListener?.capture, true);
   assert.deepEqual(initializedThemes, ["default"]);
+  // Edge labels sit on the page's own background, and a page with no accent recolours nothing.
+  assert.deepEqual(initializedConfigs[0].themeVariables, { edgeLabelBackground: "rgb(255, 255, 255)" });
+  assert.equal(initializedConfigs[0].themeCSS, "");
   assert.deepEqual(renderedSources, ['flowchart TD\\n  A["OBJECTIVE:<br/>do the thing"]']);
   bodyColor = "white-40";
   rootColor = "black";
@@ -783,6 +862,15 @@ test("theme-aware Mermaid snippet serializes rapid theme-change renders", async 
 
   changeListener.callback();
   assert.equal(activeRenders, 1);
+  finishNextRender();
+  await Promise.resolve();
+
+  // Parts marked new and dashed edges take the page's accent, and a new accent draws again.
+  accent = "#00e59b";
+  changeListener.callback();
+  const marked = initializedConfigs.at(-1);
+  assert.match(marked.themeCSS, /\.node\.new rect[^}]*stroke: #00e59b/);
+  assert.match(marked.themeCSS, /\.flowchart-link\.edge-pattern-dashed[^}]*stroke: #00e59b/);
   finishNextRender();
   await Promise.resolve();
 });

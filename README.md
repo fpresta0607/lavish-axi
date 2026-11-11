@@ -162,7 +162,7 @@ pnpm link
 - **Portable artifacts** - The artifact runs in a sandboxed iframe while Lavish injects a small SDK for annotations, snapshots, feedback controls, and render-time layout checks.
   Author-defined links and popups can open in top-level tabs, while artifact documents remain sandboxed without same-origin access.
   Lavish does not inject any design system, so the saved HTML file renders identically whether you open it through `lavish-axi` or directly in a browser.
-  Run `lavish-axi design` for the single source of agent-facing design guidance, including optional CDN snippets and the whiteboard (Mermaid) opt-in snippet.
+  Run `lavish-axi design` for the single source of agent-facing design guidance, including optional CDN snippets and the theme-aware Mermaid snippet for diagrams and whiteboards.
 - **Self-paint warning** - `lavish-axi <html-file>`, `export`, and `share` run a render-free check for artifacts missing an explicit page background and return a one-line `self_paint_warning`.
   The check fails open - any stylesheet link, `@import`, Tailwind runtime script, `color-scheme`, or `html`/`body`/`:root` background signal suppresses it - and it never blocks the open.
 - **Open-time layout gate** - The browser chrome masks an artifact only until its document has loaded and styled itself, giving a font that is on time up to 100 ms to arrive.
@@ -273,7 +273,10 @@ pnpm link
   As a browser-side abuse guard, each chrome page allows 30 upload attempts per rolling minute, 4 uploads in flight at once, and 256 MiB of attempted image bytes over its lifetime; rejected uploads stay visible for retry or removal.
   Unreferenced attachments expire after `LAVISH_AXI_ATTACHMENT_TTL_MS` (default 7 days; `0`/`off` disables); `LAVISH_AXI_MAX_ATTACHMENT_DISK_MB` (default 512 MiB; `0`/`off` disables) caps total attachment disk and may evict older unreferenced images sooner.
   The cap is enforced when an image is uploaded, not just periodically: the upload first reclaims unreferenced files (oldest first, and never one added within the last hour), and if it still would not fit, that upload is refused with a storage-full error on its chip instead of discarding an image the user is about to send.
-- **Mermaid diagrams** - Whiteboards are an opt-in: agents author a diagram as Mermaid only when you ask for an editable whiteboard, and hand-authored inline SVG illustrations are the default figure medium otherwise.
+- **Mermaid diagrams** - Agents draw systems, architectures and flows as Mermaid.
+  A diagram in a `data-lavish-mermaid` container renders as a plain figure in the page's light or dark theme, and in the Lavish browser you can leave a note on any of its nodes and pan and zoom it in Explore mode.
+  Hand-authored inline SVG stays for figures whose shape carries the meaning, such as a timeline drawn to scale.
+  Whiteboards are an opt-in: agents put a diagram in a `.mermaid` container only when you ask for an editable whiteboard.
   In the Lavish browser, every rendered Mermaid diagram in a `.mermaid` container becomes an embedded editable Excalidraw whiteboard.
   Click a diagram to unlock editing, and use its Fullscreen action to edit it over the whole viewport.
   Whiteboard scenes autosave locally.
@@ -301,7 +304,7 @@ pnpm link
   Themes are kept in the state directory, never in the project, and every value is checked: colours are six-digit hex, text must read at 4.5:1 on each surface it sits on, and no surface may be pure white.
   The page's colour is in the review page's head before its stylesheet, so nothing paints white while it loads, and a page that sets no colours of its own is shown on the frame's page colours rather than the browser's white sheet. A page with colours of its own keeps them.
 - **Pages in the board's look** - A page with no design direction of its own starts in the board's look by linking two stylesheets the review server serves, `/design/board-tokens.css` and `/design/board-page.css`.
-  `lavish-axi design` lists them with five page patterns (a report, a comparison, a before and after, a table of evidence, a decision); a page about another product still wears that product's design.
+  `lavish-axi design` lists them with six page patterns (a report, a comparison, an explore page the reader operates, a before and after, a table of evidence, a decision); a page about another product still wears that product's design.
   Export and share carry both stylesheets inline, fonts included; opened as a bare file with no server, the links resolve to nothing.
 - **Choices on a page** - A page that asks for a pick declares it as data in a `<script type="application/json" data-lavish-choices>`: an `id`, the `question`, two or more `options`, and optionally `recommended`, `asker` and `detail`, for one question or a list.
   Scrawl draws each question where the declaration sits as the board draws one: who asks, a plain radio list with the recommended option first and marked, **Other** for a written answer, and **Send** and **End** buttons.
@@ -340,7 +343,7 @@ pnpm link
 | `lavish-axi share <html-file>`  | Publish the artifact (local assets inlined) to [ht-ml.app](https://ht-ml.app), a third-party host not part of Lavish, and print a visitable URL plus a secret update key; shares are public by default, `--private` locks one behind a generated password, and the same command republishes or unpublishes an existing page with `--site`/`--update-key`. |
 | `lavish-axi stop`               | Shut down the background server.                                                                                                                                                                                                                                                                                                                          |
 | `lavish-axi playbook [id]`      | List focused artifact guidance or show one playbook; agents must open each matching playbook before writing HTML.                                                                                                                                                                                                                                         |
-| `lavish-axi design`             | Show agent-facing design guidance, including optional CDN snippets and the whiteboard (Mermaid) opt-in snippet.                                                                                                                                                                                                                                           |
+| `lavish-axi design`             | Show agent-facing design guidance, including optional CDN snippets and the theme-aware Mermaid snippet for diagrams and whiteboards.                                                                                                                                                                                                                      |
 | `lavish-axi theme <dir>`        | Show, save (`--set <file.json>`) or clear (`--clear`) the theme Scrawl's frame wears for every page of the project `<dir>` is in.                                                                                                                                                                                                                         |
 | `lavish-axi setup hooks`        | Install or repair optional SessionStart hooks for Claude Code, Codex, OpenCode, and GitHub Copilot CLI; restart the agent session afterward.                                                                                                                                                                                                              |
 | `lavish-axi setup plugin`       | Register the installed package as an [Agent Plugin](https://agent-plugins.org) in VS Code, Cursor, and GitHub Copilot CLI; opt-in, idempotent, no marketplace involved. Reload each client afterward.                                                                                                                                                     |
@@ -348,7 +351,7 @@ pnpm link
 
 Known playbook IDs: `diagram`, `table`, `comparison`, `plan`, `code`, `input`, `explanation`, `slides`.
 One artifact often combines several playbooks, such as a plan that includes a comparison and a diagram, so agents must match against each `use_when` trigger and open every matching playbook before writing HTML.
-For flows, architecture, state, or sequence diagrams, open the diagram playbook for the recommended tooling and SVG guidance.
+For flows, architecture, state, or sequence diagrams, open the diagram playbook for the recommended figure tooling and its guidance.
 
 ### Flags
 

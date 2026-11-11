@@ -1,8 +1,8 @@
 /* A page in the Code Goblins board's look. A page links /design/board-tokens.css (the board's
    own token block, by value) and then this file, which lays plain HTML and a small set of page
-   patterns out in those tokens: a report, a comparison, a before and after, a table of
-   evidence, a decision. A colour written out here is one the board's stylesheet writes out for
-   the same kind of element, never a new one. */
+   patterns out in those tokens: a report, a comparison, an explore page the reader operates, a
+   before and after, a table of evidence, a decision. A colour written out here is one the board's
+   stylesheet writes out for the same kind of element, never a new one. */
 *,
 *::before,
 *::after {
@@ -122,6 +122,10 @@ hr {
 .page > section {
   display: grid;
   gap: 14px;
+  min-width: 0;
+}
+/* A part of a section, such as a form holding a wide table, never widens the page. */
+.page > section > * {
   min-width: 0;
 }
 .page-head {
@@ -257,6 +261,38 @@ hr {
   font-size: 0.9375rem;
 }
 
+/* The native controls a reader operates the page with, in the board's colours. */
+input,
+select,
+button {
+  font: inherit;
+  accent-color: var(--accent-green);
+}
+select,
+button {
+  min-height: 44px;
+  padding: 0 14px;
+  border: 1px solid var(--glass-border);
+  border-radius: var(--radius);
+  background: var(--field-bg);
+  color: inherit;
+}
+button {
+  cursor: pointer;
+}
+label:has(> input[type="radio"], > input[type="checkbox"]) {
+  display: inline-flex;
+  gap: 8px;
+  align-items: center;
+  min-height: 44px;
+  margin-right: 16px;
+  cursor: pointer;
+}
+summary {
+  cursor: pointer;
+  font-weight: 600;
+}
+
 /* A comparison: the options side by side, the recommended one lit. */
 .compare {
   display: grid;
@@ -359,6 +395,12 @@ hr {
 .evidence td {
   color: #c4d4df;
 }
+/* In its wrapper a table keeps its words whole, and on a phone it scrolls sideways. */
+.table-wrap td,
+.table-wrap th {
+  min-width: 5rem;
+  overflow-wrap: normal;
+}
 
 @media (max-width: 40rem) {
   body {
@@ -366,5 +408,9 @@ hr {
   }
   .card {
     padding: 16px;
+  }
+  .table-wrap td,
+  .table-wrap th {
+    min-width: 7rem;
   }
 }

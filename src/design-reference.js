@@ -49,13 +49,18 @@ export const MERMAID_CDN_SNIPPET = `<script type="module">
     ];
   }
 
+  // The colour the page is actually painted, body over html, as [r, g, b, a].
+  function pageBackground() {
+    const rootBackground = toRgba(getComputedStyle(document.documentElement).backgroundColor);
+    const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
+    return compositeRgba(bodyBackground, rootBackground);
+  }
+
   function pageIsDark() {
     // Trust the actually-rendered page background so this works with any theming
     // mechanism: prefers-color-scheme, a data-theme attribute, or plain CSS.
     const root = document.documentElement;
-    const rootBackground = toRgba(getComputedStyle(root).backgroundColor);
-    const bodyBackground = document.body ? toRgba(getComputedStyle(document.body).backgroundColor) : [0, 0, 0, 0];
-    const [r, g, b, a] = compositeRgba(bodyBackground, rootBackground);
+    const [r, g, b, a] = pageBackground();
     if (a > 0) {
       return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 < 0.5;
     }
@@ -65,7 +70,28 @@ export const MERMAID_CDN_SNIPPET = `<script type="module">
     return darkQuery.matches;
   }
 
-  const diagrams = [...document.querySelectorAll(".mermaid")].map((el) => ({ el, src: el.innerHTML }));
+  // The page's own colours on a diagram: an edge label sits on the page's background instead of
+  // Mermaid's grey box, and a node marked new (\`class queue,worker new\`) and a dashed edge take
+  // the page's accent, the board look's --accent-green or DaisyUI's --color-accent.
+  function diagramLook() {
+    const [r, g, b, a] = pageBackground();
+    const style = getComputedStyle(document.documentElement);
+    const accent =
+      style.getPropertyValue("--accent-green").trim() || style.getPropertyValue("--color-accent").trim();
+    return {
+      themeVariables:
+        a > 0 ? { edgeLabelBackground: \`rgb(\${Math.round(r)}, \${Math.round(g)}, \${Math.round(b)})\` } : {},
+      themeCSS: accent
+        ? \`.node.new rect, .node.new polygon, .node.new circle, .node.new ellipse, .node.new path { stroke: \${accent}; stroke-width: 2px; }
+          .flowchart-link.edge-pattern-dashed, .flowchart-link.edge-pattern-dotted { stroke: \${accent}; }\`
+        : "",
+    };
+  }
+
+  const diagrams = [...document.querySelectorAll(".mermaid, [data-lavish-mermaid]")].map((el) => ({
+    el,
+    src: el.innerHTML,
+  }));
   let applied;
   let rendering = false;
   let queued = false;
@@ -80,8 +106,10 @@ export const MERMAID_CDN_SNIPPET = `<script type="module">
       while (queued) {
         queued = false;
         const theme = pageIsDark() ? "dark" : "default";
-        if (theme === applied) continue;
-        mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict" });
+        const look = diagramLook();
+        const key = JSON.stringify([theme, look]);
+        if (key === applied) continue;
+        mermaid.initialize({ startOnLoad: false, theme, securityLevel: "strict", ...look });
         for (const { el, src } of diagrams) {
           el.removeAttribute("data-processed");
           el.innerHTML = src;
@@ -92,7 +120,7 @@ export const MERMAID_CDN_SNIPPET = `<script type="module">
           console.error("Mermaid diagram render failed:", error);
           return;
         }
-        applied = theme;
+        applied = key;
       }
     } finally {
       rendering = false;
@@ -180,7 +208,7 @@ export const BOARD_PAGE_PATTERNS = [
   </section>
   <section>
     <h2>A finding</h2>
-    <div class="card"><p>What it is, with the evidence.</p></div>
+    <p>What it is, with the evidence.</p>
   </section>
 </main>`,
   },
@@ -199,6 +227,37 @@ export const BOARD_PAGE_PATTERNS = [
     <p>What it is and what it costs.</p>
   </article>
 </section>`,
+  },
+  {
+    id: "explore",
+    use_when:
+      "The reader operates the page: a radio group of what matters most lights the option that fits it. The same shape steps through stages with a range input or filters rows with a select. Your own recommendation stays in view before any click, and nothing here sends anything.",
+    markup: `<section>
+  <h2>What matters most to you?</h2>
+  <p data-priorities>
+    <label><input type="radio" name="priority" value="soon"> Shipping it soon</label>
+    <label><input type="radio" name="priority" value="reach"> Covering every case</label>
+  </p>
+  <div class="compare">
+    <article class="card option recommended" data-fits="reach">
+      <h3>Option one <span class="recommendation">Recommended</span></h3>
+      <p>What it is and what it costs.</p>
+      <p data-fit-mark hidden><span class="chip after">Fits what matters most</span></p>
+    </article>
+    <article class="card option" data-fits="soon">
+      <h3>Option two</h3>
+      <p>What it is and what it costs.</p>
+      <p data-fit-mark hidden><span class="chip after">Fits what matters most</span></p>
+    </article>
+  </div>
+</section>
+<script>
+  document.querySelector("[data-priorities]").addEventListener("change", (event) => {
+    for (const option of document.querySelectorAll("[data-fits]")) {
+      option.querySelector("[data-fit-mark]").hidden = option.dataset.fits !== event.target.value;
+    }
+  });
+</script>`,
   },
   {
     id: "before_after",
@@ -251,7 +310,7 @@ export const DESIGN_PRIORITY_RULE =
 export const DESIGN_SYSTEM_HINT =
   "Lavish does not auto-inject any design system - artifacts stay portable so they render identically when opened directly without lavish-axi running. Before writing any HTML: " +
   DESIGN_PRIORITY_RULE +
-  " Run `lavish-axi design` for a content-to-playbook router, the board look's stylesheets and page patterns, a copy-pasteable CDN snippet, the whiteboard (Mermaid) opt-in snippet, the DaisyUI component reference, and how to save a project's theme for the review frame. When you deliver the artifact, state which of the three design sources you used and why.";
+  " Run `lavish-axi design` for a content-to-playbook router, the board look's stylesheets and page patterns, a copy-pasteable CDN snippet, the theme-aware Mermaid snippet for diagrams and whiteboards, the DaisyUI component reference, and how to save a project's theme for the review frame. When you deliver the artifact, state which of the three design sources you used and why.";
 
 export const DAISYUI_THEMES = [
   "light",
@@ -319,13 +378,13 @@ export function createDesignOutput() {
     },
     board_look: {
       use_when:
-        "The default for a page with no design direction of its own, step (3) of the priority order: a report, a comparison, a before and after, a table of evidence, a decision. A page that shows another product's UI wears that product's design instead, and a page may take any layout its content calls for.",
+        "The default for a page with no design direction of its own, step (3) of the priority order: a report, a comparison, an explore page the reader operates, a before and after, a table of evidence, a decision. A page that shows another product's UI wears that product's design instead, and a page may take any layout its content calls for.",
       stylesheet_snippet: BOARD_LOOK_SNIPPET,
       how: "Paste the two links into your `<head>`. The review server serves both, so the page stays small and always wears the board's current colours, its three fonts, edges and radii; `lavish-axi export` and `lavish-axi share` carry them inline, fonts included. Opened as a bare file the links resolve to nothing, so open the page through lavish-axi. Write plain semantic HTML and add only the classes the patterns below use. Add CSS of your own only for what they do not cover, and take every colour from the tokens (`var(--accent-green)`, `var(--mint)`, `var(--muted)`, `var(--glass-border)`, `var(--amber)`, `var(--red)`), never a new one.",
       patterns: BOARD_PAGE_PATTERNS,
       choices: {
         use_when:
-          "The page asks him to pick one of a few options. Never build an answer form, a notes box or a send button of your own: the review page is the one place he answers.",
+          "The page asks him to pick one of a few options. Never build an answer form, a notes box or a send button of your own: the review page is the one place he answers. When he must pick several items from a list, such as findings to fix, use the input playbook's tracked batch, whose one button only queues.",
         snippet: PAGE_CHOICES_SNIPPET,
         how: 'Put the declaration where the choices should appear, normally at the end of the page, as one question or a list of them. The review page draws each as the board draws a question: who asks, a plain radio list with the recommended option first and marked, Other for a written answer, and Send and End buttons. A pick sends nothing: it waits with his other notes on the page, and Send sends every note, the answer with them, and keeps the review open, while End sends them all and ends the review. His answer comes back as an ordinary prompt with tag "choice" whose prompt text is the option exactly as declared (or what he wrote for Other) and whose text is the question, so write each option as the answer itself, a short phrase, never a bare letter. `id` is required and stable. `recommended` must equal one of `options`. `asker` and `detail` are optional. Two to four options is the fleet\'s question contract.',
       },
@@ -355,7 +414,7 @@ export function createDesignOutput() {
     },
     whiteboard_tooling: {
       use_when:
-        "Opt-in only: author a diagram as Mermaid in a `.mermaid` container solely when the user asks for an editable whiteboard - Lavish turns it into an Excalidraw whiteboard whose edits come back as feedback. Every other figure is hand-authored inline SVG per the diagram playbook.",
+        "Every system, architecture and flow figure: put each diagram's source in a `<div data-lavish-mermaid>` inside a `<figure>` with its caption, and paste this snippet once. It renders every diagram in the page's light or dark theme and renders again when the theme changes. Edge labels sit on the page's own background, and the nodes you mark with `class <node ids> new` and the dashed edges are drawn in the page's accent. Never write your own `mermaid.initialize`, `%%{init}%%` line or `classDef` colours. In the Lavish browser the reader can leave a note on any node and pan and zoom in Explore mode. A `.mermaid` container is the whiteboard opt-in: use it only when the user asks for an editable whiteboard, and Lavish turns it into an Excalidraw whiteboard whose edits come back as feedback. Hand-authored inline SVG stays for the figures Mermaid cannot lay out, per the diagram playbook.",
       mermaid_cdn_snippet: MERMAID_CDN_SNIPPET,
       cdn_urls: { mermaid: MERMAID_CDN_URL },
       versions: { mermaid: MERMAID_VERSION },

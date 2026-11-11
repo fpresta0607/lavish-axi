@@ -9,9 +9,10 @@ export const PLAYBOOKS = [
     id: "diagram",
     use_when: "Explain relationships, flows, state, architecture, and concepts with illustrations",
     choose: [
-      "Default to hand-authored inline SVG: it gives proportion, emphasis, spatial metaphor, and annotation-ready structure that generated layouts cannot.",
-      "Use Mermaid only when the user asks for an editable whiteboard: rendered Mermaid in a `.mermaid` container becomes an Excalidraw whiteboard in the Lavish browser.",
-      "For large systems, draw a small overview illustration and put detail in module cards below it, instead of one dense auto-laid graph.",
+      "Draw a system, an architecture, a pipeline, a request path or any other flow as Mermaid: put its source in a `<div data-lavish-mermaid>` inside a `<figure>` and render it with the theme-aware snippet from `lavish-axi design`. Mermaid places the boxes and routes the arrows, so nothing overlaps, and in the Lavish browser the reader can leave a note on any node and pan and zoom in Explore mode.",
+      "Hand-author inline SVG for a figure whose shape carries the meaning, which Mermaid cannot lay out: a timeline or sizes drawn to scale, a screen layout, a before and after of one view.",
+      "Use a `.mermaid` container only when the user asks for an editable whiteboard: Lavish turns a diagram there into an Excalidraw whiteboard.",
+      "For a large system, draw a small overview first and explain each part in its own section below it, instead of one dense graph.",
     ],
     structure: [
       "Assume the reader knows nothing about the system or concept: explain from zero; do not presume prior familiarity.",
@@ -19,20 +20,25 @@ export const PLAYBOOKS = [
       "Lead with the question the diagram answers, not with the implementation detail that produced it.",
       "Keep the first visual to the core relationship, then put dense evidence or file references below it.",
       "For complex systems, separate topology from detail so the overview stays readable.",
+      "Label every edge with what moves along it or why it exists, such as `publishes alert` or `reads on open`, so the figure says how the parts work together.",
+      "Mark each new or changing part with `class <node ids> new` and draw each new edge dashed (`-.->`). The theme-aware snippet colours both in the page's accent, so write no `classDef` colours of your own, and say in the caption what the marking means.",
     ],
     design_rules: [
-      "Size with viewBox plus width:100%; never fixed pixel dimensions, and keep every element inside the viewBox.",
+      "In hand-authored SVG, size with viewBox plus width:100% and never fixed pixel dimensions, and keep every element inside the viewBox.",
       "Color through currentColor and the page's CSS custom properties so figures follow the artifact's light and dark themes.",
       "Give every meaningful node, edge, and region a stable id and a <title> so reviewers can annotate precisely.",
       "Keep labels to a few words and put prose beside the figure in HTML - SVG text does not wrap, so short labels are also the overflow discipline.",
-      "Keep figures self-contained: no external images, fonts, or scripts, so exports render offline.",
+      "Keep hand-authored figures self-contained, with no external images or fonts, so exports render offline. A Mermaid figure loads Mermaid from the pinned link in the design snippet.",
+      "Keep a Mermaid figure readable at the page's width, because a wide chart shrinks until its words are too small to read: draw it top-down with `flowchart TD` unless it is a chain of four or five steps, keep each node and edge label to a few words, keep it to about ten nodes, and split a bigger system into an overview and a figure per part. A one sentence caption under it says what to notice.",
+      "Never put a Mermaid figure in a closed `<details>` or a hidden panel: Mermaid measures its words as it draws, and a figure drawn while hidden comes out at zero size.",
       "Render-verify before serving: screenshot the artifact in light, dark, and a narrow viewport - the layout audit deliberately skips SVG interiors.",
-      "When the user asked for a whiteboard, initialize Mermaid theme-aware with the `lavish-axi design` snippet rather than hardcoding one theme.",
+      "Render every Mermaid figure, plain or whiteboard, with the theme-aware snippet from `lavish-axi design`, never with your own `mermaid.initialize` or an `%%{init}%%` line. It follows the page's light and dark themes, sets edge labels on the page's own background, and draws the parts marked new in the page's accent.",
     ],
     pitfalls: [
       "Do not cram every file or function into one figure when a layered explanation would be clearer.",
-      "Do not hand-build boxes-and-arrows from div/flexbox: inline SVG owns figures, HTML owns the prose around them.",
-      "Do not reach for Mermaid to save authoring effort - it surrenders position, size, and emphasis to the engine.",
+      "Do not hand-build boxes-and-arrows from div/flexbox: Mermaid or inline SVG owns figures, and HTML owns the prose around them.",
+      "Do not hand-place the boxes and arrows of a system or a flow in SVG: labels collide, the layout drifts as parts are added, and the next round cannot edit it as source.",
+      "Do not put a figure in a card. It sits on the page with its caption.",
       "Do not present unverified architecture claims as facts. Cite the files or commands that support them.",
     ],
     lavish_notes: [
@@ -45,8 +51,9 @@ export const PLAYBOOKS = [
     use_when: "Turn dense records into scan-friendly review surfaces",
     choose: [
       "Use a table when rows share the same fields and the user needs to compare evidence quickly.",
-      "Use cards when each record has a different shape or needs a long explanation.",
+      "Use a short section per record, under its own heading, when each record has a different shape or needs a long explanation.",
       "Use summaries above the table when counts, risk levels, or statuses change how the table should be read.",
+      "When rows fall into a few kinds, such as severities, give the reader a select or a radio group that filters the rows, with every row shown before any pick.",
     ],
     structure: [
       "Start with a short summary of what the rows prove or require.",
@@ -74,7 +81,8 @@ export const PLAYBOOKS = [
     use_when: "Show options, tradeoffs, and current vs target behavior",
     choose: [
       "Use before and after when the same system is changing over time.",
-      "Use option cards when the user needs to choose between mutually exclusive directions.",
+      "Use one card per option, side by side, when the user needs to choose between mutually exclusive directions. A card holds one option with nothing boxed inside it.",
+      "When what the reader cares about most changes the pick, let them say so on the page: the board look's explore pattern lights the option that fits each priority, with your recommendation in view before any click.",
       "Use a scorecard only when the criteria are explicit and comparable.",
     ],
     structure: [
@@ -94,7 +102,7 @@ export const PLAYBOOKS = [
     ],
     lavish_notes: [
       "A Lavish comparison should let the user annotate the exact option or tradeoff they want changed.",
-      "If the goal is selection, provide controls that queue the chosen option with rationale.",
+      "If the goal is selection, declare the question with `data-lavish-choices` (board_look.choices in `lavish-axi design`) instead of building a control of your own.",
     ],
   },
   {
@@ -108,6 +116,8 @@ export const PLAYBOOKS = [
     structure: [
       "Start with the goal, the current state, and desired behavior.",
       "Then describe a proposed approach, focusing on high level decisions.",
+      "When the approach adds, removes or rewires parts of a system, show the system as a Mermaid figure per the diagram playbook, with the new parts marked.",
+      "When the plan rolls out in stages, let the reader step through them with a range input or a select that shows what is live at each stage.",
       "At the end, list any risks you see, and open questions you have, and follow the 'comparison' playbook to provide options for the user to choose from.",
     ],
     design_rules: [
@@ -327,7 +337,7 @@ export const PLAYBOOKS = [
     design_rules: [
       "Define unfamiliar terms at first use; for the reader's starting point, follow the diagram playbook's assume-nothing rule rather than restating it here.",
       "Name the question the explanation answers at the top, so the reader knows whether it is their question.",
-      "Put prose beside figures - inline SVG for the flow or before/after, HTML for the reasoning - per the diagram playbook.",
+      "Put prose beside figures, Mermaid for a flow and inline SVG for a before and after, with HTML for the reasoning, per the diagram playbook.",
       "Link evidence rather than pasting logs or diffs; inlined evidence buries the narrative and goes stale.",
       "Distinguish verified claims (cited to files, commands, or links) from inference; label uncertain reasoning as a question.",
     ],
