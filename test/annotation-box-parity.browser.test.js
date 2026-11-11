@@ -117,10 +117,10 @@ function measure() {
     text: rect(textarea),
     value: textarea.value,
     attach: control(named(card, /^Attach image/)),
-    voice: control(named(card, /^(Recent dictations|Listening)$/)),
+    voice: control(named(card, /^(Recent dictations|Start dictation|Listening)$/)),
     picker: picker ? { accept: picker.accept, multiple: picker.multiple, capture: picker.hasAttribute("capture") } : null,
     shape: boxShape(textarea),
-    look: bubbleLook(named(card, /^(Recent dictations|Listening)$/)),
+    look: bubbleLook(named(card, /^(Recent dictations|Start dictation|Listening)$/)),
     chips: Array.prototype.map.call(card.querySelectorAll(".lavish-attachment-chip"), function (chip) { return chip.textContent.trim(); }),
     recent: Array.prototype.map.call(card.querySelectorAll('[role="dialog"][aria-label="Recent dictations"]:not([hidden]) li'), function (item) {
       return Array.prototype.map.call(item.querySelectorAll("button"), function (button) { return button.getAttribute("aria-label"); });
@@ -301,9 +301,10 @@ test(
 
     // Send to Agent, then what the agent's next poll is handed, read as the supervisor reads it.
     async function sendAndReadFeedback() {
-      await ask({ fixture: "measure" }, (measured) => !measured.card);
+      const added = await ask({ fixture: "measure" }, (measured) => !measured.card);
+      assert.deepEqual(added, { card: false, chip: false }, "the added note's box closes and leaves no chip");
       const shot = snapshot();
-      assert.ok(has(shot, /In your notes/), `the note waits in his notes for a send:\n${shot}`);
+      assert.ok(has(shot, /button "Edit note"/), `the note waits in his notes for a send:\n${shot}`);
       click(/button "Send to Agent"/);
       const response = await fetch(
         `http://127.0.0.1:${port}/api/poll?file=${encodeURIComponent(artifact)}&timeoutMs=30000`,
@@ -311,8 +312,6 @@ test(
       assert.equal(response.status, 200);
       const feedback = await response.json();
       assert.equal(feedback.status, "feedback", JSON.stringify(feedback));
-      const closed = await ask({ fixture: "measure" }, (measured) => !measured.card && !measured.chip);
-      assert.deepEqual(closed, { card: false, chip: false }, "the sent note's box closes");
       return feedback.prompts;
     }
 

@@ -148,6 +148,7 @@ const ARTIFACT = `<!doctype html>
 </body></html>`;
 
 const CARD_TEXTBOX = /textbox "Tell the agent what to change about this element\.\.\."/;
+// The chip a card used to shrink to once its note was added: nothing may draw it again.
 const CHIP = /"Comment on <h2>/;
 const MAIN_BOX = /textbox "Write a note on /;
 
@@ -227,7 +228,13 @@ test(
       fill(CARD_TEXTBOX, words);
       if (how === "Enter") press("Enter");
       else click(/button "Add to your notes"/);
-      await waitFor("the box never shrank to its chip", (shot) => !has(shot, CARD_TEXTBOX) && has(shot, CHIP));
+      // The box goes and leaves nothing: the note is in his notes, and nothing stays selected.
+      const added = await waitFor(
+        "the box never closed on its note",
+        (shot) => !has(shot, CARD_TEXTBOX) && shot.includes(words),
+      );
+      assert.equal(has(added, CHIP), false, `no chip takes the box's place:\n${added}`);
+      assert.ok(has(added, /textbox "Write a note on the whole page/), `nothing stays selected:\n${added}`);
     }
 
     // The 10-11 rule: the Conversation box keeps its paperclip at its bottom left and its
@@ -268,8 +275,9 @@ test(
       await noteOnHeading(/heading "Step 2\. Payment"/, "Make the payment step stand out", "Enter");
       await noteOnHeading(/heading "Step 3\. Review"/, "Say when the card is charged", "button");
 
-      // The chip keeps its heading selected, so the Conversation box names it; the reader puts
-      // the next note on the whole page instead.
+      // An open box selects its heading, so the Conversation box names it; the reader puts the
+      // next note on the whole page instead, which closes the empty box.
+      click(/heading "Step 3\. Review"/);
       const selected = await waitFor("the Conversation box never named the selection", (shot) =>
         has(shot, /button "Write about the whole page instead"/),
       );
@@ -278,7 +286,10 @@ test(
         assert.equal(assertBoxKeepsItsPlaces("with a selection").anchorShown, true);
       }
       click(/button "Write about the whole page instead"/);
-      await waitFor("the selection never cleared", (shot) => has(shot, /textbox "Write a note on the whole page/));
+      await waitFor(
+        "the selection never cleared",
+        (shot) => has(shot, /textbox "Write a note on the whole page/) && !has(shot, CARD_TEXTBOX),
+      );
       if (measure) assertBoxKeepsItsPlaces("with nothing selected");
       fill(MAIN_BOX, "Overall the flow reads well");
       press("Enter");
@@ -289,11 +300,17 @@ test(
       click(/button "Remove queued prompt"/, "last");
       await waitFor("the removed note never left", (shot) => !has(shot, /Take this one back/));
 
+      // The pencil opens the note in the Conversation box, where Enter saves it in its place.
       click(/button "Edit note"/);
-      await waitFor("the editor never opened", (shot) => has(shot, /textbox "Edit note"/));
-      fill(/textbox "Edit note"/, "Make the payment step stand out more");
+      await waitFor("the note never opened in the Conversation box", (shot) =>
+        has(shot, /textbox "Reword this note\.\.\."/),
+      );
+      fill(/textbox "Reword this note\.\.\."/, "Make the payment step stand out more");
       press("Enter");
-      await waitFor("the edit never saved", (shot) => has(shot, /Make the payment step stand out more/));
+      await waitFor(
+        "the edit never saved",
+        (shot) => has(shot, /Make the payment step stand out more/) && has(shot, MAIN_BOX),
+      );
 
       const before = await session(file);
       assert.deepEqual(before.prompts || [], [], "nothing is delivered before the send");

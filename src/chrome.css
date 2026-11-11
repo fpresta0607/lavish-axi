@@ -827,26 +827,10 @@ body.lavish {
   width: 16px;
   height: 16px;
 }
-/* A note reworded in place keeps the bubble's width; Enter saves and Escape keeps the old words. */
+/* The note open in the Conversation box to be reworded: its bubble is the one outlined. */
 .bubble.queued.editing {
-  align-self: stretch;
-}
-.queued-edit-input {
-  width: 100%;
-  min-height: 60px;
-  box-sizing: border-box;
-  resize: none;
-  field-sizing: content;
-}
-.queued-edit-actions {
-  display: flex;
-  justify-content: flex-end;
-  gap: 8px;
-  margin-top: 8px;
-}
-.queued-edit-actions button {
-  min-height: 36px;
-  padding: 4px 16px;
+  border-style: solid;
+  border-color: var(--accent-green);
 }
 /* The anchor line names what a note is attached to, in the annotation card's words. */
 .anchor {

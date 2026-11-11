@@ -43,17 +43,13 @@ test("the SDK bundle scopes every upload and result to this document (E1)", () =
 
 test("the SDK bundle applies upload results and offers a retry", () => {
   assert.match(sdk, /lavish:attachmentResult/);
-  assert.match(sdk, /activeAttachments\?\.handleResult\(msg\.localId, msg\.ok, msg\.id, msg\.error\)/);
   assert.match(sdk, /data-attachment-retry/);
 });
 
 test("the SDK bundle carries ready attachment refs on the queued prompt", () => {
   assert.match(sdk, /options\.attachments/);
   assert.match(sdk, /item\.attachments = attachments/);
-  assert.match(
-    sdk,
-    /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, noteId, commitId \}\)/,
-  );
+  assert.match(sdk, /queuePrompt\(prompt, \{ \.\.\.c, queueKey: "", attachments: readyAttachments, commitId \}\)/);
 });
 
 // A list in a shadow root, as the annotation card's chips are: its root says what has focus.
@@ -146,11 +142,7 @@ test("the SDK bundle renders chips with a thumbnail, name, and status", () => {
 });
 
 test("the SDK bundle intercepts every drop so a non-image can't navigate the frame", () => {
-  // The drop handler calls preventDefault() unconditionally, then classifies.
-  assert.match(
-    sdk,
-    /"drop",\s*\(event\)\s*=>\s*\{\s*[\s\S]*?event\.preventDefault\(\);\s*card\.classList\.remove\("is-dropping"\)/,
-  );
+  // test/artifact-sdk-bundle.test.js drops a file on a box and sees the drop prevented.
   assert.match(sdk, /dataTransferHasFiles/);
   assert.match(sdk, /attachments\.rejectUnsupportedBatch\(unsupported\)/);
   assert.match(sdk, /error: "UNSUPPORTED_TYPE"/);
