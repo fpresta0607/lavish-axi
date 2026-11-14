@@ -257,7 +257,8 @@ pnpm link
   A plain `lavish-axi <html-file>` after a user-initiated end refuses to reopen the browser and returns guidance instead; pass `--reopen` only when the user asks for further review or something important needs their visual attention.
   Agent-initiated ends keep reopening normally, same as before.
   `lavish-axi poll`'s `ended` response and the `feedback` response for the final batch before an end both carry `next_step` guidance telling the agent to stop polling and deliver remaining updates in chat instead of reopening.
-- **A page whose file is gone** - A session outlives its HTML file: when the file, or the worktree or folder it lived in, is deleted, Lavish keeps the session and its undelivered feedback.
+- **A page whose file is gone** - A session outlives its HTML file: when the file, or the worktree or folder it lived in, is deleted, Lavish keeps the session's undelivered feedback until a poll collects it.
+  When the file goes while Lavish is watching it, or its review page is loaded after the file went, Lavish ends the session by the same rule as `lavish-axi end --gone` below; a page deleted while no server ran stays open until it is ended.
   `lavish-axi end <html-file>` and `lavish-axi poll <html-file>` still find that session by the path it was opened with, so ending it works and a poll delivers whatever feedback waits, exactly as for a page that still exists.
   The session list (`lavish-axi` with no arguments) marks each such session `file_gone: true`.
   `lavish-axi end --gone` ends, in one call, every open session whose file is gone and that holds no undelivered feedback; one that still holds feedback is listed under `pending` and stays open until a poll collects it.
