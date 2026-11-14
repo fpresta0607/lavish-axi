@@ -80,6 +80,12 @@ async function startReview(t, pageNames, { isWatched = false, pollHeartbeatMs } 
       pages[name] = { file, worktree, key: seeded.key };
     }
   }
+  // chokidar starts its file watch after the open response, so a test counts watches only once
+  // every opened page has its one.
+  if (isWatched) {
+    const pageCount = Object.keys(pages).length;
+    assert.equal(await settledWatchHandles(pageCount), pageCount);
+  }
   return {
     base,
     pages,
