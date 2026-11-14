@@ -87,7 +87,7 @@ import {
   stateId,
 } from "./paths.js";
 import { detectTailscale, readTailscaleServeStatus, tailscaleHttpsProxyOrigin } from "./tailscale.js";
-import { canonicalFile, canonicalSessionFile, SessionStore, sessionKey } from "./session-store.js";
+import { canonicalFile, canonicalSessionFile, isFileGone, SessionStore, sessionKey } from "./session-store.js";
 import { AsyncMutex } from "./async-mutex.js";
 import { generateSharePassword } from "./share-password.js";
 import {
@@ -423,6 +423,8 @@ export async function serve({
   const store = new SessionStore(stateFile);
   const events = new EventEmitter();
   const watchers = new Map();
+  // Every way a session ends emits `ended`, and an ended session keeps no watcher.
+  events.on("ended", closeSessionWatcher);
   const activePolls = new Map();
   // A poll that just ended, still counted as listening until the release grace passes or a new
   // poll claims the page. It never owns the page: ownership and idle shutdown read activePolls.
@@ -922,7 +924,7 @@ export async function serve({
       }
       logEvent?.(`session opened key=${key} file=${file}`);
       await syncOutstandingRepairs(key);
-      await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
+      await watchSession(session, watchers, events, endGonePage, logEvent, reloadDebounceMs);
       res.json({
         key,
         file,
@@ -1538,11 +1540,7 @@ export async function serve({
 
   app.post("/api/end-gone", async (_req, res, next) => {
     try {
-      const { ended, pending } = await store.endGoneSessions();
-      for (const session of ended) {
-        clearFeedbackDelivery(session.key, activePolls, deliveredFeedback, lingeringPolls, events);
-        events.emit("ended", session.key, session.ended_by);
-      }
+      const { ended, pending } = await endGoneSessions();
       res.json({ ended: ended.map((session) => session.file), pending: pending.map((session) => session.file) });
       await shutdownIfNoLiveSessions();
     } catch (error) {
@@ -1570,7 +1568,7 @@ export async function serve({
         return;
       }
       const session = chromeLoad.session;
-      await watchSession(session, watchers, events, logEvent, reloadDebounceMs);
+      await watchSession(session, watchers, events, endGonePage, logEvent, reloadDebounceMs);
       const artifactHtml = await readFile(session.file, "utf8").catch(() => "");
       const { faviconTag, title } = extractArtifactHead(artifactHtml);
       const projectTheme = await loadProjectTheme(path.dirname(stateFile), session.file);
@@ -2461,6 +2459,34 @@ export async function serve({
     }
   }
 
+  function closeSessionWatcher(key) {
+    const watcher = watchers.get(key);
+    if (!watcher) return;
+    watchers.delete(key);
+    watcher.close().catch(() => {});
+  }
+
+  async function endGoneSessions() {
+    const { ended, pending } = await store.endGoneSessions();
+    for (const session of ended) {
+      clearFeedbackDelivery(session.key, activePolls, deliveredFeedback, lingeringPolls, events);
+      events.emit("ended", session.key, session.ended_by);
+    }
+    return { ended, pending };
+  }
+
+  // The page's file is gone, so its watch goes now. The server ends it by the same rule as
+  // `lavish-axi end --gone`: a session still holding feedback stays open until a poll takes it.
+  // This runs from a watcher event, where a rejection would take the whole server down.
+  async function endGonePage(key) {
+    closeSessionWatcher(key);
+    try {
+      await endGoneSessions();
+    } catch (error) {
+      writeLog(`[lavish] ending gone sessions failed: ${error instanceof Error ? error.message : String(error)}`);
+    }
+  }
+
   // A queued repair batch is outstanding until a diagnostic pass re-checks it. While it is, the
   // agent's related saves coalesce into one artifact refresh for that group.
   async function syncOutstandingRepairs(key) {
@@ -2893,11 +2919,27 @@ export async function resolveArtifactAsset(root, assetPath) {
   return real;
 }
 
+// A page that is gone is never watched: chokidar watches a missing page's folder instead, and on
+// Windows a watched folder that is then removed reports a rename on every event-loop turn for as
+// long as the watch lives, one core spent re-reading a folder that no longer exists. So a page
+// that is gone at watch time, or removed while watched, goes to `onPageGone` instead.
 /**
+ * @param {(key: string) => Promise<void>} onPageGone
  * @param {(key: string) => number} reloadDebounceMs
  */
-async function watchSession(session, watchers, events, logEvent, reloadDebounceMs = () => RELOAD_DEBOUNCE_MS) {
-  if (watchers.has(session.key)) {
+async function watchSession(
+  session,
+  watchers,
+  events,
+  onPageGone,
+  logEvent,
+  reloadDebounceMs = () => RELOAD_DEBOUNCE_MS,
+) {
+  if (session.status === "ended" || watchers.has(session.key)) {
+    return;
+  }
+  if (await isFileGone(session.file)) {
+    await onPageGone(session.key);
     return;
   }
   const target = await resolveWatchTarget(session);
@@ -2907,16 +2949,27 @@ async function watchSession(session, watchers, events, logEvent, reloadDebounceM
   logEvent?.(`watch session=${session.key} scope=${target.scope} path=${target.path}`);
   const watcher = chokidar.watch(target.path, target.options);
   let timer = null;
-  watcher.on("all", (event, file) => {
+  watcher.on("all", async (event, file) => {
     logEvent?.(`watch event=${event} session=${session.key} file=${file ?? ""}`);
     clearTimeout(timer);
+    // chokidar reports an editor's delete-and-rename save as a change, so an unlink is a page
+    // that stayed gone. It is checked again because a later `add` can bring it back.
+    if (event === "unlink" && path.resolve(file) === path.resolve(session.file)) {
+      if (await isFileGone(session.file)) await onPageGone(session.key);
+      return;
+    }
     timer = setTimeout(() => events.emit("reload", session.key), reloadDebounceMs(session.key));
   });
   watcher.on("error", (error) => {
     const message = error instanceof Error ? error.message : String(error);
     logEvent?.(`watch error session=${session.key} message=${message}`);
   });
-  watchers.set(session.key, watcher);
+  watchers.set(session.key, {
+    close: () => {
+      clearTimeout(timer);
+      return watcher.close();
+    },
+  });
 }
 
 // Watching the artifact's parent directory recursively can stall the event loop when the
