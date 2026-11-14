@@ -45,6 +45,7 @@ async function fetchJson(url, body, origin) {
 // server from stopping itself when the last gone session ends.
 // By default the sessions are written straight to state.json, so no server watcher sees the page
 // go (a page that went while no server was running). `isWatched` opens them through the server.
+/** @param {any} t @param {string[]} pageNames @param {{ isWatched?: boolean, pollHeartbeatMs?: number }} [options] */
 async function startReview(t, pageNames, { isWatched = false, pollHeartbeatMs } = {}) {
   const stateDir = await mkdtemp(path.join(os.tmpdir(), "lavish-gone-page-"));
   const server = await serve({
@@ -215,7 +216,8 @@ test("the server ends an open session whose page and then its folder are removed
   assert.equal(await settledWatchHandles(watching - 1), watching - 1);
 });
 
-for (const [name, endPage] of [
+/** @type {[string, (review: any, page: any) => Promise<any>][]} */
+const END_PATHS = [
   ["lavish-axi end", (review, page) => fetchJson(`${review.base}/api/end`, { file: page.file })],
   ["the reviewer's End", (review, page) => fetchJson(`${review.base}/api/${page.key}/end`, {}, review.base)],
   [
@@ -227,7 +229,9 @@ for (const [name, endPage] of [
         review.base,
       ),
   ],
-]) {
+];
+
+for (const [name, endPage] of END_PATHS) {
   test(`a session ended by ${name} holds no watcher and no poll`, async (t) => {
     const review = await startReview(t, ["ending"], { isWatched: true });
     const { ending } = review.pages;
